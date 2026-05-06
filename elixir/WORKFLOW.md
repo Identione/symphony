@@ -24,21 +24,59 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
-codex:
-  # Codex runs inside jai (https://jai.scs.stanford.edu/) as the outer sandbox.
-  # `sandbox_mode=danger-full-access` turns Codex's own sandbox off so we can
-  # bypass the workspace-write `.git` deny rule (https://github.com/openai/codex/issues/15505)
-  # without pinning to an old Codex. See ../SETUP.md (Approach A) for the
-  # full picture and the alternative `default_permissions`-based setup.
-  command: jai codex --config sandbox_mode=danger-full-access app-server
-  approval_policy: never
-  # Symphony skips supplying `sandbox`/`sandboxPolicy` on thread/start and
-  # turn/start; with Codex in danger-full-access there is nothing useful to
-  # supply. `thread_sandbox` and `turn_sandbox_policy` below are forced to nil
-  # by Symphony when this flag is true.
-  use_configured_permissions: true
-  thread_sandbox: workspace-write
-  turn_sandbox_policy: null
+  # Claude Agent SDK adapter (SPEC.md §10.8). Switch to `codex` to use the
+  # legacy Codex App-Server adapter — the nested `agent.codex` block below
+  # is preserved so the swap is one-line.
+  kind: claude
+  claude:
+    # Absolute path so `bash -lc` resolves it regardless of the per-issue
+    # workspace cwd that the sidecar is launched in.
+    command: uv run --directory /home/hniska/stash.tail-f.com/identione/symphoni-test-claude/elixir/priv/claude_agent python -m symphony_claude_agent
+    # Scope Claude auth to this CLAUDE_CONFIG_DIR so we use the identione
+    # Max subscription, not whatever ~/.claude/ happens to be logged into.
+    # Symphony's preflight checks <config_dir>/.credentials.json, and the
+    # sidecar inherits CLAUDE_CONFIG_DIR=<config_dir> at run time.
+    config_dir: ~/.claude-identione
+    model: claude-sonnet-4-6
+    # `dontAsk` denies anything not in `allowed_tools` without prompting,
+    # which is what we want for unattended runs. The whitelist below mirrors
+    # what Codex's `approval_policy: never` + workspace-write sandbox grants:
+    # full filesystem access plus shell, but no WebFetch/WebSearch and no
+    # unsupervised sub-agents.
+    permission_mode: dontAsk
+    allowed_tools:
+      - Read
+      - Glob
+      - Grep
+      - Edit
+      - Write
+      - MultiEdit
+      - Bash
+      - BashOutput
+      - KillBash
+      - TodoWrite
+      - NotebookEdit
+      # In-process MCP tool the sidecar exposes; round-trips back to Symphony
+      # so Linear auth never leaves the orchestrator.
+      - mcp__symphony__linear_graphql
+    # Do not inherit ~/.claude/settings.json or other host-level Claude Code
+    # settings — keep the sidecar's posture deterministic.
+    setting_sources: []
+  codex:
+    # Pinned to <=0.114.0: Codex 0.115.0+ enforces a hard-coded workspace-write
+    # `.git` deny rule that blocks unattended commits/pushes. See
+    # https://github.com/openai/codex/issues/15505 — lift the pin once fixed.
+    # Alternative (no pin needed): run via jai with
+    # `sandbox_mode=danger-full-access` and set `use_configured_permissions: true`
+    # below — see ../SETUP.md (Approach A).
+    command: npx --yes -p @openai/codex@0.114.0 -- codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
+    approval_policy: never
+    thread_sandbox: workspace-write
+    turn_sandbox_policy:
+      type: workspaceWrite
+      writableRoots:
+        - /home/hniska/code/.symphony-mirrors
+      networkAccess: true
 server:
   port: 3453
 ---
@@ -157,7 +195,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 4.  Start work by writing/updating a hierarchical plan in the workpad comment.
 5.  Ensure the workpad includes a compact environment stamp at the top as a code fence line:
     - Format: `<host>:<abs-workdir>@<short-sha>`
-    - Example: `devbox-01:/home/dev-user/code/symphony-workspaces/MT-32@7bdde33bc`
+    - Example: `devbox-01:/home/dev-user/code/workspaces/MT-32@7bdde33bc`
     - Do not include metadata already inferable from Linear issue fields (`issue ID`, `status`, `branch`, `PR link`).
 6.  Add explicit acceptance criteria and TODOs in checklist form in the same comment.
     - If changes are user-facing, include a UI walkthrough acceptance criterion that describes the end-to-end user path to validate.

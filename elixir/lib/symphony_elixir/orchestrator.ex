@@ -1239,7 +1239,10 @@ defmodule SymphonyElixir.Orchestrator do
     %{
       event: update[:event],
       message: update[:payload] || update[:raw],
-      timestamp: update[:timestamp]
+      timestamp: update[:timestamp],
+      # Carry `agent_kind` so the dashboard renderer can pick the right
+      # vocabulary (Claude events have a different shape than Codex's).
+      agent_kind: update[:agent_kind]
     }
   end
 

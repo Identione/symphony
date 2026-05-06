@@ -4,10 +4,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this repo is
 
-Symphony is a Linear-driven Codex orchestrator: it polls Linear for work, creates a per-issue workspace, and runs `codex app-server` against it. Two layers live here:
+Symphony is a Linear-driven coding-agent orchestrator: it polls Linear for work, creates a per-issue workspace, and runs a coding-agent session against it. The active adapter is selected per workflow via `agent.kind` (SPEC.md §10):
+
+- `codex` (default) — runs `codex app-server` directly via `SymphonyElixir.Codex.AppServer` (§10.7).
+- `claude` — launches the Python sidecar in `elixir/priv/claude_agent/` via `SymphonyElixir.Claude.AppServer` (§10.8); the sidecar hosts `claude-agent-sdk` and is configured for unattended sandboxed operation by default (`permission_mode: dontAsk` + tight `allowed_tools` whitelist + workspace-cwd boundary).
+
+Two layers live here:
 
 - **Top-level**: `SPEC.md` is the source-of-truth specification; the root `Makefile` launches the daemon against `elixir/WORKFLOW.md`.
-- **`elixir/`**: the reference Elixir/OTP implementation. `elixir/WORKFLOW.md` is the runtime workflow contract — both the launch config and the in-repo example/fixture. The implementation may be a *superset* of `SPEC.md` but must not conflict with it — when behavior diverges meaningfully, update `SPEC.md` in the same change.
+- **`elixir/`**: the reference Elixir/OTP implementation. The implementation may be a *superset* of `SPEC.md` but must not conflict with it — when behavior diverges meaningfully, update `SPEC.md` in the same change.
 
 There is no second implementation. All code work happens in `elixir/`.
 

@@ -1,0 +1,28 @@
+[project]
+name = "symphony-claude-agent"
+version = "0.1.0"
+description = "Symphony's Claude Agent SDK sidecar (SPEC.md §10.8)."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+  "claude-agent-sdk>=0.1.0",
+]
+
+[project.scripts]
+symphony-claude-agent = "symphony_claude_agent.__main__:main"
+
+[dependency-groups]
+dev = [
+  "pytest>=8",
+  "pytest-asyncio>=0.23",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["symphony_claude_agent"]

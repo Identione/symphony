@@ -1,7 +1,12 @@
 defmodule SymphonyElixir.Codex.AppServer do
   @moduledoc """
+  Codex App-Server adapter (SPEC.md §10.7).
+
   Minimal client for the Codex app-server JSON-RPC 2.0 stream over stdio.
+  Implements the `SymphonyElixir.Agent.Adapter` behaviour.
   """
+
+  @behaviour SymphonyElixir.Agent.Adapter
 
   require Logger
   alias SymphonyElixir.{Codex.DynamicTool, Config, PathSafety, SSH}

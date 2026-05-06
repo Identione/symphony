@@ -176,13 +176,22 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     }
   end
 
-  defp tool_error_payload({:linear_api_status, status}) do
-    %{
-      "error" => %{
-        "message" => "Linear GraphQL request failed with HTTP #{status}.",
-        "status" => status
-      }
+  defp tool_error_payload({:linear_api_status, status, body}) do
+    base = %{
+      "message" => "Linear GraphQL request failed with HTTP #{status}.",
+      "status" => status
     }
+
+    # Forward Linear's GraphQL `errors[]` so the agent can self-correct
+    # (e.g. "Cannot query field X. Did you mean Y?"). Without this the agent
+    # only sees "HTTP 400" with no actionable detail.
+    error =
+      case body do
+        %{"errors" => [_ | _] = errors} -> Map.put(base, "errors", errors)
+        _ -> base
+      end
+
+    %{"error" => error}
   end
 
   defp tool_error_payload({:linear_api_request, reason}) do

@@ -253,7 +253,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
       DynamicTool.execute(
         "linear_graphql",
         %{"query" => "query Viewer { viewer { id } }"},
-        linear_client: fn _query, _variables, _opts -> {:error, {:linear_api_status, 503}} end
+        linear_client: fn _query, _variables, _opts -> {:error, {:linear_api_status, 503, nil}} end
       )
 
     assert Jason.decode!(status_error["output"]) == %{
@@ -262,6 +262,37 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
                "status" => 503
              }
            }
+
+    # Bug fix (2026-05-07): when Linear returns a GraphQL validation error
+    # (most commonly HTTP 400 with `{"errors":[{"message":"Cannot query
+    # field …"}]}`), the agent needs to see the `errors[]` array so it can
+    # rewrite the query. Previously the body was discarded and the agent only
+    # saw "Linear GraphQL request failed with HTTP 400.", which left it
+    # unable to self-correct and the session stalled.
+    body = %{
+      "errors" => [
+        %{
+          "message" => "Cannot query field \"resolved\" on type \"Comment\". Did you mean \"resolvedAt\"?",
+          "extensions" => %{"code" => "GRAPHQL_VALIDATION_FAILED"}
+        }
+      ]
+    }
+
+    validation_error =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{"query" => "query GetIssue { issue(id: \"X\") { comments { nodes { resolved } } } }"},
+        linear_client: fn _q, _v, _opts -> {:error, {:linear_api_status, 400, body}} end
+      )
+
+    assert validation_error["success"] == false
+    decoded = Jason.decode!(validation_error["output"])
+    assert decoded["error"]["status"] == 400
+    assert decoded["error"]["message"] =~ "Linear GraphQL request failed"
+    assert is_list(decoded["error"]["errors"])
+
+    assert hd(decoded["error"]["errors"])["message"] =~
+             "Cannot query field \"resolved\" on type \"Comment\""
 
     request_error =
       DynamicTool.execute(

@@ -4,10 +4,11 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.Codex.AppServer
   alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
+
+  @log_value_limit 256
 
   @spec run(map(), pid() | nil, keyword()) :: :ok | no_return()
   def run(issue, codex_update_recipient \\ nil, opts \\ []) do
@@ -46,9 +47,111 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp codex_message_handler(recipient, issue) do
-    fn message ->
-      send_codex_update(recipient, issue, message)
+  # `@doc false` so the handler-shape test can drive it without going through
+  # `adapter.run_turn/4` (which would also need a real session).
+  @doc false
+  @spec compose_message_handler(module(), pid() | nil, Issue.t()) :: (map() -> :ok)
+  def compose_message_handler(adapter, recipient, issue) do
+    base = fn message -> send_codex_update(recipient, issue, message) end
+
+    case adapter do
+      SymphonyElixir.Claude.AppServer ->
+        fn message ->
+          log_claude_event(issue, message)
+          base.(message)
+        end
+
+      _ ->
+        base
+    end
+  end
+
+  @doc false
+  @spec log_claude_event(Issue.t(), map()) :: :ok
+  def log_claude_event(issue, %{event: type, payload: payload} = msg) do
+    sid = Map.get(msg, :session_id)
+    ctx = "#{issue_context(issue)}#{session_context(sid)}"
+    log_claude_event_line(type, ctx, payload)
+    :ok
+  end
+
+  def log_claude_event(_issue, _other), do: :ok
+
+  defp session_context(sid) when is_binary(sid), do: " session_id=#{sid}"
+  defp session_context(_), do: ""
+
+  # `Logger.info(fn -> … end)` defers message construction so the per-envelope
+  # path costs nothing when the level filters them out.
+
+  defp log_claude_event_line(:tool_call, ctx, payload) do
+    Logger.info(fn ->
+      "claude tool_call for #{ctx} name=#{Map.get(payload, :name)} input=#{fold(Map.get(payload, :input))}"
+    end)
+  end
+
+  defp log_claude_event_line(:assistant_message, ctx, payload) do
+    Logger.info(fn ->
+      ~s(claude assistant_message for #{ctx} text=#{fold_quote(Map.get(payload, :text))})
+    end)
+  end
+
+  defp log_claude_event_line(:turn_completed, ctx, payload) do
+    Logger.info(fn ->
+      usage = Map.get(payload, :usage, %{}) || %{}
+
+      "claude turn_completed for #{ctx} stop_reason=#{Map.get(payload, :stop_reason)} " <>
+        "num_turns=#{Map.get(payload, :num_turns)} " <>
+        "usage.input_tokens=#{Map.get(usage, :input_tokens)} " <>
+        "usage.output_tokens=#{Map.get(usage, :output_tokens)}"
+    end)
+  end
+
+  defp log_claude_event_line(:permission_request, ctx, payload) do
+    Logger.info(fn ->
+      "claude permission_request for #{ctx} request=#{fold(Map.get(payload, :request))}"
+    end)
+  end
+
+  defp log_claude_event_line(:system_init, ctx, _payload) do
+    Logger.info("claude system_init for #{ctx}")
+  end
+
+  defp log_claude_event_line(:log, _ctx, payload) do
+    src = Map.get(payload, :source) || "sidecar"
+    Logger.info("#{src}: #{Map.get(payload, :message)}")
+  end
+
+  defp log_claude_event_line(_other, _ctx, _payload), do: :ok
+
+  defp fold(nil), do: ""
+  defp fold(value) when is_binary(value), do: cap(value, @log_value_limit)
+
+  defp fold(value) do
+    case Jason.encode(value) do
+      {:ok, json} -> cap(json, @log_value_limit)
+      _ -> cap(inspect(value, limit: 50, printable_limit: @log_value_limit), @log_value_limit)
+    end
+  end
+
+  defp fold_quote(nil), do: ~s("")
+  defp fold_quote(value) when is_binary(value), do: ~s("#{cap(value, @log_value_limit)}")
+  defp fold_quote(value), do: ~s("#{cap(inspect(value), @log_value_limit)}")
+
+  # `byte_size` short-circuits the common short-string path without paying
+  # for grapheme counting (`String.length` is O(n)). Truncation still uses
+  # graphemes so we never split a multi-byte codepoint mid-character.
+  defp cap(string, limit) when is_binary(string) do
+    if byte_size(string) <= limit do
+      string
+    else
+      length = String.length(string)
+
+      if length <= limit do
+        string
+      else
+        truncated = String.slice(string, 0, limit)
+        "#{truncated}…(#{length - limit} more chars)"
+      end
     end
   end
 
@@ -79,54 +182,75 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+    adapter = Keyword.get(opts, :adapter, Config.adapter_module())
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+    Logger.info("Selected coding-agent adapter for #{issue_context(issue)}: #{inspect(adapter)}")
+
+    context = %{
+      adapter: adapter,
+      workspace: workspace,
+      codex_update_recipient: codex_update_recipient,
+      opts: opts,
+      issue_state_fetcher: issue_state_fetcher,
+      max_turns: max_turns
+    }
+
+    with {:ok, session} <- adapter.start_session(workspace, worker_host: worker_host) do
       try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        do_run_codex_turns(context, session, issue, 1)
       after
-        AppServer.stop_session(session)
+        adapter.stop_session(session)
       end
     end
   end
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+  defp do_run_codex_turns(context, app_session, issue, turn_number) do
+    %{adapter: adapter, opts: opts, max_turns: max_turns, codex_update_recipient: recipient} =
+      context
+
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
     with {:ok, turn_session} <-
-           AppServer.run_turn(
+           adapter.run_turn(
              app_session,
              prompt,
              issue,
-             on_message: codex_message_handler(codex_update_recipient, issue)
+             on_message: compose_message_handler(adapter, recipient, issue)
            ) do
-      Logger.info("Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} workspace=#{workspace} turn=#{turn_number}/#{max_turns}")
+      Logger.info(
+        "Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} " <>
+          "workspace=#{context.workspace} turn=#{turn_number}/#{max_turns}"
+      )
 
-      case continue_with_issue?(issue, issue_state_fetcher) do
-        {:continue, refreshed_issue} when turn_number < max_turns ->
-          Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
+      handle_turn_continuation(context, app_session, issue, turn_number)
+    end
+  end
 
-          do_run_codex_turns(
-            app_session,
-            workspace,
-            refreshed_issue,
-            codex_update_recipient,
-            opts,
-            issue_state_fetcher,
-            turn_number + 1,
-            max_turns
-          )
+  defp handle_turn_continuation(context, app_session, issue, turn_number) do
+    %{issue_state_fetcher: fetcher, max_turns: max_turns} = context
 
-        {:continue, refreshed_issue} ->
-          Logger.info("Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; returning control to orchestrator")
+    case continue_with_issue?(issue, fetcher) do
+      {:continue, refreshed_issue} when turn_number < max_turns ->
+        Logger.info(
+          "Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion " <>
+            "turn=#{turn_number}/#{max_turns}"
+        )
 
-          :ok
+        do_run_codex_turns(context, app_session, refreshed_issue, turn_number + 1)
 
-        {:done, _refreshed_issue} ->
-          :ok
+      {:continue, refreshed_issue} ->
+        Logger.info(
+          "Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; " <>
+            "returning control to orchestrator"
+        )
 
-        {:error, reason} ->
-          {:error, reason}
-      end
+        :ok
+
+      {:done, _refreshed_issue} ->
+        :ok
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 

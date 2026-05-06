@@ -97,7 +97,8 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert snapshot_entry.last_codex_message == %{
              event: :notification,
              message: %{method: "some-event"},
-             timestamp: now
+             timestamp: now,
+             agent_kind: nil
            }
   end
 
@@ -1452,6 +1453,99 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert StatusDashboard.humanize_codex_message(wrapped) =~ "turn completed"
     assert StatusDashboard.humanize_codex_message(wrapped) =~ "in 10"
+  end
+
+  describe "Claude adapter event rendering" do
+    test "tool_call → `claude: tool_call <name>`" do
+      msg = %{
+        event: :tool_call,
+        agent_kind: :claude,
+        message: %{name: "linear_graphql", input: %{"query" => "{ viewer { id } }"}}
+      }
+
+      assert StatusDashboard.humanize_codex_message(msg) =~ "claude: tool_call linear_graphql"
+    end
+
+    test "system_init → `claude: session started (<sid>)`" do
+      msg = %{
+        event: :system_init,
+        agent_kind: :claude,
+        message: %{session_id: "sess-x"}
+      }
+
+      assert StatusDashboard.humanize_codex_message(msg) == "claude: session started (sess-x)"
+    end
+
+    test "turn_completed → `claude: turn completed (<stop_reason>, in <X> out <Y>)`" do
+      msg = %{
+        event: :turn_completed,
+        agent_kind: :claude,
+        message: %{
+          stop_reason: "end_turn",
+          num_turns: 1,
+          usage: %{input_tokens: 1234, output_tokens: 567}
+        }
+      }
+
+      rendered = StatusDashboard.humanize_codex_message(msg)
+      assert rendered =~ "claude: turn completed"
+      assert rendered =~ "end_turn"
+      # `format_usage_counts` adds locale-style commas (1,234).
+      assert rendered =~ "1,234"
+      assert rendered =~ "567"
+    end
+
+    test "assistant_message → `claude: <truncated text>`" do
+      msg = %{
+        event: :assistant_message,
+        agent_kind: :claude,
+        message: %{text: "Looking at the file, I see…"}
+      }
+
+      assert StatusDashboard.humanize_codex_message(msg) =~ "claude: Looking at the file"
+    end
+
+    test "permission_request → `claude: permission request <tool>`" do
+      msg = %{
+        event: :permission_request,
+        agent_kind: :claude,
+        message: %{permission_request_id: "p1", request: %{"tool" => "Bash"}}
+      }
+
+      assert StatusDashboard.humanize_codex_message(msg) =~ "claude: permission request Bash"
+    end
+
+    test "log envelope → `claude: <source>: <message>`" do
+      msg = %{
+        event: :log,
+        agent_kind: :claude,
+        message: %{level: "info", source: "claude_cli", message: "hi"}
+      }
+
+      assert StatusDashboard.humanize_codex_message(msg) == "claude: claude_cli: hi"
+    end
+
+    test "error envelope → `claude: error: <reason>`" do
+      msg = %{
+        event: :error,
+        agent_kind: :claude,
+        message: %{error: "boom", category: "claude_sdk_error"}
+      }
+
+      assert StatusDashboard.humanize_codex_message(msg) =~ "claude: error: boom"
+    end
+
+    test "messages without agent_kind still route to Codex behaviour (backward compat)" do
+      msg = %{
+        event: :notification,
+        message: %{
+          payload: %{"method" => "turn/completed", "params" => %{"turn" => %{"status" => "completed"}}}
+        }
+      }
+
+      assert StatusDashboard.humanize_codex_message(msg) =~ "turn completed (completed)"
+      refute StatusDashboard.humanize_codex_message(msg) =~ "claude:"
+    end
   end
 
   test "status dashboard uses shell command line as exec command status text" do

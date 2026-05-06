@@ -105,6 +105,9 @@ defmodule SymphonyElixir.CoreTest do
 
     hooks = Map.get(config, "hooks", %{})
     assert is_map(hooks)
+    # `after_create` is required for the agent to have a workspace to operate
+    # on. `before_remove` is optional (some workflows use a plain HTTPS clone
+    # and don't need a teardown step).
     after_create = Map.get(hooks, "after_create")
     assert is_binary(after_create) and after_create != ""
     assert after_create =~ "git clone"
@@ -542,6 +545,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    baseline_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :normal})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -550,7 +554,8 @@ defmodule SymphonyElixir.CoreTest do
     assert MapSet.member?(state.completed, issue_id)
     assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue_id]
     assert is_integer(due_at_ms)
-    assert_due_in_range(due_at_ms, 500, 1_100)
+    # Continuation retry is scheduled ~1s after the worker exit.
+    assert_due_in_range(due_at_ms, baseline_ms, 1_000)
   end
 
   test "abnormal worker exit increments retry attempt progressively" do
@@ -583,6 +588,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    baseline_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -590,7 +596,8 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 39_500, 40_500)
+    # Attempt 3 backoff is ~40s.
+    assert_due_in_range(due_at_ms, baseline_ms, 40_000)
   end
 
   test "first abnormal worker exit waits before retrying" do
@@ -622,6 +629,7 @@ defmodule SymphonyElixir.CoreTest do
       |> Map.put(:retry_attempts, %{})
     end)
 
+    baseline_ms = System.monotonic_time(:millisecond)
     send(pid, {:DOWN, ref, :process, self(), :boom})
     Process.sleep(50)
     state = :sys.get_state(pid)
@@ -629,7 +637,8 @@ defmodule SymphonyElixir.CoreTest do
     assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
              state.retry_attempts[issue_id]
 
-    assert_due_in_range(due_at_ms, 9_000, 10_500)
+    # First abnormal-exit retry is scheduled ~10s out.
+    assert_due_in_range(due_at_ms, baseline_ms, 10_000, 750)
   end
 
   test "stale retry timer messages do not consume newer retry entries" do
@@ -749,11 +758,21 @@ defmodule SymphonyElixir.CoreTest do
     assert Orchestrator.select_worker_host_for_test(state, "worker-a") == "worker-a"
   end
 
-  defp assert_due_in_range(due_at_ms, min_remaining_ms, max_remaining_ms) do
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
+  # Asserts the orchestrator scheduled `due_at_ms` within `expected_offset_ms ± tolerance_ms`
+  # of `baseline_ms`. Using a captured baseline (the time we triggered the retry) instead
+  # of `System.monotonic_time(:millisecond)` at assert-time keeps the test deterministic
+  # under load — `Process.sleep(50)` between trigger and assert can take much longer
+  # under coverage instrumentation, but the scheduled offset itself does not drift.
+  defp assert_due_in_range(due_at_ms, baseline_ms, expected_offset_ms, tolerance_ms \\ 250) do
+    offset_ms = due_at_ms - baseline_ms
+    min_offset = expected_offset_ms - tolerance_ms
+    max_offset = expected_offset_ms + tolerance_ms
 
-    assert remaining_ms >= min_remaining_ms
-    assert remaining_ms <= max_remaining_ms
+    assert offset_ms >= min_offset,
+           "scheduled offset #{offset_ms}ms is below #{min_offset}ms (expected ~#{expected_offset_ms}ms)"
+
+    assert offset_ms <= max_offset,
+           "scheduled offset #{offset_ms}ms is above #{max_offset}ms (expected ~#{expected_offset_ms}ms)"
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:symphony_elixir, key)

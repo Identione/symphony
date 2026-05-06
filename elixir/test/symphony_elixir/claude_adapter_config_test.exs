@@ -1,0 +1,223 @@
+defmodule SymphonyElixir.ClaudeAdapterConfigTest do
+  use SymphonyElixir.TestSupport
+  alias SymphonyElixir.Config.Schema
+  alias SymphonyElixir.Config.Schema.{Agent, Claude}
+
+  defp parse(yaml) do
+    {:ok, raw} = YamlElixir.read_from_string(yaml)
+    Schema.parse(raw)
+  end
+
+  test "agent.kind defaults to codex when unspecified" do
+    assert {:ok, settings} = parse(~s|tracker: {kind: linear, project_slug: p, api_key: t}\n|)
+    assert settings.agent.kind == "codex"
+  end
+
+  test "agent.kind parses claude when set" do
+    yaml = """
+    tracker: {kind: linear, project_slug: p, api_key: t}
+    agent:
+      kind: claude
+    """
+
+    assert {:ok, settings} = parse(yaml)
+    assert settings.agent.kind == "claude"
+  end
+
+  test "agent.kind rejects unsupported values" do
+    yaml = """
+    tracker: {kind: linear, project_slug: p, api_key: t}
+    agent:
+      kind: gemini
+    """
+
+    assert {:error, {:invalid_workflow_config, message}} = parse(yaml)
+    assert message =~ "agent.kind"
+  end
+
+  test "agent.codex.* mirrors top-level codex defaults" do
+    assert {:ok, settings} = parse(~s|tracker: {kind: linear, project_slug: p, api_key: t}\n|)
+    assert settings.agent.codex.command == "codex app-server"
+    assert settings.agent.codex.turn_timeout_ms == 3_600_000
+    assert settings.agent.codex.read_timeout_ms == 5_000
+    assert settings.agent.codex.stall_timeout_ms == 300_000
+  end
+
+  test "agent.codex.* overrides under nested block" do
+    yaml = """
+    tracker: {kind: linear, project_slug: p, api_key: t}
+    agent:
+      codex:
+        command: "codex --custom app-server"
+        turn_timeout_ms: 1234
+    """
+
+    assert {:ok, settings} = parse(yaml)
+    assert settings.agent.codex.command == "codex --custom app-server"
+    assert settings.agent.codex.turn_timeout_ms == 1234
+  end
+
+  test "legacy top-level codex block is still honored when agent.codex is absent" do
+    yaml = """
+    tracker: {kind: linear, project_slug: p, api_key: t}
+    codex:
+      command: "legacy-codex app-server"
+      turn_timeout_ms: 9876
+    """
+
+    assert {:ok, settings} = parse(yaml)
+    assert settings.agent.codex.command == "legacy-codex app-server"
+    assert settings.agent.codex.turn_timeout_ms == 9876
+    # legacy field still readable for back-compat
+    assert settings.codex.command == "legacy-codex app-server"
+  end
+
+  test "agent.claude defaults are present" do
+    assert {:ok, settings} = parse(~s|tracker: {kind: linear, project_slug: p, api_key: t}\n|)
+    assert settings.agent.claude.permission_mode == "dontAsk"
+    assert settings.agent.claude.system_prompt_preset == "claude_code"
+    assert settings.agent.claude.allowed_tools == []
+    assert settings.agent.claude.disallowed_tools == []
+    assert settings.agent.claude.setting_sources == []
+    assert settings.agent.claude.turn_timeout_ms == 3_600_000
+    assert settings.agent.claude.read_timeout_ms == 30_000
+    assert settings.agent.claude.stall_timeout_ms == 300_000
+    assert settings.agent.claude.extra_env == %{}
+    assert is_binary(settings.agent.claude.command)
+    # `verbose=false` keeps the SDK's noisier streams (partial messages,
+    # hook events) off by default; users opt in for debugging.
+    assert settings.agent.claude.verbose == false
+  end
+
+  test "agent.claude accepts overrides" do
+    yaml = """
+    tracker: {kind: linear, project_slug: p, api_key: t}
+    agent:
+      kind: claude
+      claude:
+        command: "uv run python -m my_sidecar"
+        model: "claude-sonnet-4-6"
+        permission_mode: "acceptEdits"
+        allowed_tools: ["Read", "Edit", "Write"]
+        disallowed_tools: ["Bash"]
+        system_prompt_preset: "minimal"
+        setting_sources: ["project"]
+        max_turns: 50
+        max_budget_usd: 5.5
+        extra_env:
+          HELLO: world
+        turn_timeout_ms: 1800000
+        read_timeout_ms: 7000
+        stall_timeout_ms: 60000
+        verbose: true
+    """
+
+    assert {:ok, settings} = parse(yaml)
+    claude = settings.agent.claude
+    assert claude.command == "uv run python -m my_sidecar"
+    assert claude.model == "claude-sonnet-4-6"
+    assert claude.permission_mode == "acceptEdits"
+    assert claude.allowed_tools == ["Read", "Edit", "Write"]
+    assert claude.disallowed_tools == ["Bash"]
+    assert claude.system_prompt_preset == "minimal"
+    assert claude.setting_sources == ["project"]
+    assert claude.max_turns == 50
+    assert claude.max_budget_usd == 5.5
+    assert claude.extra_env == %{"HELLO" => "world"}
+    assert claude.turn_timeout_ms == 1_800_000
+    assert claude.read_timeout_ms == 7_000
+    assert claude.stall_timeout_ms == 60_000
+    assert claude.verbose == true
+  end
+
+  test "agent.claude.config_dir defaults to nil" do
+    assert {:ok, settings} = parse(~s|tracker: {kind: linear, project_slug: p, api_key: t}\n|)
+    assert settings.agent.claude.config_dir == nil
+  end
+
+  test "agent.claude.config_dir parses as a string and `~` is preserved for sidecar" do
+    yaml = """
+    tracker: {kind: linear, project_slug: p, api_key: t}
+    agent:
+      kind: claude
+      claude:
+        config_dir: "~/.claude-identione"
+    """
+
+    assert {:ok, settings} = parse(yaml)
+    assert settings.agent.claude.config_dir == "~/.claude-identione"
+  end
+
+  test "agent.claude rejects bad permission_mode" do
+    yaml = """
+    tracker: {kind: linear, project_slug: p, api_key: t}
+    agent:
+      kind: claude
+      claude:
+        permission_mode: "yolo"
+    """
+
+    assert {:error, {:invalid_workflow_config, message}} = parse(yaml)
+    assert message =~ "agent.claude.permission_mode"
+  end
+
+  test "agent.claude rejects bad system_prompt_preset" do
+    yaml = """
+    tracker: {kind: linear, project_slug: p, api_key: t}
+    agent:
+      kind: claude
+      claude:
+        system_prompt_preset: "weird"
+    """
+
+    assert {:error, {:invalid_workflow_config, message}} = parse(yaml)
+    assert message =~ "agent.claude.system_prompt_preset"
+  end
+
+  describe "schema accessors" do
+    test "Agent.kinds/0 lists supported adapter kinds" do
+      assert Agent.kinds() == ["codex", "claude"]
+    end
+
+    test "Claude.permission_modes/0 lists Python SDK permission modes" do
+      assert Claude.permission_modes() ==
+               ["default", "acceptEdits", "plan", "dontAsk", "bypassPermissions"]
+    end
+
+    test "Claude.system_prompt_presets/0 lists supported presets" do
+      assert Claude.system_prompt_presets() == ["claude_code", "minimal"]
+    end
+  end
+
+  describe "agent.kind validation in Agent changeset edge cases" do
+    test "agent.codex nested overrides do not require all fields" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      agent:
+        kind: codex
+        codex:
+          turn_timeout_ms: 7777
+      """
+
+      assert {:ok, settings} = parse(yaml)
+      assert settings.agent.codex.turn_timeout_ms == 7777
+      # Other Codex defaults survive partial nested override
+      assert settings.agent.codex.read_timeout_ms == 5_000
+    end
+
+    test "legacy top-level codex with nested agent.codex prefers agent.codex" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      codex:
+        command: "legacy"
+      agent:
+        kind: codex
+        codex:
+          command: "winner"
+      """
+
+      assert {:ok, settings} = parse(yaml)
+      assert settings.agent.codex.command == "winner"
+    end
+  end
+end
