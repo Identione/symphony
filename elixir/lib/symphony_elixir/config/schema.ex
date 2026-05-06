@@ -119,37 +119,6 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  defmodule Agent do
-    @moduledoc false
-    use Ecto.Schema
-    import Ecto.Changeset
-
-    alias SymphonyElixir.Config.Schema
-
-    @primary_key false
-    embedded_schema do
-      field(:max_concurrent_agents, :integer, default: 10)
-      field(:max_turns, :integer, default: 20)
-      field(:max_retry_backoff_ms, :integer, default: 300_000)
-      field(:max_concurrent_agents_by_state, :map, default: %{})
-    end
-
-    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
-    def changeset(schema, attrs) do
-      schema
-      |> cast(
-        attrs,
-        [:max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
-        empty_values: []
-      )
-      |> validate_number(:max_concurrent_agents, greater_than: 0)
-      |> validate_number(:max_turns, greater_than: 0)
-      |> validate_number(:max_retry_backoff_ms, greater_than: 0)
-      |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
-      |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
-    end
-  end
-
   defmodule Codex do
     @moduledoc false
     use Ecto.Schema
@@ -198,6 +167,133 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+    end
+  end
+
+  defmodule Claude do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @permission_modes ~w(default acceptEdits plan dontAsk bypassPermissions)
+    @system_prompt_presets ~w(claude_code minimal)
+
+    @default_command "uv run --project priv/claude_agent python -m symphony_claude_agent"
+
+    @primary_key false
+    embedded_schema do
+      field(:command, :string, default: @default_command)
+      field(:model, :string)
+      field(:permission_mode, :string, default: "dontAsk")
+      field(:allowed_tools, {:array, :string}, default: [])
+      field(:disallowed_tools, {:array, :string}, default: [])
+      field(:system_prompt_preset, :string, default: "claude_code")
+      field(:setting_sources, {:array, :string}, default: [])
+      field(:max_turns, :integer)
+      field(:max_budget_usd, :float)
+      field(:extra_env, :map, default: %{})
+      field(:turn_timeout_ms, :integer, default: 3_600_000)
+      # Cold sidecar startup (uv → Python interpreter → claude_agent_sdk
+      # import → SDK __aenter__) takes ~6 s on a warm cache, more under load.
+      # 30 s gives comfortable headroom over that without masking real hangs.
+      field(:read_timeout_ms, :integer, default: 30_000)
+      field(:stall_timeout_ms, :integer, default: 300_000)
+      # When set, Symphony scopes Claude auth to this CLAUDE_CONFIG_DIR — both
+      # for preflight (looks for `<config_dir>/.credentials.json`) and at run
+      # time (sidecar Port inherits CLAUDE_CONFIG_DIR=<config_dir>). Useful
+      # for users with multiple Claude logins on one machine.
+      field(:config_dir, :string)
+      # When true, the sidecar enables `include_partial_messages` and
+      # `include_hook_events` on ClaudeAgentOptions for richer tracing.
+      # Off by default — partial-stream events would flood symphony.log.
+      field(:verbose, :boolean, default: false)
+    end
+
+    @spec permission_modes() :: [String.t()]
+    def permission_modes, do: @permission_modes
+
+    @spec system_prompt_presets() :: [String.t()]
+    def system_prompt_presets, do: @system_prompt_presets
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :command,
+          :model,
+          :permission_mode,
+          :allowed_tools,
+          :disallowed_tools,
+          :system_prompt_preset,
+          :setting_sources,
+          :max_turns,
+          :max_budget_usd,
+          :extra_env,
+          :turn_timeout_ms,
+          :read_timeout_ms,
+          :stall_timeout_ms,
+          :config_dir,
+          :verbose
+        ],
+        empty_values: []
+      )
+      |> validate_required([:command])
+      |> validate_inclusion(:permission_mode, @permission_modes)
+      |> validate_inclusion(:system_prompt_preset, @system_prompt_presets)
+      |> validate_number(:turn_timeout_ms, greater_than: 0)
+      |> validate_number(:read_timeout_ms, greater_than: 0)
+      |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:max_turns, greater_than: 0)
+    end
+  end
+
+  defmodule Agent do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema
+
+    @kinds ~w(codex claude)
+
+    @primary_key false
+    embedded_schema do
+      field(:max_concurrent_agents, :integer, default: 10)
+      field(:max_turns, :integer, default: 20)
+      field(:max_retry_backoff_ms, :integer, default: 300_000)
+      field(:max_concurrent_agents_by_state, :map, default: %{})
+      field(:kind, :string, default: "codex")
+      embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
+      embeds_one(:claude, Claude, on_replace: :update, defaults_to_struct: true)
+    end
+
+    @spec kinds() :: [String.t()]
+    def kinds, do: @kinds
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :max_concurrent_agents,
+          :max_turns,
+          :max_retry_backoff_ms,
+          :max_concurrent_agents_by_state,
+          :kind
+        ],
+        empty_values: []
+      )
+      |> cast_embed(:codex, with: &Codex.changeset/2)
+      |> cast_embed(:claude, with: &Claude.changeset/2)
+      |> validate_inclusion(:kind, @kinds)
+      |> validate_number(:max_concurrent_agents, greater_than: 0)
+      |> validate_number(:max_turns, greater_than: 0)
+      |> validate_number(:max_retry_backoff_ms, greater_than: 0)
+      |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
+      |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
     end
   end
 
@@ -279,6 +375,7 @@ defmodule SymphonyElixir.Config.Schema do
   def parse(config) when is_map(config) do
     config
     |> normalize_keys()
+    |> apply_legacy_codex_alias()
     |> drop_nil_values()
     |> changeset()
     |> apply_action(:validate)
@@ -290,6 +387,22 @@ defmodule SymphonyElixir.Config.Schema do
         {:error, {:invalid_workflow_config, format_errors(changeset)}}
     end
   end
+
+  defp apply_legacy_codex_alias(%{"codex" => codex_block} = config) when is_map(codex_block) do
+    agent_block = Map.get(config, "agent", %{})
+    agent_block = if is_map(agent_block), do: agent_block, else: %{}
+
+    case Map.get(agent_block, "codex") do
+      nil ->
+        merged_agent = Map.put(agent_block, "codex", codex_block)
+        Map.put(config, "agent", merged_agent)
+
+      _existing ->
+        config
+    end
+  end
+
+  defp apply_legacy_codex_alias(config), do: config
 
   @spec resolve_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil) :: map() | nil
   def resolve_turn_sandbox_policy(settings, workspace \\ nil) do

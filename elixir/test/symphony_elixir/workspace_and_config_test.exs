@@ -458,25 +458,26 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   test "linear client logs response bodies for non-200 graphql responses" do
+    body = %{
+      "errors" => [
+        %{
+          "message" => "Variable \"$ids\" got invalid value",
+          "extensions" => %{"code" => "BAD_USER_INPUT"}
+        }
+      ]
+    }
+
     log =
       ExUnit.CaptureLog.capture_log(fn ->
-        assert {:error, {:linear_api_status, 400}} =
+        # The error tuple now carries the parsed body so the agent (via
+        # Codex.DynamicTool) can surface the GraphQL `errors[]` array to
+        # Claude/Codex for self-correction. Bug fix 2026-05-07.
+        assert {:error, {:linear_api_status, 400, ^body}} =
                  Client.graphql(
                    "query Viewer { viewer { id } }",
                    %{},
                    request_fun: fn _payload, _headers ->
-                     {:ok,
-                      %{
-                        status: 400,
-                        body: %{
-                          "errors" => [
-                            %{
-                              "message" => "Variable \"$ids\" got invalid value",
-                              "extensions" => %{"code" => "BAD_USER_INPUT"}
-                            }
-                          ]
-                        }
-                      }}
+                     {:ok, %{status: 400, body: body}}
                    end
                  )
       end)

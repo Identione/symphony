@@ -1071,6 +1071,13 @@ defmodule SymphonyElixir.StatusDashboard do
   @spec humanize_codex_message(term()) :: String.t()
   def humanize_codex_message(nil), do: "no codex message yet"
 
+  # `agent_kind: :claude` routes to Claude vocabulary (different envelope
+  # shape) with a `claude:` prefix so the UI clearly distinguishes adapters.
+  def humanize_codex_message(%{event: event, message: message, agent_kind: :claude}) do
+    ("claude: " <> humanize_claude_event(event, message))
+    |> truncate(140)
+  end
+
   def humanize_codex_message(%{event: event, message: message}) do
     payload = unwrap_codex_message_payload(message)
 
@@ -1091,6 +1098,39 @@ defmodule SymphonyElixir.StatusDashboard do
     |> humanize_codex_payload()
     |> truncate(140)
   end
+
+  defp humanize_claude_event(:tool_call, %{name: name}) when is_binary(name),
+    do: "tool_call #{name}"
+
+  defp humanize_claude_event(:system_init, %{session_id: sid}) when is_binary(sid),
+    do: "session started (#{sid})"
+
+  defp humanize_claude_event(:turn_completed, %{} = payload) do
+    stop_reason = Map.get(payload, :stop_reason, "completed")
+    usage = Map.get(payload, :usage, %{}) || %{}
+
+    suffix =
+      case format_usage_counts(usage) do
+        nil -> ""
+        text -> ", #{text}"
+      end
+
+    "turn completed (#{stop_reason}#{suffix})"
+  end
+
+  defp humanize_claude_event(:assistant_message, %{text: text}) when is_binary(text), do: inline_text(text)
+
+  defp humanize_claude_event(:permission_request, %{request: %{"tool" => tool}}) when is_binary(tool),
+    do: "permission request #{tool}"
+
+  defp humanize_claude_event(:log, %{message: msg, source: source}) when is_binary(msg) and is_binary(source),
+    do: "#{source}: #{msg}"
+
+  defp humanize_claude_event(:log, %{message: msg}) when is_binary(msg), do: "log: #{msg}"
+
+  defp humanize_claude_event(:error, %{error: reason}) when is_binary(reason), do: "error: #{reason}"
+
+  defp humanize_claude_event(_event, payload), do: humanize_codex_payload(payload)
 
   defp summarize_message(message), do: humanize_codex_message(message)
 

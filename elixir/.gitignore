@@ -53,3 +53,4 @@ status.txt
 
 # Ignore package tarball (built via "mix hex.build").
 symphony_elixir-*.tar
+priv/claude_agent/**/__pycache__/

@@ -91,6 +91,18 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @doc """
+  Resolve the coding-agent adapter module to use for new sessions, based on
+  `agent.kind` (SPEC.md §10.1). Defaults to `SymphonyElixir.Codex.AppServer`.
+  """
+  @spec adapter_module() :: module()
+  def adapter_module do
+    case settings!().agent.kind do
+      "claude" -> SymphonyElixir.Claude.AppServer
+      _ -> SymphonyElixir.Codex.AppServer
+    end
+  end
+
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
     with {:ok, settings} <- settings() do
@@ -118,21 +130,119 @@ defmodule SymphonyElixir.Config do
   defp codex_thread_sandbox(settings), do: settings.codex.thread_sandbox
 
   defp validate_semantics(settings) do
+    with :ok <- validate_tracker(settings.tracker) do
+      validate_agent(settings.agent)
+    end
+  end
+
+  defp validate_tracker(tracker) do
     cond do
-      is_nil(settings.tracker.kind) ->
+      is_nil(tracker.kind) ->
         {:error, :missing_tracker_kind}
 
-      settings.tracker.kind not in ["linear", "memory"] ->
-        {:error, {:unsupported_tracker_kind, settings.tracker.kind}}
+      tracker.kind not in ["linear", "memory"] ->
+        {:error, {:unsupported_tracker_kind, tracker.kind}}
 
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.api_key) ->
+      tracker.kind == "linear" and not is_binary(tracker.api_key) ->
         {:error, :missing_linear_api_token}
 
-      settings.tracker.kind == "linear" and not is_binary(settings.tracker.project_slug) ->
+      tracker.kind == "linear" and not is_binary(tracker.project_slug) ->
         {:error, :missing_linear_project_slug}
 
       true ->
         :ok
+    end
+  end
+
+  defp validate_agent(%{kind: "claude"} = agent) do
+    if claude_credentials_present?(agent) do
+      :ok
+    else
+      {:error, :missing_claude_credentials}
+    end
+  end
+
+  defp validate_agent(_agent), do: :ok
+
+  # Mirrors Claude Code's own auth precedence so a Max/Pro subscriber who is
+  # already logged into the `claude` CLI does not need to provision a separate
+  # Console API key just to satisfy Symphony's preflight. Order:
+  #
+  #   1. ANTHROPIC_API_KEY                    (Console API key)
+  #   2. ANTHROPIC_AUTH_TOKEN                 (custom auth token)
+  #   3. CLAUDE_CODE_OAUTH_TOKEN              (`claude setup-token` long-lived token)
+  #   4. CLAUDE_CODE_USE_{BEDROCK,VERTEX,FOUNDRY} + provider creds (cloud routing)
+  #   5. agent.claude.config_dir/.credentials.json
+  #      OR $CLAUDE_CONFIG_DIR/.credentials.json
+  #      OR ~/.claude/.credentials.json
+  #      (live Claude Code subscription login with a `claudeAiOauth` entry)
+  defp claude_credentials_present?(agent) do
+    Enum.any?(
+      [
+        &claude_api_key_env?/0,
+        &claude_oauth_env?/0,
+        &claude_provider_routing?/0,
+        fn -> claude_oauth_credentials_file?(agent) end
+      ],
+      fn check -> check.() end
+    )
+  end
+
+  defp claude_api_key_env? do
+    env_present?("ANTHROPIC_API_KEY") or env_present?("ANTHROPIC_AUTH_TOKEN")
+  end
+
+  defp claude_oauth_env?, do: env_present?("CLAUDE_CODE_OAUTH_TOKEN")
+
+  defp claude_provider_routing? do
+    Enum.any?(
+      ["CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"],
+      &env_present?/1
+    )
+  end
+
+  defp claude_oauth_credentials_file?(agent) do
+    case claude_credentials_path(agent) do
+      nil -> false
+      path -> File.exists?(path) and credentials_file_has_oauth?(path)
+    end
+  end
+
+  defp claude_credentials_path(%{claude: %{config_dir: dir}})
+       when is_binary(dir) and dir != "" do
+    Path.join(Path.expand(dir), ".credentials.json")
+  end
+
+  defp claude_credentials_path(_agent) do
+    case System.get_env("CLAUDE_CONFIG_DIR") do
+      dir when is_binary(dir) and dir != "" ->
+        Path.join(dir, ".credentials.json")
+
+      _ ->
+        case System.get_env("HOME") do
+          home when is_binary(home) and home != "" ->
+            Path.join([home, ".claude", ".credentials.json"])
+
+          _ ->
+            nil
+        end
+    end
+  end
+
+  defp credentials_file_has_oauth?(path) do
+    with {:ok, body} <- File.read(path),
+         {:ok, parsed} <- Jason.decode(body),
+         %{} = oauth <- Map.get(parsed, "claudeAiOauth") do
+      map_size(oauth) > 0
+    else
+      _ -> false
+    end
+  end
+
+  defp env_present?(var) do
+    case System.get_env(var) do
+      value when is_binary(value) and value != "" -> true
+      _ -> false
     end
   end
 

@@ -15,13 +15,22 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 
 1. Polls Linear for candidate work
 2. Creates a workspace per issue
-3. Launches Codex in [App Server mode](https://developers.openai.com/codex/app-server/) inside the
-   workspace
-4. Sends a workflow prompt to Codex
-5. Keeps Codex working on the issue until the work is done
+3. Launches the configured **coding-agent adapter** (SPEC.md §10) inside the workspace:
+   - `agent.kind: codex` (default) — runs Codex in
+     [App Server mode](https://developers.openai.com/codex/app-server/) (`agent.codex.command`).
+   - `agent.kind: claude` — launches the Claude Agent SDK sidecar in `priv/claude_agent/`
+     (`agent.claude.command`, default `uv run --project priv/claude_agent python -m
+     symphony_claude_agent`). The sidecar hosts `claude-agent-sdk` and is configured for
+     unattended sandboxed operation: `permission_mode: dontAsk` + tight `allowed_tools` whitelist
+     + workspace-`cwd` boundary; anything not pre-approved is denied without prompting.
+4. Sends the workflow prompt to the active adapter
+5. Keeps the agent working on the issue until the work is done (capped by `agent.max_turns`)
 
-During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
-skills can make raw Linear GraphQL calls.
+During agent sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
+skills can make raw Linear GraphQL calls. The contract is adapter-agnostic — Codex receives it
+through the app-server tool advertisement; the Claude sidecar exposes it through the SDK's
+`create_sdk_mcp_server` + `@tool` mechanism, and the actual GraphQL call still runs on the
+Symphony side via a `tool_call`/`tool_result` round-trip so Linear auth never leaves Symphony.
 
 If a claimed issue moves to a terminal state (`Done`, `Closed`, `Cancelled`, or `Duplicate`),
 Symphony stops the active agent for that issue and cleans up matching workspaces.

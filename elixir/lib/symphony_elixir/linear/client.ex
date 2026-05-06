@@ -176,7 +176,11 @@ defmodule SymphonyElixir.Linear.Client do
             linear_error_context(payload, response)
         )
 
-        {:error, {:linear_api_status, response.status}}
+        # Carry the parsed body so callers (notably `Codex.DynamicTool`) can
+        # surface Linear's GraphQL `errors[]` array to the agent for self-
+        # correction. Body is whatever the HTTP layer parsed (map for JSON,
+        # string for text, nil if unparseable).
+        {:error, {:linear_api_status, response.status, Map.get(response, :body)}}
 
       {:error, reason} ->
         Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
