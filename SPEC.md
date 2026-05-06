@@ -140,7 +140,8 @@ Symphony is easiest to port when kept in these layers:
 - Issue tracker API (Linear for `tracker.kind: linear` in this specification version).
 - Local filesystem for workspaces and logs.
 - OPTIONAL workspace population tooling (for example Git CLI, if used).
-- Coding-agent executable that supports the targeted Codex app-server mode.
+- Coding-agent executable that conforms to one of Section 10's adapter implementations
+  (Codex App-Server in §10.7 or Claude Agent SDK in §10.8).
 - Host environment authentication for the issue tracker and coding agent.
 
 ## 4. Core Domain Model
@@ -228,16 +229,19 @@ State tracked while a coding-agent subprocess is running.
 
 Fields:
 
-- `session_id` (string, `<thread_id>-<turn_id>`)
-- `thread_id` (string)
-- `turn_id` (string)
-- `codex_app_server_pid` (string or null)
-- `last_codex_event` (string/enum or null)
-- `last_codex_timestamp` (timestamp or null)
-- `last_codex_message` (summarized payload)
-- `codex_input_tokens` (integer)
-- `codex_output_tokens` (integer)
-- `codex_total_tokens` (integer)
+- `agent_kind` (string enum, `codex | claude`)
+- `session_id` (string)
+  - For `agent_kind == codex`: composed as `<thread_id>-<turn_id>`.
+  - For `agent_kind == claude`: the Claude Agent SDK `init.session_id` (UUID).
+- `thread_id` (string or null; populated when the adapter exposes a thread identity)
+- `turn_id` (string or null; populated when the adapter exposes a turn identity)
+- `agent_pid` (string or null)
+- `last_agent_event` (string/enum or null)
+- `last_agent_timestamp` (timestamp or null)
+- `last_agent_message` (summarized payload)
+- `agent_input_tokens` (integer)
+- `agent_output_tokens` (integer)
+- `agent_total_tokens` (integer)
 - `last_reported_input_tokens` (integer)
 - `last_reported_output_tokens` (integer)
 - `last_reported_total_tokens` (integer)
@@ -269,8 +273,9 @@ Fields:
 - `claimed` (set of issue IDs reserved/running/retrying)
 - `retry_attempts` (map `issue_id -> RetryEntry`)
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
-- `codex_totals` (aggregate tokens + runtime seconds)
-- `codex_rate_limits` (latest rate-limit snapshot from agent events)
+- `agent_totals` (aggregate tokens + runtime seconds)
+- `agent_rate_limits` (latest rate-limit snapshot from agent events; MAY be `null` for adapters that
+  do not surface rate-limit data — Claude does not surface them today)
 
 ### 4.2 Stable Identifiers and Normalization Rules
 
@@ -284,7 +289,10 @@ Fields:
 - `Normalized Issue State`
   - Compare states after `lowercase`.
 - `Session ID`
-  - Compose from coding-agent `thread_id` and `turn_id` as `<thread_id>-<turn_id>`.
+  - For `agent_kind == codex`: compose from coding-agent `thread_id` and `turn_id` as
+    `<thread_id>-<turn_id>`.
+  - For `agent_kind == claude`: use the Claude Agent SDK session UUID as reported in the first
+    `system_init` event.
 
 ## 5. Workflow Specification (Repository Contract)
 
@@ -332,7 +340,6 @@ Top-level keys:
 - `workspace`
 - `hooks`
 - `agent`
-- `codex`
 
 Unknown keys SHOULD be ignored for forward compatibility.
 
@@ -423,10 +430,17 @@ Fields:
   - Default: empty map.
   - State keys are normalized (`lowercase`) for lookup.
   - Invalid entries (non-positive or non-numeric) are ignored.
+- `kind` (string enum)
+  - Allowed values: `codex`, `claude`.
+  - Default: `codex`.
+  - Selects which coding-agent adapter implementation Symphony launches per session
+    (see Section 10).
+  - Adapter selection is fixed at the moment a session starts; reload of `agent.kind` affects
+    only future agent launches and does not migrate in-flight sessions.
 
-#### 5.3.6 `codex` (object)
+##### 5.3.5.1 `agent.codex` (object)
 
-Fields:
+Configures the Codex App-Server adapter (Section 10.7).
 
 For Codex-owned config values such as `approval_policy`, `thread_sandbox`, and
 `turn_sandbox_policy`, supported values are defined by the targeted Codex app-server version.
@@ -464,6 +478,70 @@ fields locally if they want stricter startup checks.
 - `stall_timeout_ms` (integer)
   - Default: `300000` (5 minutes)
   - If `<= 0`, stall detection is disabled.
+
+##### 5.3.5.2 `agent.claude` (object)
+
+Configures the Claude Agent SDK adapter (Section 10.8). The Claude adapter is implemented as a
+long-lived subprocess (the "sidecar") that hosts the Claude Agent SDK and exposes a JSON-line
+protocol to Symphony shaped like the Codex app-server client.
+
+- `command` (string shell command)
+  - Default: `uv run --project <priv-claude-agent> python -m symphony_claude_agent`
+  - Mirrors `agent.codex.command` semantics: launched via `bash -lc` in the workspace directory.
+- `model` (string)
+  - Default: implementation-defined; SHOULD be a current Anthropic model id.
+- `permission_mode` (string enum)
+  - Allowed values mirror the Claude Agent SDK's `permission_mode`: `default`, `acceptEdits`,
+    `plan`, `dontAsk`, `bypassPermissions`. (The TypeScript-only `auto` value is intentionally
+    not listed here; Symphony targets the Python SDK.)
+  - Default: `dontAsk` (recommended for unattended operation — see §10.8 sandbox mapping).
+  - **NOTE**: `bypassPermissions` causes the SDK to skip the `can_use_tool` callback entirely,
+    so it MUST NOT be combined with `can_use_tool` policy enforcement. For a sandboxed unattended
+    deployment, prefer `dontAsk` with an explicit `allowed_tools` whitelist (see
+    `agent.claude.allowed_tools` below) plus `PreToolUse` hooks.
+- `allowed_tools` (list of strings)
+  - Default: `[]` (empty list — no tools permitted; conservative).
+  - Whitelist of SDK tool names the agent may invoke when `permission_mode == "dontAsk"`.
+    Custom in-process MCP tools registered via §10.8 use the `mcp__<server_name>__<tool_name>`
+    naming convention.
+- `disallowed_tools` (list of strings)
+  - Default: `[]`.
+  - Explicit deny list applied before `allowed_tools`.
+- `system_prompt_preset` (string enum)
+  - Allowed values: `claude_code`, `minimal`.
+  - Default: `claude_code`.
+- `setting_sources` (list of strings)
+  - Default: `[]` (do NOT load any host-level Claude Code settings).
+  - When the list is empty the sidecar MUST NOT inherit `.claude/settings.json`, home settings,
+    or other host-level Claude Code configuration; this preserves Symphony's deterministic
+    sandbox posture across hosts.
+- `max_turns` (positive integer or null)
+  - Default: implementation-defined.
+  - When set, caps the SDK-internal turn budget for one Symphony turn (separate from
+    `agent.max_turns` which caps Symphony's continuation loop).
+- `max_budget_usd` (number or null)
+  - Default: `null`.
+  - Optional SDK-side cost ceiling.
+- `extra_env` (map)
+  - Default: `{}`.
+  - Additional environment variables forwarded to the sidecar process.
+- `turn_timeout_ms` (integer)
+  - Default: `3600000` (1 hour).
+- `read_timeout_ms` (integer)
+  - Default: `5000`.
+- `stall_timeout_ms` (integer)
+  - Default: `300000` (5 minutes).
+  - If `<= 0`, stall detection is disabled.
+
+Authentication note:
+
+- `ANTHROPIC_API_KEY` is the canonical environment variable, resolved via the same `$VAR`
+  indirection rules used elsewhere (for example `tracker.api_key`).
+- Provider-routing environment variables — currently `CLAUDE_CODE_USE_BEDROCK` (Amazon Bedrock),
+  `CLAUDE_CODE_USE_VERTEX` (Google Vertex AI), and `CLAUDE_CODE_USE_FOUNDRY` (Microsoft Azure AI
+  Foundry) — are forwarded to the sidecar when present in the host environment so deployments can
+  run against an alternative provider without touching Symphony config. Provider credentials
+  (e.g. AWS / GCP / Azure auth) are forwarded the same way.
 
 ### 5.4 Prompt Template Contract
 
@@ -537,8 +615,10 @@ Dynamic reload is REQUIRED:
 - The software MUST detect `WORKFLOW.md` changes.
 - On change, it MUST re-read and re-apply workflow config and prompt template without restart.
 - The software MUST attempt to adjust live behavior to the new config (for example polling
-  cadence, concurrency limits, active/terminal states, codex settings, workspace paths/hooks, and
+  cadence, concurrency limits, active/terminal states, agent settings, workspace paths/hooks, and
   prompt content for future runs).
+- `agent.kind` reload affects only future agent launches; in-flight sessions keep the adapter
+  kind they were started with.
 - Reloaded config applies to future dispatch, retry scheduling, reconciliation decisions, hook
   execution, and agent launches.
 - Implementations are not REQUIRED to restart in-flight agent sessions automatically when config
@@ -573,7 +653,12 @@ Validation checks:
 - `tracker.kind` is present and supported.
 - `tracker.api_key` is present after `$` resolution.
 - `tracker.project_slug` is present when REQUIRED by the selected tracker kind.
-- `codex.command` is present and non-empty.
+- `agent.kind` is one of the supported values (`codex`, `claude`).
+- The selected adapter's required keys are present and non-empty:
+  - `agent.kind == codex`: `agent.codex.command` is present and non-empty.
+  - `agent.kind == claude`: `agent.claude.command` is present and non-empty AND the resolved
+    value of `ANTHROPIC_API_KEY` (or the equivalent provider-auth environment variable the
+    adapter implementation documents, e.g. for Bedrock/Vertex/Foundry routing) is non-empty.
 
 ### 6.4 Core Config Fields Summary (Cheat Sheet)
 
@@ -598,13 +683,29 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
-- `codex.command`: shell command string, default `codex app-server`
-- `codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
-- `codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
-- `codex.turn_sandbox_policy`: Codex `SandboxPolicy` value, default implementation-defined
-- `codex.turn_timeout_ms`: integer, default `3600000`
-- `codex.read_timeout_ms`: integer, default `5000`
-- `codex.stall_timeout_ms`: integer, default `300000`
+- `agent.kind`: enum (`codex` | `claude`), default `codex`
+- `agent.codex.command`: shell command string, default `codex app-server`
+- `agent.codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
+- `agent.codex.thread_sandbox`: Codex `SandboxMode` value, default implementation-defined
+- `agent.codex.turn_sandbox_policy`: Codex `SandboxPolicy` value, default implementation-defined
+- `agent.codex.turn_timeout_ms`: integer, default `3600000`
+- `agent.codex.read_timeout_ms`: integer, default `5000`
+- `agent.codex.stall_timeout_ms`: integer, default `300000`
+- `agent.claude.command`: shell command string, default
+  `uv run --project <priv-claude-agent> python -m symphony_claude_agent`
+- `agent.claude.model`: string, default implementation-defined
+- `agent.claude.permission_mode`: enum
+  (`default` | `acceptEdits` | `plan` | `dontAsk` | `bypassPermissions`), default `dontAsk`
+- `agent.claude.allowed_tools`: list of strings, default `[]`
+- `agent.claude.disallowed_tools`: list of strings, default `[]`
+- `agent.claude.system_prompt_preset`: enum (`claude_code` | `minimal`), default `claude_code`
+- `agent.claude.setting_sources`: list of strings, default `[]`
+- `agent.claude.max_turns`: positive integer or null, default implementation-defined
+- `agent.claude.max_budget_usd`: number or null, default `null`
+- `agent.claude.extra_env`: map, default `{}`
+- `agent.claude.turn_timeout_ms`: integer, default `3600000`
+- `agent.claude.read_timeout_ms`: integer, default `5000`
+- `agent.claude.stall_timeout_ms`: integer, default `300000`
 
 ## 7. Orchestration State Machine
 
@@ -684,8 +785,9 @@ Distinct terminal reasons are important because retry logic and logs differ.
   - Update aggregate runtime totals.
   - Schedule exponential-backoff retry.
 
-- `Codex Update Event`
-  - Update live session fields, token counters, and rate limits.
+- `Agent Update Event`
+  - Update live session fields, token counters, and rate limits (when the active adapter
+    surfaces them).
 
 - `Retry Timer Fired`
   - Re-fetch active candidates and attempt re-dispatch, or release claim if no longer eligible.
@@ -794,10 +896,12 @@ Reconciliation runs every tick and has two parts.
 Part A: Stall detection
 
 - For each running issue, compute `elapsed_ms` since:
-  - `last_codex_timestamp` if any event has been seen, else
+  - `last_agent_timestamp` if any event has been seen, else
   - `started_at`
-- If `elapsed_ms > codex.stall_timeout_ms`, terminate the worker and queue a retry.
-- If `stall_timeout_ms <= 0`, skip stall detection entirely.
+- If `elapsed_ms` exceeds the active adapter's `stall_timeout_ms` (`agent.codex.stall_timeout_ms`
+  or `agent.claude.stall_timeout_ms` per `agent.kind` — see §5.3.5), terminate the worker and
+  queue a retry.
+- If the resolved `stall_timeout_ms <= 0`, skip stall detection entirely.
 
 Part B: Tracker state refresh
 
@@ -914,103 +1018,58 @@ Invariant 3: Workspace key is sanitized.
 - Only `[A-Za-z0-9._-]` allowed in workspace directory names.
 - Replace all other characters with `_`.
 
-## 10. Agent Runner Protocol (Coding Agent Integration)
+## 10. Coding-Agent Adapter Contract
 
-This section defines Symphony's language-neutral responsibilities when integrating a Codex
-app-server. The Codex app-server protocol for the targeted Codex version is the source of truth for
-protocol schemas, message payloads, transport framing, and method names.
+This section defines Symphony's adapter-neutral, language-neutral responsibilities for integrating
+a coding agent. Symphony supports more than one coding-agent runtime; the abstract contract here
+is implemented by the kind-specific subsections that follow:
 
-Protocol source of truth:
+- §10.7 Codex App-Server Adapter (`agent.kind == codex`).
+- §10.8 Claude Agent SDK Adapter (`agent.kind == claude`).
 
-- Implementations MUST send messages that are valid for the targeted Codex app-server version.
-- Implementations MUST consult the targeted Codex app-server documentation or generated schema
-  instead of treating this specification as a protocol schema.
-- If this specification appears to conflict with the targeted Codex app-server protocol, the Codex
-  protocol controls protocol shape and transport behavior.
-- Symphony-specific requirements in this section still control orchestration behavior, workspace
-  selection, prompt construction, continuation handling, and observability extraction.
+Both adapters live behind the same orchestrator-facing interface. Each kind-specific subsection MAY
+add MUSTs and SHOULDs that supplement the abstract contract, but MUST NOT relax it.
 
-### 10.1 Launch Contract
+### 10.1 Adapter Selection
 
-Subprocess launch parameters:
+- Adapter selection is driven by `agent.kind` (see §5.3.5), defaulting to `codex`.
+- Selection is fixed at the moment a session starts; reload of `agent.kind` affects only future
+  agent launches and does not migrate in-flight sessions.
+- The orchestrator consults the selected adapter's nested config block (`agent.codex.*` or
+  `agent.claude.*`) for launch command, timeouts, approval/sandbox/permission posture, and any
+  adapter-specific knobs.
 
-- Command: `codex.command`
-- Invocation: `bash -lc <codex.command>`
-- Working directory: workspace path
-- Transport/framing: the protocol transport required by the targeted Codex app-server version
+### 10.2 Common Adapter Responsibilities
 
-Notes:
+Every conforming adapter MUST:
 
-- The default command is `codex app-server`.
-- Approval policy, sandbox policy, cwd, prompt input, and OPTIONAL tool declarations are supplied
-  using fields supported by the targeted Codex app-server version.
+- Launch its subprocess (or equivalent runtime) with the per-issue workspace path as the working
+  directory.
+- Expose a long-lived, turn-driven session to the orchestrator. The first turn carries the
+  rendered WORKFLOW.md prompt (see Section 12); continuation turns carry continuation guidance,
+  not a re-render of the original issue prompt.
+- Surface a `session_id` to Symphony as soon as it is known and reuse it across continuation turns
+  inside the same worker run.
+- Emit the standard event vocabulary defined in §10.3 to Symphony's orchestrator callback.
+- Honor the adapter-specific `read_timeout_ms`, `turn_timeout_ms`, and `stall_timeout_ms` values
+  resolved through `agent.<kind>.*`.
+- Handle continuation turns on the same live session: the underlying subprocess SHOULD remain
+  alive across continuation turns and be stopped only when the worker run is ending.
+- Stop the session cleanly when the orchestrator terminates the run.
 
 RECOMMENDED additional process settings:
 
-- Max line size: 10 MB (for safe buffering)
+- Max line size for stdio-framed transports: 10 MB (for safe buffering).
 
-### 10.2 Session Startup Responsibilities
+### 10.3 Standard Emitted Events
 
-Reference: https://developers.openai.com/codex/app-server/
-
-Startup MUST follow the targeted Codex app-server contract. Symphony additionally requires the
-client to:
-
-- Start the app-server subprocess in the per-issue workspace.
-- Initialize the app-server session using the targeted Codex app-server protocol.
-- Create or resume a coding-agent thread according to the targeted protocol.
-- Supply the absolute per-issue workspace path as the thread/turn working directory wherever the
-  targeted protocol accepts cwd.
-- Start the first turn with the rendered issue prompt.
-- Start later in-worker continuation turns on the same live thread with continuation guidance rather
-  than resending the original issue prompt.
-- Supply the implementation's documented approval and sandbox policy using fields supported by the
-  targeted protocol.
-- Include issue-identifying metadata, such as `<issue.identifier>: <issue.title>`, when the targeted
-  protocol supports turn or session titles.
-- Advertise implemented client-side tools using the targeted protocol.
-
-Session identifiers:
-
-- Extract `thread_id` from the thread identity returned by the targeted Codex app-server protocol.
-- Extract `turn_id` from each turn identity returned by the targeted Codex app-server protocol.
-- Emit `session_id = "<thread_id>-<turn_id>"`
-- Reuse the same `thread_id` for all continuation turns inside one worker run
-
-### 10.3 Streaming Turn Processing
-
-The client processes app-server updates according to the targeted Codex app-server protocol until
-the active turn terminates.
-
-Completion conditions:
-
-- Targeted-protocol turn completion signal -> success
-- Targeted-protocol turn failure signal -> failure
-- Targeted-protocol turn cancellation signal -> failure
-- turn timeout (`turn_timeout_ms`) -> failure
-- subprocess exit -> failure
-
-Continuation processing:
-
-- If the worker decides to continue after a successful turn, it SHOULD start another turn on the same
-  live thread using the targeted protocol.
-- The app-server subprocess SHOULD remain alive across those continuation turns and be stopped only
-  when the worker run is ending.
-
-Transport handling requirements:
-
-- Follow the transport and framing rules of the targeted Codex app-server version.
-- For stdio-based transports, keep protocol stream handling separate from diagnostic stderr
-  handling unless the targeted protocol specifies otherwise.
-
-### 10.4 Emitted Runtime Events (Upstream to Orchestrator)
-
-The app-server client emits structured events to the orchestrator callback. Each event SHOULD
-include:
+Each adapter emits structured events to the orchestrator callback. Each event SHOULD include:
 
 - `event` (enum/string)
 - `timestamp` (UTC timestamp)
-- `codex_app_server_pid` (if available)
+- `agent_kind` (string enum, mirrors `agent.kind` for the active session)
+- `agent_pid` (if available)
+- `session_id` (if known)
 - OPTIONAL `usage` map (token counts)
 - payload fields as needed
 
@@ -1029,19 +1088,21 @@ Important emitted events include, for example:
 - `other_message`
 - `malformed`
 
-### 10.5 Approval, Tool Calls, and User Input Policy
+The vocabulary is shared across adapters; an adapter that does not have a native concept for a
+given event (for example a runtime without rate-limit signals) SHOULD simply not emit it.
 
-Approval, sandbox, and user-input behavior is implementation-defined.
+### 10.4 Approval, Sandbox, and User-Input Policy
+
+Approval, sandbox, and user-input behavior is implementation-defined per adapter.
 
 Policy requirements:
 
-- Each implementation MUST document its chosen approval, sandbox, and operator-confirmation
-  posture.
-- Approval requests and user-input-required events MUST NOT leave a run stalled indefinitely. An
-  implementation MAY either satisfy them, surface them to an operator, auto-resolve them, or
-  fail the run according to its documented policy.
+- Each adapter MUST document its chosen approval, sandbox, and operator-confirmation posture.
+- Approval requests and user-input-required events MUST NOT leave a run stalled indefinitely.
+  An adapter MAY satisfy them, surface them to an operator, auto-resolve them, or fail the run
+  according to its documented policy.
 
-Example high-trust behavior:
+Example high-trust behavior (applies to either adapter):
 
 - Auto-approve command execution approvals for the session.
 - Auto-approve file-change approvals for the session.
@@ -1049,26 +1110,27 @@ Example high-trust behavior:
 
 Unsupported dynamic tool calls:
 
-- Supported dynamic tool calls that are explicitly implemented and advertised by the runtime SHOULD
-  be handled according to their extension contract.
-- If the agent requests a dynamic tool call that is not supported, return a tool failure response
-  using the targeted protocol and continue the session.
+- Supported dynamic tool calls that are explicitly implemented and advertised by the adapter
+  SHOULD be handled according to their extension contract.
+- If the agent requests a dynamic tool call that is not supported, the adapter MUST return a tool
+  failure response and continue the session.
 - This prevents the session from stalling on unsupported tool execution paths.
 
 Optional client-side tool extension:
 
-- An implementation MAY expose a limited set of client-side tools to the app-server session.
+- An adapter MAY expose a limited set of client-side tools to its session.
 - Current standardized optional tool: `linear_graphql`.
-- If implemented, supported tools SHOULD be advertised to the app-server session during startup
-  using the protocol mechanism supported by the targeted Codex app-server version.
-- Unsupported tool names SHOULD still return a failure result using the targeted protocol and
-  continue the session.
+- If implemented, supported tools SHOULD be advertised to the session during startup using the
+  mechanism the adapter exposes (Codex app-server tool advertisement; Claude Agent SDK in-process
+  MCP `@tool`/`tool()` registration). The contract below is adapter-agnostic.
+- Unsupported tool names SHOULD still return a failure result and continue the session.
 
-`linear_graphql` extension contract:
+`linear_graphql` extension contract (adapter-agnostic):
 
 - Purpose: execute a raw GraphQL query or mutation against Linear using Symphony's configured
   tracker auth for the current session.
-- Availability: only meaningful when `tracker.kind == "linear"` and valid Linear auth is configured.
+- Availability: only meaningful when `tracker.kind == "linear"` and valid Linear auth is
+  configured.
 - Preferred input shape:
 
   ```json
@@ -1087,59 +1149,249 @@ Optional client-side tool extension:
 - Execute one GraphQL operation per tool call.
 - If the provided document contains multiple operations, reject the tool call as invalid input.
 - `operationName` selection is intentionally out of scope for this extension.
-- Reuse the configured Linear endpoint and auth from the active Symphony workflow/runtime config; do
-  not require the coding agent to read raw tokens from disk.
+- Reuse the configured Linear endpoint and auth from the active Symphony workflow/runtime config;
+  do not require the coding agent to read raw tokens from disk.
 - Tool result semantics:
   - transport success + no top-level GraphQL `errors` -> `success=true`
   - top-level GraphQL `errors` present -> `success=false`, but preserve the GraphQL response body
     for debugging
   - invalid input, missing auth, or transport failure -> `success=false` with an error payload
-- Return the GraphQL response or error payload as structured tool output that the model can inspect
-  in-session.
+- Return the GraphQL response or error payload as structured tool output that the model can
+  inspect in-session.
 
 User-input-required policy:
 
-- Implementations MUST document how targeted-protocol user-input-required signals are handled.
+- Each adapter MUST document how user-input-required signals are handled.
 - A run MUST NOT stall indefinitely waiting for user input.
-- A conforming implementation MAY fail the run, surface the request to an operator, satisfy it
-  through an approved operator channel, or auto-resolve it according to its documented policy.
+- A conforming adapter MAY fail the run, surface the request to an operator, satisfy it through
+  an approved operator channel, or auto-resolve it according to its documented policy.
 - The example high-trust behavior above fails user-input-required turns immediately.
 
-### 10.6 Timeouts and Error Mapping
+### 10.5 Timeouts and Error Mapping
 
-Timeouts:
+Timeouts (resolved per adapter from `agent.<kind>.*`):
 
-- `codex.read_timeout_ms`: request/response timeout during startup and sync requests
-- `codex.turn_timeout_ms`: total turn stream timeout
-- `codex.stall_timeout_ms`: enforced by orchestrator based on event inactivity
+- `read_timeout_ms`: request/response timeout during startup and sync requests
+- `turn_timeout_ms`: total turn stream timeout
+- `stall_timeout_ms`: enforced by orchestrator based on event inactivity
 
 Error mapping (RECOMMENDED normalized categories):
 
-- `codex_not_found`
+Common (any adapter):
+
 - `invalid_workspace_cwd`
 - `response_timeout`
 - `turn_timeout`
-- `port_exit`
 - `response_error`
 - `turn_failed`
 - `turn_cancelled`
 - `turn_input_required`
 
-### 10.7 Agent Runner Contract
+Codex-adapter specific (when `agent.kind == codex`):
 
-The `Agent Runner` wraps workspace + prompt + app-server client.
+- `codex_not_found`
+- `port_exit`
+
+Claude-adapter specific (when `agent.kind == claude`):
+
+- `claude_sidecar_not_found`
+- `claude_sdk_error`
+- `permission_denied`
+
+### 10.6 Agent Runner Contract
+
+The `Agent Runner` wraps workspace + prompt + selected adapter.
 
 Behavior:
 
 1. Create/reuse workspace for issue.
 2. Build prompt from workflow template.
-3. Start app-server session.
-4. Forward app-server events to orchestrator.
+3. Start the selected adapter's session (Codex app-server or Claude SDK sidecar).
+4. Forward adapter events to orchestrator.
 5. On any error, fail the worker attempt (the orchestrator will retry).
 
 Note:
 
 - Workspaces are intentionally preserved after successful runs.
+
+### 10.7 Codex App-Server Adapter (Implementation)
+
+Selected when `agent.kind == codex` (the default).
+
+Protocol source of truth:
+
+- The Codex app-server protocol for the targeted Codex version is the source of truth for
+  protocol schemas, message payloads, transport framing, and method names.
+- Implementations MUST send messages that are valid for the targeted Codex app-server version.
+- Implementations MUST consult the targeted Codex app-server documentation or generated schema
+  rather than treating this specification as a protocol schema.
+- If this specification appears to conflict with the targeted Codex app-server protocol, the Codex
+  protocol controls protocol shape and transport behavior. Symphony-specific requirements still
+  control orchestration behavior, workspace selection, prompt construction, continuation
+  handling, and observability extraction.
+
+Reference: https://developers.openai.com/codex/app-server/
+
+Launch contract:
+
+- Command: `agent.codex.command` (default `codex app-server`).
+- Invocation: `bash -lc <agent.codex.command>` in the per-issue workspace.
+- Transport/framing: the protocol transport required by the targeted Codex app-server version.
+- Approval policy, sandbox policy, cwd, prompt input, and OPTIONAL tool declarations are supplied
+  using fields supported by the targeted Codex app-server version.
+
+Session startup obligations (in addition to §10.2):
+
+- Start the app-server subprocess in the per-issue workspace.
+- Initialize the app-server session using the targeted Codex app-server protocol.
+- Create or resume a coding-agent thread according to the targeted protocol.
+- Supply the absolute per-issue workspace path as the thread/turn working directory wherever the
+  targeted protocol accepts cwd.
+- Supply the implementation's documented approval and sandbox policy using fields supported by
+  the targeted protocol.
+- Include issue-identifying metadata, such as `<issue.identifier>: <issue.title>`, when the
+  targeted protocol supports turn or session titles.
+- Advertise implemented client-side tools using the targeted protocol.
+
+Session identifiers:
+
+- Extract `thread_id` from the thread identity returned by the targeted Codex app-server protocol.
+- Extract `turn_id` from each turn identity returned by the targeted Codex app-server protocol.
+- Compose `session_id = "<thread_id>-<turn_id>"`.
+- Reuse the same `thread_id` for all continuation turns inside one worker run.
+
+Streaming turn processing:
+
+- Process app-server updates according to the targeted Codex app-server protocol until the active
+  turn terminates.
+- Completion conditions:
+  - Targeted-protocol turn completion signal -> success
+  - Targeted-protocol turn failure signal -> failure
+  - Targeted-protocol turn cancellation signal -> failure
+  - Turn timeout (`agent.codex.turn_timeout_ms`) -> failure
+  - Subprocess exit -> failure
+- Follow the transport and framing rules of the targeted Codex app-server version.
+- For stdio-based transports, keep protocol stream handling separate from diagnostic stderr
+  handling unless the targeted protocol specifies otherwise.
+
+Approval/sandbox: use the Codex `AskForApproval` / `SandboxMode` / `SandboxPolicy` values resolved
+from `agent.codex.approval_policy` / `agent.codex.thread_sandbox` / `agent.codex.turn_sandbox_policy`.
+The §15.2 workspace-cwd safety invariants MUST hold.
+
+Tool advertisement: when implemented, `linear_graphql` is advertised through the Codex app-server
+tool mechanism for the targeted version.
+
+### 10.8 Claude Agent SDK Adapter (Implementation)
+
+Selected when `agent.kind == claude`.
+
+Protocol source of truth:
+
+- The Claude Agent SDK and its underlying `claude` CLI are the source of truth for protocol
+  behavior. The SDK API is semver-versioned; the underlying `--input-format=stream-json` wire
+  protocol is intentionally not specified by Anthropic for third-party use
+  ([anthropics/claude-code#24594](https://github.com/anthropics/claude-code/issues/24594)).
+- Implementations MUST consume the SDK rather than hand-rolling the wire protocol.
+- The Symphony adapter is implemented as a long-lived subprocess (the "sidecar") that hosts the
+  SDK and bridges Symphony's orchestrator to the SDK over a JSON-line stdio protocol.
+
+Launch contract:
+
+- Command: `agent.claude.command` (default
+  `uv run --project <priv-claude-agent> python -m symphony_claude_agent`).
+- Invocation: `bash -lc <agent.claude.command>` in the per-issue workspace.
+- Required environment: `ANTHROPIC_API_KEY` (or the equivalent provider auth env var when routing
+  through Bedrock/Vertex/Foundry — see §5.3.5.2).
+- Forwarded environment: `agent.claude.extra_env` plus the standard provider env vars
+  (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `ANTHROPIC_AUTH_TOKEN`, etc.) when
+  present in the host environment.
+
+Sidecar wire protocol (Symphony ↔ sidecar over stdio, line-delimited JSON):
+
+- Symphony → sidecar: `init`, `turn`, `tool_result`, `permission_response`, `interrupt`,
+  `shutdown`.
+- Sidecar → Symphony: `ready`, `system_init`, `assistant_message` (and/or deltas), `tool_call`,
+  `permission_request`, `token_usage`, `turn_end`, `error`, `log`.
+- The concrete envelope shape is implementation-defined within the MUSTs above; implementations
+  MUST document and version their envelope.
+
+Session startup:
+
+- The sidecar MUST construct a `ClaudeSDKClient` (Python; or the TypeScript SDK equivalent)
+  with `ClaudeAgentOptions` carrying at minimum:
+  - `cwd` set to the per-issue workspace path.
+  - `system_prompt` selected by `agent.claude.system_prompt_preset` (default `claude_code` preset
+    with the rendered WORKFLOW.md body appended).
+  - `permission_mode` from `agent.claude.permission_mode`.
+  - `model` from `agent.claude.model`.
+  - `allowed_tools` and `disallowed_tools` from the corresponding config keys.
+  - `setting_sources` from `agent.claude.setting_sources` (default `[]` — do NOT inherit
+    `.claude/settings.json` or other host-level configuration).
+  - `max_turns` from `agent.claude.max_turns` when set.
+  - `mcp_servers` containing an in-process MCP server constructed via
+    `create_sdk_mcp_server(name, version, tools=[...])` that registers Symphony's advertised
+    tools (notably `linear_graphql`, when implemented) using the SDK's `@tool` decorator. Tools
+    registered this way are addressed as `mcp__<server_name>__<tool_name>` and MUST appear in
+    `allowed_tools` when `permission_mode == "dontAsk"`.
+  - `hooks` map registering at least a `PreToolUse` hook that validates tool inputs against the
+    workspace boundary (rejecting filesystem-mutating tool inputs whose realpath escapes the
+    workspace); this is the load-bearing sandbox check in `dontAsk` mode.
+
+Session identifiers:
+
+- `session_id` is the SDK-assigned UUID delivered in the first `SystemMessage` whose
+  `subtype == "init"`. In Python, the value is read from `message.data["session_id"]`; in
+  TypeScript, from `message.session_id`.
+- Continuation turns reuse the same `ClaudeSDKClient` instance and therefore the same session.
+  Cross-process resumption (sidecar restart) MAY use the SDK's `resume=<session_id>` option
+  against the on-disk session file under `~/.claude/projects/<encoded-cwd>/` — implementations
+  MUST document whether they support cross-restart resumption.
+
+Turn processing:
+
+- Each turn is initiated by Symphony writing a `turn` request.
+- The sidecar drives `client.query(prompt)` and then iterates `client.receive_response()` until
+  a `ResultMessage`, at which point it emits `turn_end` carrying `stop_reason`, `num_turns`, and
+  `usage`. The `usage` payload uses snake_case keys: `input_tokens`, `output_tokens`,
+  `cache_creation_input_tokens`, `cache_read_input_tokens`.
+- The sidecar subprocess remains alive across continuation turns.
+- Symphony's `interrupt` request MUST be implemented as `await client.interrupt()` on the live
+  `ClaudeSDKClient`; it is an async method, not a wire-level signal sent into the subprocess.
+
+Approval / sandbox mapping:
+
+- The Claude Agent SDK has no native filesystem/network sandbox primitive. The recommended
+  unattended-sandboxed posture is:
+  1. `permission_mode = dontAsk` — anything not pre-approved is denied (no human prompts).
+  2. A tightly scoped `allowed_tools` whitelist that contains only the tools the workflow needs
+     (e.g. `Read`, `Glob`, `Edit`, `Write`, plus any explicitly registered
+     `mcp__<server>__<tool>` entries). Avoid blanket-allowing `Bash` unless the workflow
+     genuinely needs shell execution.
+  3. `disallowed_tools` for explicit denials of dangerous tools (e.g. `WebFetch`).
+  4. A `PreToolUse` hook that validates tool input paths against the workspace `cwd` via
+     realpath comparison (the SDK's built-in `cwd` check is helpful but a defence-in-depth
+     hook MUST be present).
+  5. The Elixir-side workspace-cwd invariant from §15.2 MUST also hold.
+- `bypassPermissions` MUST NOT be selected together with a `can_use_tool` policy callback — the
+  SDK skips `can_use_tool` in that mode, silently disabling enforcement. If a deployment chooses
+  `bypassPermissions` it MUST rely entirely on external isolation (container/VM/network).
+- The deployment-time hardening guidance in §15.5 applies in addition to the in-SDK controls
+  above.
+
+Tool advertisement:
+
+- `linear_graphql` (when implemented) is registered as an in-process SDK tool through
+  `create_sdk_mcp_server` + `@tool`, not as a separate stdio MCP shim; the SDK's tool-call
+  control protocol delivers invocations to the sidecar, which forwards them to Symphony as
+  `tool_call` events. The tool MUST appear in `agent.claude.allowed_tools` (under its
+  `mcp__<server>__linear_graphql` SDK name) for `dontAsk` mode to permit invocation.
+- Custom tool errors SHOULD be returned as `is_error=True` tool responses so the agent loop
+  continues and Claude can recover, rather than raising exceptions that tear down the session.
+
+Timeouts:
+
+- `agent.claude.read_timeout_ms`, `agent.claude.turn_timeout_ms`, and
+  `agent.claude.stall_timeout_ms` mirror the Codex semantics described in §10.5.
 
 ## 11. Issue Tracker Integration Contract (Linear-Compatible)
 
@@ -1265,6 +1517,7 @@ REQUIRED context fields for issue-related logs:
 REQUIRED context for coding-agent session lifecycle logs:
 
 - `session_id`
+- `agent_kind` (`codex | claude`)
 
 Message formatting requirements:
 
@@ -1290,14 +1543,15 @@ If the implementation exposes a synchronous runtime snapshot (for dashboards or 
 SHOULD return:
 
 - `running` (list of running session rows)
-- each running row SHOULD include `turn_count`
+- each running row SHOULD include `turn_count` and `agent_kind`
 - `retrying` (list of retry queue rows)
-- `codex_totals`
+- `agent_totals`
   - `input_tokens`
   - `output_tokens`
   - `total_tokens`
   - `seconds_running` (aggregate runtime seconds as of snapshot time, including active sessions)
-- `rate_limits` (latest coding-agent rate limit payload, if available)
+- `rate_limits` (latest coding-agent rate limit payload, if available; MAY be `null` when the
+  active adapter does not surface rate-limit data — the Claude adapter does not surface them today)
 
 RECOMMENDED snapshot error modes:
 
@@ -1316,17 +1570,22 @@ correctness.
 
 Token accounting rules:
 
-- Agent events can include token counts in multiple payload shapes.
-- Prefer absolute thread totals when available, such as:
+- Coding-agent events can include token counts in multiple payload shapes; rules below apply to
+  any conforming adapter (see §10).
+- For the Codex adapter, prefer absolute thread totals when available, such as:
   - `thread/tokenUsage/updated` payloads
   - `total_token_usage` within token-count wrapper events
-- Ignore delta-style payloads such as `last_token_usage` for dashboard/API totals.
+- For the Claude adapter, the canonical totals come from the `ResultMessage.usage` payload at the
+  end of each turn (`input_tokens`, `output_tokens`, `cache_creation_input_tokens`,
+  `cache_read_input_tokens`). The orchestrator MUST sum these across turns rather than treating
+  any single turn's usage as cumulative.
+- Ignore delta-style payloads such as `last_token_usage` (Codex) for dashboard/API totals.
 - Extract input/output/total token counts leniently from common field names within the selected
   payload.
 - For absolute totals, track deltas relative to last reported totals to avoid double-counting.
 - Do not treat generic `usage` maps as cumulative totals unless the event type defines them that
   way.
-- Accumulate aggregate totals in orchestrator state.
+- Accumulate aggregate totals in orchestrator state (`agent_totals`).
 
 Runtime accounting:
 
@@ -1434,7 +1693,7 @@ Minimum endpoints:
           "error": "no available orchestrator slots"
         }
       ],
-      "codex_totals": {
+      "agent_totals": {
         "input_tokens": 5000,
         "output_tokens": 2400,
         "total_tokens": 7400,
@@ -1477,10 +1736,10 @@ Minimum endpoints:
       },
       "retry": null,
       "logs": {
-        "codex_session_logs": [
+        "agent_session_logs": [
           {
             "label": "latest",
-            "path": "/var/log/symphony/codex/MT-649/latest.log",
+            "path": "/var/log/symphony/agent/MT-649/latest.log",
             "url": null
           }
         ]
@@ -1658,10 +1917,10 @@ Implications:
 
 ### 15.5 Harness Hardening Guidance
 
-Running Codex agents against repositories, issue trackers, and other inputs that can contain
-sensitive data or externally-controlled content can be dangerous. A permissive deployment can lead
-to data leaks, destructive mutations, or full machine compromise if the agent is induced to execute
-harmful commands or use overly-powerful integrations.
+Running coding-agent sessions against repositories, issue trackers, and other inputs that can
+contain sensitive data or externally-controlled content can be dangerous. A permissive deployment
+can lead to data leaks, destructive mutations, or full machine compromise if the agent is induced
+to execute harmful commands or use overly-powerful integrations.
 
 Implementations SHOULD explicitly evaluate their own risk profile and harden the execution harness
 where appropriate. This specification intentionally does not mandate a single hardening posture, but
@@ -1670,10 +1929,14 @@ arguments are fully trustworthy just because they originate inside a normal work
 
 Possible hardening measures include:
 
-- Tightening Codex approval and sandbox settings described elsewhere in this specification instead
-  of running with a maximally permissive configuration.
+- Tightening the active adapter's approval and sandbox controls described elsewhere in this
+  specification instead of running with a maximally permissive configuration (for example Codex
+  `agent.codex.approval_policy` / `agent.codex.thread_sandbox`, or Claude
+  `agent.claude.permission_mode = dontAsk` paired with a tight `agent.claude.allowed_tools`
+  whitelist and a `PreToolUse` workspace-boundary hook — see §10.8 for why
+  `bypassPermissions` cannot be combined with a policy callback).
 - Adding external isolation layers such as OS/container/VM sandboxing, network restrictions, or
-  separate credentials beyond the built-in Codex policy controls.
+  separate credentials beyond the adapter's built-in policy controls.
 - Filtering which Linear issues, projects, teams, labels, or other tracker sources are eligible for
   dispatch so untrusted or out-of-scope tasks do not automatically reach the agent.
 - Narrowing the `linear_graphql` tool so it can only read or mutate data inside the
@@ -1701,8 +1964,8 @@ function start_service():
     claimed: set(),
     retry_attempts: {},
     completed: set(),
-    codex_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
-    codex_rate_limits: null
+    agent_totals: {input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+    agent_rate_limits: null
   }
 
   validation = validate_dispatch_config()
@@ -1793,14 +2056,15 @@ function dispatch_issue(issue, state, attempt):
     monitor_handle,
     identifier: issue.identifier,
     issue,
+    agent_kind: get_config_agent_kind(),
     session_id: null,
-    codex_app_server_pid: null,
-    last_codex_message: null,
-    last_codex_event: null,
-    last_codex_timestamp: null,
-    codex_input_tokens: 0,
-    codex_output_tokens: 0,
-    codex_total_tokens: 0,
+    agent_pid: null,
+    last_agent_message: null,
+    last_agent_event: null,
+    last_agent_timestamp: null,
+    agent_input_tokens: 0,
+    agent_output_tokens: 0,
+    agent_total_tokens: 0,
     last_reported_input_tokens: 0,
     last_reported_output_tokens: 0,
     last_reported_total_tokens: 0,
@@ -1843,7 +2107,7 @@ function run_agent_attempt(issue, attempt, orchestrator_channel):
       session=session,
       prompt=prompt,
       issue=issue,
-      on_message=(msg) -> send(orchestrator_channel, {codex_update, issue.id, msg})
+      on_message=(msg) -> send(orchestrator_channel, {agent_update, issue.id, msg})
     )
 
     if turn_result failed:
@@ -1955,7 +2219,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - `tracker.api_key` works (including `$VAR` indirection)
 - `$VAR` resolution works for tracker API key and path values
 - `~` path expansion works
-- `codex.command` is preserved as a shell command string
+- `agent.codex.command` and `agent.claude.command` are preserved as shell command strings
+- `agent.kind` validates against the supported enum (`codex` | `claude`)
 - Per-state concurrency override map normalizes state names and ignores invalid values
 - Prompt template renders `issue` and `attempt`
 - Prompt rendering fails on unknown variables (strict mode)
@@ -2006,34 +2271,68 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
   limits
 - If a snapshot API is implemented, timeout/unavailable cases are surfaced
 
-### 17.5 Coding-Agent App-Server Client
+### 17.5 Coding-Agent Adapter
 
-- Launch command uses workspace cwd and invokes `bash -lc <codex.command>`
-- Session startup follows the targeted Codex app-server protocol.
-- Client identity/capability payloads are valid when the targeted Codex app-server protocol requires
-  them.
-- Policy-related startup payloads use the implementation's documented approval/sandbox settings
-- Thread and turn identities exposed by the targeted protocol are extracted and used to emit
-  `session_started`
+Adapter-agnostic checks (apply to whichever adapter implementations the runtime ships):
+
+- Launch command uses workspace cwd and invokes `bash -lc <agent.<kind>.command>`
+- Per-issue prompt is rendered from the workflow template and supplied as the first turn input
 - Request/response read timeout is enforced
 - Turn timeout is enforced
-- Transport framing required by the targeted protocol is handled correctly
-- For stdio-based transports, diagnostic stderr handling is kept separate from the protocol stream
-- Command/file-change approvals are handled according to the implementation's documented policy
+- Continuation turns reuse the same live session
+- Command/file-change approvals are handled according to the adapter's documented policy
 - Unsupported dynamic tool calls are rejected without stalling the session
-- User input requests are handled according to the implementation's documented policy and do not
-  stall indefinitely
-- Usage and rate-limit telemetry exposed by the targeted protocol is extracted
-- Approval, user-input-required, usage, and rate-limit signals are interpreted according to the
-  targeted protocol
-- If client-side tools are implemented, session startup advertises the supported tool specs
-  using the targeted app-server protocol
+- User input requests are handled according to the adapter's documented policy and do not stall
+  indefinitely
+- Emitted events follow the standard vocabulary in §10.3 (with `agent_kind`, `session_id`)
 - If the `linear_graphql` client-side tool extension is implemented:
-  - the tool is advertised to the session
+  - the tool is advertised to the session via the adapter's mechanism
   - valid `query` / `variables` inputs execute against configured Linear auth
   - top-level GraphQL `errors` produce `success=false` while preserving the GraphQL body
   - invalid arguments, missing auth, and transport failures return structured failure payloads
   - unsupported tool names still fail without stalling the session
+
+If the Codex adapter is implemented (`agent.kind == codex`):
+
+- Session startup follows the targeted Codex app-server protocol
+- Client identity/capability payloads are valid when the targeted Codex app-server protocol
+  requires them
+- Policy-related startup payloads use the implementation's documented approval/sandbox settings
+- Thread and turn identities exposed by the targeted protocol are extracted and used to emit
+  `session_started`
+- Transport framing required by the targeted protocol is handled correctly
+- For stdio-based transports, diagnostic stderr handling is kept separate from the protocol stream
+- Usage and rate-limit telemetry exposed by the targeted protocol is extracted
+- Approval, user-input-required, usage, and rate-limit signals are interpreted according to the
+  targeted protocol
+- If client-side tools are implemented, session startup advertises the supported tool specs using
+  the targeted app-server protocol
+
+If the Claude adapter is implemented (`agent.kind == claude`):
+
+- Sidecar launch uses workspace cwd and forwards `ANTHROPIC_API_KEY` (and any present
+  Bedrock/Vertex/Foundry routing env vars) per §10.8
+- The `init` handshake completes before any `turn` request is sent
+- The first `SystemMessage` with `subtype == "init"` is parsed and `session_id` (UUID) is
+  captured for logs (Python: `message.data["session_id"]`; TypeScript: `message.session_id`)
+- A `turn` request → `turn_end` round-trip emits the standard event vocabulary plus `usage`
+  totals (snake_case keys: `input_tokens`, `output_tokens`, `cache_creation_input_tokens`,
+  `cache_read_input_tokens`) and is summed across turns rather than treated per-turn as
+  cumulative
+- Tool-call round-trip: sidecar `tool_call` → Symphony `tool_handler` → sidecar `tool_result`
+- Permission round-trip: sidecar `permission_request` → Symphony policy → sidecar
+  `permission_response`
+- Sidecar `interrupt` aborts the in-flight turn cleanly via `await client.interrupt()`
+- Sidecar process exit / malformed-line / stall behaviours mirror the Codex adapter's error
+  mapping (mapped to `claude_sidecar_not_found` / `claude_sdk_error` / `permission_denied` per
+  §10.5)
+- When `permission_mode == "dontAsk"`, tools absent from `agent.claude.allowed_tools` are
+  refused without prompting and without stalling
+- A `PreToolUse` hook rejects tool inputs whose realpath escapes the workspace
+- `setting_sources == []` is honored (the sidecar does not load `.claude/settings.json` or
+  other host-level Claude Code settings)
+- If `linear_graphql` is implemented, it is registered via `create_sdk_mcp_server` + `@tool`
+  (in-process MCP) and addressed as `mcp__<server_name>__linear_graphql` in `allowed_tools`
 
 ### 17.6 Observability
 
@@ -2062,6 +2361,8 @@ network access, or external service permissions are unavailable.
 
 - A real tracker smoke test can be run with valid credentials supplied by `LINEAR_API_KEY` or a
   documented local bootstrap mechanism (for example `~/.linear_api_key`).
+- If the Claude adapter is implemented, a real Claude integration smoke test can be run with
+  `ANTHROPIC_API_KEY` (or the equivalent provider auth env var) and `agent.kind: claude`.
 - Real integration tests SHOULD use isolated test identifiers/workspaces and clean up tracker
   artifacts when practical.
 - A skipped real-integration test SHOULD be reported as skipped, not silently treated as passed.
@@ -2087,22 +2388,26 @@ Use the same validation profiles as Section 17:
 - Workspace manager with sanitized per-issue workspaces
 - Workspace lifecycle hooks (`after_create`, `before_run`, `after_run`, `before_remove`)
 - Hook timeout config (`hooks.timeout_ms`, default `60000`)
-- Coding-agent app-server subprocess client with JSON line protocol
-- Codex launch command config (`codex.command`, default `codex app-server`)
+- Coding-agent adapter contract from §10 (start session, run turn, emit standard event vocabulary,
+  stop session) implemented for at least one of the supported `agent.kind` values
+- Adapter selection config (`agent.kind`, default `codex`) and at least one conforming adapter
+  implementation (Codex App-Server per §10.7 or Claude Agent SDK per §10.8)
 - Strict prompt rendering with `issue` and `attempt` variables
 - Exponential retry queue with continuation retries after normal exit
 - Configurable retry backoff cap (`agent.max_retry_backoff_ms`, default 5m)
 - Reconciliation that stops runs on terminal/non-active tracker states
 - Workspace cleanup for terminal issues (startup sweep + active transition)
-- Structured logs with `issue_id`, `issue_identifier`, and `session_id`
+- Structured logs with `issue_id`, `issue_identifier`, `session_id`, and `agent_kind`
 - Operator-visible observability (structured logs; OPTIONAL snapshot/status surface)
 
 ### 18.2 RECOMMENDED Extensions (Not REQUIRED for Conformance)
 
 - HTTP server extension honors CLI `--port` over `server.port`, uses a safe default bind host, and
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
-- `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the
-  app-server session using configured Symphony auth.
+- `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the active
+  adapter's session using configured Symphony auth (per §10.4).
+- Claude Agent SDK adapter (per §10.8) exposes Symphony orchestration through `claude-agent-sdk`
+  as an additional `agent.kind` option.
 - TODO: Persist retry queue and session metadata across process restarts.
 - TODO: Make observability settings configurable in workflow front matter without prescribing UI
   implementation details.
@@ -2112,7 +2417,8 @@ Use the same validation profiles as Section 17:
 
 ### 18.3 Operational Validation Before Production (RECOMMENDED)
 
-- Run the `Real Integration Profile` from Section 17.8 with valid credentials and network access.
+- Run the `Real Integration Profile` from Section 17.8 with valid credentials and network access
+  for the selected adapter (`agent.kind`).
 - Verify hook execution and workflow path resolution on the target host OS/shell environment.
 - If the OPTIONAL HTTP server is shipped, verify the configured port behavior and loopback/default
   bind expectations on the target environment.
