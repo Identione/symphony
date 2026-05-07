@@ -141,6 +141,41 @@ defmodule SymphonyElixir.AgentAdapterDispatchTest do
       assert :ok = Config.validate!()
     end
 
+    test "validate!/0 rejects agent.kind == claude with non-empty worker.ssh_hosts" do
+      # Claude has no remote-worker support yet (Claude.AppServer always
+      # spawns a local bash port). If the orchestrator picked an SSH host
+      # under this config, every Claude turn would dispatch and then fail
+      # at `start_session` with `{:claude_remote_worker_unsupported, host}`,
+      # then retry. Refuse the misconfig at boot instead.
+      System.put_env("ANTHROPIC_API_KEY", "sk-ant-test")
+
+      write_workflow_with_agent_block!("""
+      worker:
+        ssh_hosts:
+          - "alice@host"
+          - "bob@host"
+      agent:
+        kind: claude
+      """)
+
+      assert {:error, {:claude_remote_worker_unsupported, ["alice@host", "bob@host"]}} =
+               Config.validate!()
+    end
+
+    test "validate!/0 succeeds when agent.kind == codex with non-empty worker.ssh_hosts" do
+      # Regression guard: SSH worker support is the existing Codex path and
+      # must keep working after the Claude-incompat check is added.
+      write_workflow_with_agent_block!("""
+      worker:
+        ssh_hosts:
+          - "alice@host"
+      agent:
+        kind: codex
+      """)
+
+      assert :ok = Config.validate!()
+    end
+
     test "validate!/0 honors agent.claude.config_dir over CLAUDE_CONFIG_DIR/HOME defaults" do
       override =
         Path.join(System.tmp_dir!(), "symphony-claude-cfg-#{System.unique_integer([:positive])}")

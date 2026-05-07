@@ -251,6 +251,15 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.error("Invalid WORKFLOW.md config: #{message}")
         state
 
+      {:error, {:claude_remote_worker_unsupported, hosts}} ->
+        Logger.error(
+          "agent.kind: claude is incompatible with worker.ssh_hosts=#{inspect(hosts)}; " <>
+            "the Claude adapter has no remote-worker support. Either remove worker.ssh_hosts " <>
+            "or switch agent.kind to codex."
+        )
+
+        state
+
       {:error, {:missing_workflow_file, path, reason}} ->
         Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
         state

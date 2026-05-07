@@ -239,7 +239,14 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
       """
 
       assert {:ok, settings} = parse(yaml)
+      # Schema-level: nested wins for settings.agent.codex.* via Agent.changeset
       assert settings.agent.codex.command == "winner"
+      # Runtime-level: settings.codex.* must reflect the same winner so the
+      # legacy-field readers (codex_runtime_settings/2, Codex.AppServer.run_turn,
+      # Orchestrator stall) agree with the schema's stated preference.
+      # Without this, "agent.codex wins" is true at the schema layer but
+      # false at the runtime layer.
+      assert settings.codex.command == "winner"
     end
   end
 

@@ -137,13 +137,11 @@ defmodule SymphonyElixir.Claude.AppServer do
 
   # --- internals ---
 
-  # Codex routes remote workers through SSH.start_port (codex/app_server.ex).
-  # The Claude sidecar's command in WORKFLOW.md is an absolute path on the
-  # orchestrator host (`uv run --directory …`), so silently spawning it
-  # locally while AgentRunner expects a session on the chosen worker would
-  # mismatch workspace paths. Reject explicitly until remote support lands.
+  # The Claude sidecar command is an absolute path on the orchestrator host,
+  # so a remote worker_host would mismatch workspace paths. Reject until
+  # remote support lands. Config.validate! refuses claude+ssh_hosts at boot,
+  # so this is a defense-in-depth check.
   defp check_local_only(nil), do: :ok
-  defp check_local_only(""), do: :ok
 
   defp check_local_only(worker_host) when is_binary(worker_host) do
     {:error, {:claude_remote_worker_unsupported, worker_host}}
