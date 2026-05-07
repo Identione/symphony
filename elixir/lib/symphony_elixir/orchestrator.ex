@@ -446,7 +446,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_stalled_running_issues(%State{} = state) do
-    timeout_ms = Config.settings!().codex.stall_timeout_ms
+    timeout_ms = Config.active_stall_timeout_ms(Config.settings!())
 
     cond do
       timeout_ms <= 0 ->

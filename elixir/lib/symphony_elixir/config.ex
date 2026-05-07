@@ -103,6 +103,34 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @doc """
+  Per-turn timeout (ms) for the active adapter. AgentRunner passes this
+  to `adapter.run_turn/4` so the Claude path uses `agent.claude.turn_timeout_ms`
+  and the Codex path uses `codex.turn_timeout_ms` (which mirrors `agent.codex.*`
+  via the schema's bidirectional alias).
+  """
+  @spec active_turn_timeout_ms(Schema.t()) :: pos_integer()
+  def active_turn_timeout_ms(%Schema{} = settings) do
+    case settings.agent.kind do
+      "claude" -> settings.agent.claude.turn_timeout_ms
+      _ -> settings.codex.turn_timeout_ms
+    end
+  end
+
+  @doc """
+  Stall-detection timeout (ms) for the active adapter. The orchestrator's
+  reaper uses this to decide when an in-flight session has gone silent;
+  reading from `codex.stall_timeout_ms` regardless of `agent.kind` would
+  ignore the operator's `agent.claude.stall_timeout_ms`.
+  """
+  @spec active_stall_timeout_ms(Schema.t()) :: non_neg_integer()
+  def active_stall_timeout_ms(%Schema{} = settings) do
+    case settings.agent.kind do
+      "claude" -> settings.agent.claude.stall_timeout_ms
+      _ -> settings.codex.stall_timeout_ms
+    end
+  end
+
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
     with {:ok, settings} <- settings() do

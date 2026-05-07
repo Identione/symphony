@@ -388,21 +388,35 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  defp apply_legacy_codex_alias(%{"codex" => codex_block} = config) when is_map(codex_block) do
-    agent_block = Map.get(config, "agent", %{})
-    agent_block = if is_map(agent_block), do: agent_block, else: %{}
+  # Keep top-level `codex:` and nested `agent.codex:` in sync so runtime call
+  # sites that read `settings.codex.*` (e.g. Config.codex_runtime_settings/2,
+  # Codex.AppServer.run_turn/4, Orchestrator stall detection) see the user's
+  # values regardless of which layout the workflow uses. When both layouts
+  # are present, neither is overwritten — the changeset's nested cast then
+  # decides which wins (`agent.codex` does, see Agent.changeset/2).
+  defp apply_legacy_codex_alias(config) when is_map(config) do
+    agent_block =
+      case Map.get(config, "agent") do
+        block when is_map(block) -> block
+        _ -> %{}
+      end
 
-    case Map.get(agent_block, "codex") do
-      nil ->
-        merged_agent = Map.put(agent_block, "codex", codex_block)
-        Map.put(config, "agent", merged_agent)
+    top_codex = Map.get(config, "codex")
+    nested_codex = Map.get(agent_block, "codex")
 
-      _existing ->
+    case {top_codex, nested_codex} do
+      {top, nil} when is_map(top) ->
+        Map.put(config, "agent", Map.put(agent_block, "codex", top))
+
+      {nil, nested} when is_map(nested) ->
+        config
+        |> Map.put("codex", nested)
+        |> Map.put("agent", agent_block)
+
+      _ ->
         config
     end
   end
-
-  defp apply_legacy_codex_alias(config), do: config
 
   @spec resolve_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil) :: map() | nil
   def resolve_turn_sandbox_policy(settings, workspace \\ nil) do

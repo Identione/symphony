@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.ClaudeAdapterConfigTest do
   use SymphonyElixir.TestSupport
+  alias SymphonyElixir.Config
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Agent, Claude}
 
@@ -70,6 +71,27 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
     assert settings.agent.codex.turn_timeout_ms == 9876
     # legacy field still readable for back-compat
     assert settings.codex.command == "legacy-codex app-server"
+  end
+
+  test "agent.codex.* mirrors up to top-level codex.* for runtime readers" do
+    # Runtime readers (Config.codex_runtime_settings/2,
+    # Codex.AppServer.run_turn/4, Orchestrator.reconcile_stalled_running_issues/1)
+    # all read settings.codex.*. When the user only specifies the new
+    # agent.codex layout, those readers must still see the user's values
+    # — not schema defaults. Bidirectional alias.
+    yaml = """
+    tracker: {kind: linear, project_slug: p, api_key: t}
+    agent:
+      codex:
+        command: "nested-codex app-server"
+        turn_timeout_ms: 1234
+        stall_timeout_ms: 60000
+    """
+
+    assert {:ok, settings} = parse(yaml)
+    assert settings.codex.command == "nested-codex app-server"
+    assert settings.codex.turn_timeout_ms == 1234
+    assert settings.codex.stall_timeout_ms == 60_000
   end
 
   test "agent.claude defaults are present" do
@@ -218,6 +240,38 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
 
       assert {:ok, settings} = parse(yaml)
       assert settings.agent.codex.command == "winner"
+    end
+  end
+
+  describe "Config.active_turn_timeout_ms/1 + Config.active_stall_timeout_ms/1" do
+    # AgentRunner and the orchestrator's stall reaper need to pick the
+    # timeout matching the active adapter, not always Codex's.
+    test "default agent.kind == codex returns codex timeouts" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      codex:
+        turn_timeout_ms: 11111
+        stall_timeout_ms: 22222
+      """
+
+      assert {:ok, settings} = parse(yaml)
+      assert Config.active_turn_timeout_ms(settings) == 11_111
+      assert Config.active_stall_timeout_ms(settings) == 22_222
+    end
+
+    test "agent.kind == claude returns agent.claude timeouts" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      agent:
+        kind: claude
+        claude:
+          turn_timeout_ms: 33333
+          stall_timeout_ms: 44444
+      """
+
+      assert {:ok, settings} = parse(yaml)
+      assert Config.active_turn_timeout_ms(settings) == 33_333
+      assert Config.active_stall_timeout_ms(settings) == 44_444
     end
   end
 end
