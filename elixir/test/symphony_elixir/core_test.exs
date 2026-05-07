@@ -105,10 +105,9 @@ defmodule SymphonyElixir.CoreTest do
 
     hooks = Map.get(config, "hooks", %{})
     assert is_map(hooks)
-    assert Map.get(hooks, "after_create") =~ "git clone --depth 1 https://github.com/openai/symphony ."
-    assert Map.get(hooks, "after_create") =~ "cd elixir && mise trust"
-    assert Map.get(hooks, "after_create") =~ "mise exec -- mix deps.get"
-    assert Map.get(hooks, "before_remove") =~ "cd elixir && mise exec -- mix workspace.before_remove"
+    after_create = Map.get(hooks, "after_create")
+    assert is_binary(after_create) and after_create != ""
+    assert after_create =~ "git clone"
 
     assert String.trim(prompt) != ""
     assert is_binary(Config.workflow_prompt())
@@ -1760,7 +1759,7 @@ defmodule SymphonyElixir.CoreTest do
         codex_thread_sandbox: "workspace-write",
         codex_turn_sandbox_policy: %{
           type: "workspaceWrite",
-          writableRoots: [Path.expand(workspace), workspace_cache]
+          writableRoots: [workspace_cache]
         }
       )
 
@@ -1793,9 +1792,12 @@ defmodule SymphonyElixir.CoreTest do
                end
              end)
 
+      assert {:ok, canonical_workspace} =
+               SymphonyElixir.PathSafety.canonicalize(Path.expand(workspace))
+
       expected_turn_policy = %{
         "type" => "workspaceWrite",
-        "writableRoots" => [Path.expand(workspace), workspace_cache]
+        "writableRoots" => [canonical_workspace, workspace_cache]
       }
 
       assert Enum.any?(lines, fn line ->

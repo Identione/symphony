@@ -278,15 +278,18 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp start_thread(port, workspace, %{approval_policy: approval_policy, thread_sandbox: thread_sandbox}) do
-    send_message(port, %{
-      "method" => "thread/start",
-      "id" => @thread_start_id,
-      "params" => %{
+    params =
+      %{
         "approvalPolicy" => approval_policy,
-        "sandbox" => thread_sandbox,
         "cwd" => workspace,
         "dynamicTools" => DynamicTool.tool_specs()
       }
+      |> put_optional("sandbox", thread_sandbox)
+
+    send_message(port, %{
+      "method" => "thread/start",
+      "id" => @thread_start_id,
+      "params" => params
     })
 
     case await_response(port, @thread_start_id) do
@@ -302,10 +305,8 @@ defmodule SymphonyElixir.Codex.AppServer do
   end
 
   defp start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
-    send_message(port, %{
-      "method" => "turn/start",
-      "id" => @turn_start_id,
-      "params" => %{
+    params =
+      %{
         "threadId" => thread_id,
         "input" => [
           %{
@@ -315,9 +316,14 @@ defmodule SymphonyElixir.Codex.AppServer do
         ],
         "cwd" => workspace,
         "title" => "#{issue.identifier}: #{issue.title}",
-        "approvalPolicy" => approval_policy,
-        "sandboxPolicy" => turn_sandbox_policy
+        "approvalPolicy" => approval_policy
       }
+      |> put_optional("sandboxPolicy", turn_sandbox_policy)
+
+    send_message(port, %{
+      "method" => "turn/start",
+      "id" => @turn_start_id,
+      "params" => params
     })
 
     case await_response(port, @turn_start_id) do
@@ -336,6 +342,9 @@ defmodule SymphonyElixir.Codex.AppServer do
       auto_approve_requests
     )
   end
+
+  defp put_optional(map, _key, nil), do: map
+  defp put_optional(map, key, value), do: Map.put(map, key, value)
 
   defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests) do
     receive do
@@ -497,31 +506,77 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:approval_required, payload}}
 
       :unhandled ->
-        if needs_input?(method, payload) do
-          emit_message(
-            on_message,
-            :turn_input_required,
-            %{payload: payload, raw: payload_string},
-            metadata
-          )
+        cond do
+          codex_error_notification?(method) ->
+            emit_message(
+              on_message,
+              :notification,
+              %{
+                payload: payload,
+                raw: payload_string
+              },
+              metadata
+            )
 
-          {:error, {:turn_input_required, payload}}
-        else
-          emit_message(
-            on_message,
-            :notification,
-            %{
-              payload: payload,
-              raw: payload_string
-            },
-            metadata
-          )
+            error_payload = codex_error_payload(payload)
+            Logger.warning("Codex error notification: #{inspect(error_payload)}")
+            {:error, {:codex_error_notification, error_payload}}
 
-          Logger.debug("Codex notification: #{inspect(method)}")
-          receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
+          needs_input?(method, payload) ->
+            emit_message(
+              on_message,
+              :turn_input_required,
+              %{payload: payload, raw: payload_string},
+              metadata
+            )
+
+            {:error, {:turn_input_required, payload}}
+
+          true ->
+            emit_message(
+              on_message,
+              :notification,
+              %{
+                payload: payload,
+                raw: payload_string
+              },
+              metadata
+            )
+
+            log_codex_notification(method)
+            receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests)
         end
     end
   end
+
+  defp log_codex_notification(method) do
+    unless noisy_codex_notification?(method) do
+      Logger.debug("Codex notification: #{inspect(method)}")
+    end
+  end
+
+  defp noisy_codex_notification?(method)
+       when method in [
+              "item/agentMessage/delta",
+              "item/reasoning/summaryTextDelta",
+              "item/reasoning/textDelta",
+              "command/exec/outputDelta",
+              "item/commandExecution/outputDelta",
+              "codex/event/item_agent_message_delta",
+              "codex/event/agent_message_delta",
+              "codex/event/item_reasoning_summary_text_delta",
+              "codex/event/reasoning_text_delta",
+              "codex/event/command_exec_output_delta"
+            ],
+       do: true
+
+  defp noisy_codex_notification?(_method), do: false
+
+  defp codex_error_notification?(method) when method in ["codex/event/error", "error"], do: true
+  defp codex_error_notification?(_method), do: false
+
+  defp codex_error_payload(%{"params" => params}), do: params
+  defp codex_error_payload(payload), do: payload
 
   defp maybe_handle_approval_request(
          port,

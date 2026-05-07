@@ -446,6 +446,17 @@ fields locally if they want stricter startup checks.
   - Default: implementation-defined.
 - `turn_sandbox_policy` (Codex `SandboxPolicy` value)
   - Default: implementation-defined.
+  - Runtime note: when the policy type is `workspaceWrite`, implementations should ensure the
+    current issue workspace remains writable even when callers supply additional `writableRoots`.
+- `use_configured_permissions` (boolean)
+  - Default: `false`.
+  - When `true`, the runtime MUST NOT send `sandbox` or `sandboxPolicy` fields on `thread/start`
+    or `turn/start`. The Codex process retains its own permission/sandbox settings as configured
+    via its CLI/config (or as imposed by an external wrapper around `command`, e.g. an OS-level
+    sandbox launcher). Operators using this mode are responsible for ensuring the wrapper
+    constrains writes to the per-issue workspace; the runtime continues to enforce that the
+    Codex process cwd lives under `workspace.root`, but does not enforce filesystem/network
+    policy itself.
 - `turn_timeout_ms` (integer)
   - Default: `3600000` (1 hour)
 - `read_timeout_ms` (integer)

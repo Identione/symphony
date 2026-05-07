@@ -22,8 +22,8 @@ defmodule SymphonyElixir.Config do
 
   @type codex_runtime_settings :: %{
           approval_policy: String.t() | map(),
-          thread_sandbox: String.t(),
-          turn_sandbox_policy: map()
+          thread_sandbox: String.t() | nil,
+          turn_sandbox_policy: map() | nil
         }
 
   @spec settings() :: {:ok, Schema.t()} | {:error, term()}
@@ -107,12 +107,15 @@ defmodule SymphonyElixir.Config do
         {:ok,
          %{
            approval_policy: settings.codex.approval_policy,
-           thread_sandbox: settings.codex.thread_sandbox,
+           thread_sandbox: codex_thread_sandbox(settings),
            turn_sandbox_policy: turn_sandbox_policy
          }}
       end
     end
   end
+
+  defp codex_thread_sandbox(%{codex: %{use_configured_permissions: true}}), do: nil
+  defp codex_thread_sandbox(settings), do: settings.codex.thread_sandbox
 
   defp validate_semantics(settings) do
     cond do

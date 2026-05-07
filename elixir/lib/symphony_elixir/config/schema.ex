@@ -171,6 +171,7 @@ defmodule SymphonyElixir.Config.Schema do
 
       field(:thread_sandbox, :string, default: "workspace-write")
       field(:turn_sandbox_policy, :map)
+      field(:use_configured_permissions, :boolean, default: false)
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
@@ -186,6 +187,7 @@ defmodule SymphonyElixir.Config.Schema do
           :approval_policy,
           :thread_sandbox,
           :turn_sandbox_policy,
+          :use_configured_permissions,
           :turn_timeout_ms,
           :read_timeout_ms,
           :stall_timeout_ms
@@ -289,31 +291,39 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  @spec resolve_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil) :: map()
+  @spec resolve_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil) :: map() | nil
   def resolve_turn_sandbox_policy(settings, workspace \\ nil) do
-    case settings.codex.turn_sandbox_policy do
-      %{} = policy ->
-        policy
+    if settings.codex.use_configured_permissions do
+      nil
+    else
+      case settings.codex.turn_sandbox_policy do
+        %{} = policy ->
+          policy
 
-      _ ->
-        workspace
-        |> default_workspace_root(settings.workspace.root)
-        |> expand_local_workspace_root()
-        |> default_turn_sandbox_policy()
+        _ ->
+          workspace
+          |> default_workspace_root(settings.workspace.root)
+          |> expand_local_workspace_root()
+          |> default_turn_sandbox_policy()
+      end
     end
   end
 
   @spec resolve_runtime_turn_sandbox_policy(%__MODULE__{}, Path.t() | nil, keyword()) ::
-          {:ok, map()} | {:error, term()}
+          {:ok, map() | nil} | {:error, term()}
   def resolve_runtime_turn_sandbox_policy(settings, workspace \\ nil, opts \\ []) do
-    case settings.codex.turn_sandbox_policy do
-      %{} = policy ->
-        {:ok, policy}
+    if settings.codex.use_configured_permissions do
+      {:ok, nil}
+    else
+      case settings.codex.turn_sandbox_policy do
+        %{} = policy ->
+          {:ok, ensure_workspace_write_root(policy, workspace, opts)}
 
-      _ ->
-        workspace
-        |> default_workspace_root(settings.workspace.root)
-        |> default_runtime_turn_sandbox_policy(opts)
+        _ ->
+          workspace
+          |> default_workspace_root(settings.workspace.root)
+          |> default_runtime_turn_sandbox_policy(opts)
+      end
     end
   end
 
@@ -504,6 +514,35 @@ defmodule SymphonyElixir.Config.Schema do
   defp default_runtime_turn_sandbox_policy(workspace_root, _opts) do
     {:error, {:unsafe_turn_sandbox_policy, {:invalid_workspace_root, workspace_root}}}
   end
+
+  defp ensure_workspace_write_root(%{"type" => "workspaceWrite"} = policy, workspace, opts) do
+    case runtime_workspace_write_root(workspace, opts) do
+      nil ->
+        policy
+
+      workspace_root ->
+        writable_roots =
+          policy
+          |> Map.get("writableRoots", [])
+          |> normalize_writable_roots()
+          |> List.insert_at(0, workspace_root)
+          |> Enum.uniq()
+
+        Map.put(policy, "writableRoots", writable_roots)
+    end
+  end
+
+  defp ensure_workspace_write_root(policy, _workspace, _opts), do: policy
+
+  defp runtime_workspace_write_root(workspace, opts)
+       when is_binary(workspace) and workspace != "" do
+    if Keyword.get(opts, :remote, false), do: workspace, else: Path.expand(workspace)
+  end
+
+  defp runtime_workspace_write_root(_workspace, _opts), do: nil
+
+  defp normalize_writable_roots(roots) when is_list(roots), do: roots
+  defp normalize_writable_roots(_roots), do: []
 
   defp default_workspace_root(workspace, _fallback) when is_binary(workspace) and workspace != "",
     do: workspace

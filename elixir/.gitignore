@@ -43,6 +43,8 @@ erl_crash.dump
 .env.*
 .secrets
 .credentials
+mise.local.toml
+.mise.local.toml
 status.txt
 .codex/original-user-prompt.txt
 

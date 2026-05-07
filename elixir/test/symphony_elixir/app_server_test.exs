@@ -164,6 +164,18 @@ defmodule SymphonyElixir.AppServerTest do
         trace = File.read!(trace_file)
         lines = String.split(trace, "\n", trim: true)
 
+        {:ok, canonical_workspace} =
+          SymphonyElixir.PathSafety.canonicalize(Path.expand(workspace))
+
+        expected_policy =
+          case configured_policy do
+            %{"type" => "workspaceWrite"} ->
+              Map.put(configured_policy, "writableRoots", [canonical_workspace, "relative/path"])
+
+            _ ->
+              configured_policy
+          end
+
         assert Enum.any?(lines, fn line ->
                  if String.starts_with?(line, "JSON:") do
                    line
@@ -171,13 +183,126 @@ defmodule SymphonyElixir.AppServerTest do
                    |> Jason.decode!()
                    |> then(fn payload ->
                      payload["method"] == "turn/start" &&
-                       get_in(payload, ["params", "sandboxPolicy"]) == configured_policy
+                       get_in(payload, ["params", "sandboxPolicy"]) == expected_policy
                    end)
                  else
                    false
                  end
                end)
       end)
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server omits sandbox overrides when configured permissions are enabled" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-configured-permissions-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-1002")
+      codex_binary = Path.join(test_root, "fake-codex")
+      trace_file = Path.join(test_root, "codex-configured-permissions.trace")
+      previous_trace = System.get_env("SYMP_TEST_CODEx_TRACE")
+
+      on_exit(fn ->
+        if is_binary(previous_trace) do
+          System.put_env("SYMP_TEST_CODEx_TRACE", previous_trace)
+        else
+          System.delete_env("SYMP_TEST_CODEx_TRACE")
+        end
+      end)
+
+      System.put_env("SYMP_TEST_CODEx_TRACE", trace_file)
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_CODEx_TRACE:-/tmp/codex-configured-permissions.trace}"
+      count=0
+      while IFS= read -r line; do
+        count=$((count + 1))
+        printf 'JSON:%s\\n' "$line" >> "$trace_file"
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-1002"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-1002"}}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server",
+        codex_use_configured_permissions: true,
+        codex_turn_sandbox_policy: %{
+          type: "workspaceWrite",
+          networkAccess: true
+        }
+      )
+
+      issue = %Issue{
+        id: "issue-configured-permissions",
+        identifier: "MT-1002",
+        title: "Validate configured permissions",
+        description: "Ensure Symphony can let Codex use default_permissions",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-1002",
+        labels: ["backend"]
+      }
+
+      assert {:ok, _result} = AppServer.run(workspace, "Use configured permissions", issue)
+
+      trace = File.read!(trace_file)
+      lines = String.split(trace, "\n", trim: true)
+
+      assert Enum.any?(lines, fn line ->
+               if String.starts_with?(line, "JSON:") do
+                 line
+                 |> String.trim_leading("JSON:")
+                 |> Jason.decode!()
+                 |> then(fn payload ->
+                   payload["method"] == "thread/start" &&
+                     not Map.has_key?(payload["params"], "sandbox")
+                 end)
+               else
+                 false
+               end
+             end)
+
+      assert Enum.any?(lines, fn line ->
+               if String.starts_with?(line, "JSON:") do
+                 line
+                 |> String.trim_leading("JSON:")
+                 |> Jason.decode!()
+                 |> then(fn payload ->
+                   payload["method"] == "turn/start" &&
+                     not Map.has_key?(payload["params"], "sandboxPolicy")
+                 end)
+               else
+                 false
+               end
+             end)
     after
       File.rm_rf(test_root)
     end
@@ -1271,6 +1396,87 @@ defmodule SymphonyElixir.AppServerTest do
 
       assert_received {:app_server_message, %{event: :malformed, payload: "{\"method\":\"turn/completed\""}}
       assert_received {:app_server_message, %{event: :turn_completed}}
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "app server fails the turn when Codex emits an error notification" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-codex-error-notification-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-94")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            # initialized notification — no response expected
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-94"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-94"}}}'
+            printf '%s\\n' '{"method":"codex/event/error","params":{"message":"model rejected"}}'
+            printf '%s\\n' '{"method":"turn/completed"}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-codex-error-notification",
+        identifier: "MT-94",
+        title: "Codex error notification",
+        description: "Ensure Codex errors are not treated as successful turns",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-94",
+        labels: ["backend"]
+      }
+
+      test_pid = self()
+      on_message = fn message -> send(test_pid, {:app_server_message, message}) end
+
+      log =
+        capture_log(fn ->
+          assert {:error, {:codex_error_notification, %{"message" => "model rejected"}}} =
+                   AppServer.run(workspace, "Trigger Codex error", issue, on_message: on_message)
+        end)
+
+      assert_received {:app_server_message,
+                       %{
+                         event: :notification,
+                         payload: %{"method" => "codex/event/error", "params" => %{"message" => "model rejected"}}
+                       }}
+
+      assert log =~ "Codex error notification"
+      assert log =~ "model rejected"
     after
       File.rm_rf(test_root)
     end

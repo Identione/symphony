@@ -23,7 +23,7 @@ moving from managing coding agents to managing work that needs to get done.
 Tell your favorite coding agent to build Symphony in a programming language of your choice:
 
 > Implement Symphony according to the following spec:
-> https://github.com/openai/symphony/blob/main/SPEC.md
+> https://github.com/Identione/symphony/blob/main/SPEC.md
 
 ### Option 2. Use our experimental reference implementation
 
@@ -32,7 +32,10 @@ and run the Elixir-based Symphony implementation. You can also ask your favorite
 help with the setup:
 
 > Set up Symphony for my repository based on
-> https://github.com/openai/symphony/blob/main/elixir/README.md
+> https://github.com/Identione/symphony/blob/main/elixir/README.md
+
+For operator setup that lives outside the repo — in particular the Codex permissions profile
+required when `WORKFLOW.md` sets `codex.use_configured_permissions: true` — see [SETUP.md](SETUP.md).
 
 ---
 

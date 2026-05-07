@@ -92,6 +92,30 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace bootstraps stale empty issue directory when after_create is configured" do
+    workspace_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-empty-bootstrap-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      stale_workspace = Path.join(workspace_root, "MT-EMPTY")
+      File.mkdir_p!(stale_workspace)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        hook_after_create: "echo bootstrapped > README.md"
+      )
+
+      assert {:ok, workspace} = Workspace.create_for_issue("MT-EMPTY")
+      assert workspace == stale_workspace
+      assert File.read!(Path.join(workspace, "README.md")) == "bootstrapped\n"
+    after
+      File.rm_rf(workspace_root)
+    end
+  end
+
   test "workspace replaces stale non-directory paths" do
     workspace_root =
       Path.join(
@@ -206,6 +230,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert {:error, {:workspace_hook_failed, "after_create", 17, _output}} =
                Workspace.create_for_issue("MT-FAIL")
+
+      refute File.exists?(Path.join(workspace_root, "MT-FAIL"))
     after
       File.rm_rf(workspace_root)
     end
@@ -227,6 +253,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert {:error, {:workspace_hook_timeout, "after_create", 10}} =
                Workspace.create_for_issue("MT-TIMEOUT")
+
+      refute File.exists?(Path.join(workspace_root, "MT-TIMEOUT"))
     after
       File.rm_rf(workspace_root)
     end
@@ -755,6 +783,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
            }
 
     assert config.codex.thread_sandbox == "workspace-write"
+    assert config.codex.use_configured_permissions == false
 
     assert {:ok, canonical_default_workspace_root} =
              SymphonyElixir.PathSafety.canonicalize(Path.join(System.tmp_dir!(), "symphony_workspaces"))
@@ -771,6 +800,17 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.turn_timeout_ms == 3_600_000
     assert config.codex.read_timeout_ms == 5_000
     assert config.codex.stall_timeout_ms == 300_000
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      codex_use_configured_permissions: true,
+      codex_thread_sandbox: "workspace-write",
+      codex_turn_sandbox_policy: %{type: "workspaceWrite", networkAccess: true}
+    )
+
+    assert {:ok, runtime_settings} = Config.codex_runtime_settings("/tmp/symphony-workspace")
+    assert Config.settings!().codex.use_configured_permissions == true
+    assert runtime_settings.thread_sandbox == nil
+    assert runtime_settings.turn_sandbox_policy == nil
 
     write_workflow_file!(Workflow.workflow_file_path(),
       codex_command: "codex --config 'model=\"gpt-5.5\"' app-server"
@@ -797,7 +837,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       codex_thread_sandbox: "workspace-write",
       codex_turn_sandbox_policy: %{
         type: "workspaceWrite",
-        writableRoots: [explicit_workspace, explicit_cache]
+        writableRoots: [explicit_cache]
       }
     )
 
@@ -1142,7 +1182,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
       assert runtime_settings.turn_sandbox_policy == %{
                "type" => "workspaceWrite",
-               "writableRoots" => ["relative/path"],
+               "writableRoots" => [issue_workspace, "relative/path"],
                "networkAccess" => true
              }
 
@@ -1163,6 +1203,74 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     after
       File.rm_rf(test_root)
     end
+  end
+
+  test "runtime sandbox policy resolution leaves explicit workspaceWrite roots unchanged without a workspace" do
+    settings = %Schema{
+      codex: %Codex{
+        turn_sandbox_policy: %{
+          "type" => "workspaceWrite",
+          "writableRoots" => "not-a-list",
+          "networkAccess" => true
+        }
+      },
+      workspace: %Schema.Workspace{root: "/tmp/ignored"}
+    }
+
+    assert {:ok, policy} = Schema.resolve_runtime_turn_sandbox_policy(settings, nil)
+
+    assert policy == %{
+             "type" => "workspaceWrite",
+             "writableRoots" => "not-a-list",
+             "networkAccess" => true
+           }
+  end
+
+  test "runtime sandbox policy resolution normalizes explicit workspaceWrite roots when needed" do
+    issue_workspace = "/tmp/MT-201"
+
+    settings = %Schema{
+      codex: %Codex{
+        turn_sandbox_policy: %{
+          "type" => "workspaceWrite",
+          "writableRoots" => "not-a-list",
+          "networkAccess" => true
+        }
+      },
+      workspace: %Schema.Workspace{root: "/tmp/ignored"}
+    }
+
+    assert {:ok, policy} = Schema.resolve_runtime_turn_sandbox_policy(settings, issue_workspace)
+
+    assert policy == %{
+             "type" => "workspaceWrite",
+             "writableRoots" => [issue_workspace],
+             "networkAccess" => true
+           }
+  end
+
+  test "runtime sandbox policy resolution preserves explicit workspaceWrite roots for remote workers" do
+    remote_workspace = "/remote/workspaces/MT-200"
+
+    settings = %Schema{
+      codex: %Codex{
+        turn_sandbox_policy: %{
+          "type" => "workspaceWrite",
+          "writableRoots" => ["relative/path"],
+          "networkAccess" => true
+        }
+      },
+      workspace: %Schema.Workspace{root: "/tmp/ignored"}
+    }
+
+    assert {:ok, policy} =
+             Schema.resolve_runtime_turn_sandbox_policy(settings, remote_workspace, remote: true)
+
+    assert policy == %{
+             "type" => "workspaceWrite",
+             "writableRoots" => [remote_workspace, "relative/path"],
+             "networkAccess" => true
+           }
   end
 
   test "path safety returns errors for invalid path segments" do
