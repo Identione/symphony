@@ -168,6 +168,19 @@ defmodule SymphonyElixir.ClaudeAppServerTest do
     assert {:error, :response_timeout} = AppServer.start_session(workspace, config: config)
   end
 
+  test "start_session rejects a non-nil worker_host with a clear error", %{workspace: workspace} do
+    # Codex's adapter routes remote workers through SSH.start_port; the Claude
+    # sidecar is local-only for now (the sidecar's `uv run …` command points at
+    # an absolute path on the orchestrator host). Until remote worker support
+    # is implemented, fail loudly instead of silently spawning a local bash
+    # against a workspace path that lives on a different host.
+    cmd = "true"
+    config = %{default_claude_config() | command: cmd}
+
+    assert {:error, {:claude_remote_worker_unsupported, "alice@host"}} =
+             AppServer.start_session(workspace, config: config, worker_host: "alice@host")
+  end
+
   test "run_turn returns turn_end with usage when sidecar replies", %{workspace: workspace} do
     # Sidecar pre-scripts the full happy-path: ready, system_init, then a
     # turn_end keyed off whatever the test sends. In this lightweight stub,

@@ -28,8 +28,10 @@ defmodule SymphonyElixir.Claude.AppServer do
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
     config = Keyword.get_lazy(opts, :config, &resolve_config/0)
+    worker_host = Keyword.get(opts, :worker_host)
 
-    with {:ok, expanded_workspace} <- canonical_workspace(workspace),
+    with :ok <- check_local_only(worker_host),
+         {:ok, expanded_workspace} <- canonical_workspace(workspace),
          {:ok, port} <- open_port(expanded_workspace, config),
          :ok <- write_init(port, expanded_workspace, config),
          {:ok, leftover} <-
@@ -134,6 +136,18 @@ defmodule SymphonyElixir.Claude.AppServer do
   def stop_session(_), do: :ok
 
   # --- internals ---
+
+  # Codex routes remote workers through SSH.start_port (codex/app_server.ex).
+  # The Claude sidecar's command in WORKFLOW.md is an absolute path on the
+  # orchestrator host (`uv run --directory …`), so silently spawning it
+  # locally while AgentRunner expects a session on the chosen worker would
+  # mismatch workspace paths. Reject explicitly until remote support lands.
+  defp check_local_only(nil), do: :ok
+  defp check_local_only(""), do: :ok
+
+  defp check_local_only(worker_host) when is_binary(worker_host) do
+    {:error, {:claude_remote_worker_unsupported, worker_host}}
+  end
 
   defp resolve_config do
     settings = Config.settings!()

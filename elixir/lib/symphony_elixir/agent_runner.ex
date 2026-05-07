@@ -215,7 +215,8 @@ defmodule SymphonyElixir.AgentRunner do
              app_session,
              prompt,
              issue,
-             on_message: compose_message_handler(adapter, recipient, issue)
+             on_message: compose_message_handler(adapter, recipient, issue),
+             turn_timeout_ms: Config.active_turn_timeout_ms(Config.settings!())
            ) do
       Logger.info(
         "Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} " <>
