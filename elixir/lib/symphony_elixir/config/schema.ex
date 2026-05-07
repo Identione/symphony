@@ -388,12 +388,10 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
-  # Keep top-level `codex:` and nested `agent.codex:` in sync so runtime call
-  # sites that read `settings.codex.*` (e.g. Config.codex_runtime_settings/2,
-  # Codex.AppServer.run_turn/4, Orchestrator stall detection) see the user's
-  # values regardless of which layout the workflow uses. When both layouts
-  # are present, neither is overwritten — the changeset's nested cast then
-  # decides which wins (`agent.codex` does, see Agent.changeset/2).
+  # Several runtime call sites still read `settings.codex.*` rather than
+  # `settings.agent.codex.*`. Mirror in both directions so the two layouts
+  # stay in sync; when both are present, nested wins (matches
+  # Agent.changeset/2's preference at the schema layer).
   defp apply_legacy_codex_alias(config) when is_map(config) do
     agent_block =
       case Map.get(config, "agent") do
@@ -408,7 +406,7 @@ defmodule SymphonyElixir.Config.Schema do
       {top, nil} when is_map(top) ->
         Map.put(config, "agent", Map.put(agent_block, "codex", top))
 
-      {nil, nested} when is_map(nested) ->
+      {_, nested} when is_map(nested) ->
         config
         |> Map.put("codex", nested)
         |> Map.put("agent", agent_block)

@@ -103,12 +103,7 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  @doc """
-  Per-turn timeout (ms) for the active adapter. AgentRunner passes this
-  to `adapter.run_turn/4` so the Claude path uses `agent.claude.turn_timeout_ms`
-  and the Codex path uses `codex.turn_timeout_ms` (which mirrors `agent.codex.*`
-  via the schema's bidirectional alias).
-  """
+  @doc "Per-turn timeout (ms) for the active adapter."
   @spec active_turn_timeout_ms(Schema.t()) :: pos_integer()
   def active_turn_timeout_ms(%Schema{} = settings) do
     case settings.agent.kind do
@@ -117,12 +112,7 @@ defmodule SymphonyElixir.Config do
     end
   end
 
-  @doc """
-  Stall-detection timeout (ms) for the active adapter. The orchestrator's
-  reaper uses this to decide when an in-flight session has gone silent;
-  reading from `codex.stall_timeout_ms` regardless of `agent.kind` would
-  ignore the operator's `agent.claude.stall_timeout_ms`.
-  """
+  @doc "Stall-detection timeout (ms) for the active adapter."
   @spec active_stall_timeout_ms(Schema.t()) :: non_neg_integer()
   def active_stall_timeout_ms(%Schema{} = settings) do
     case settings.agent.kind do
@@ -158,10 +148,23 @@ defmodule SymphonyElixir.Config do
   defp codex_thread_sandbox(settings), do: settings.codex.thread_sandbox
 
   defp validate_semantics(settings) do
-    with :ok <- validate_tracker(settings.tracker) do
-      validate_agent(settings.agent)
+    with :ok <- validate_tracker(settings.tracker),
+         :ok <- validate_agent(settings.agent) do
+      validate_worker_adapter_compat(settings)
     end
   end
+
+  # Claude has no remote-worker support; pairing it with ssh_hosts would
+  # dispatch, fail at start_session, retry, and loop. Refuse at boot.
+  defp validate_worker_adapter_compat(%{
+         agent: %{kind: "claude"},
+         worker: %{ssh_hosts: hosts}
+       })
+       when is_list(hosts) and hosts != [] do
+    {:error, {:claude_remote_worker_unsupported, hosts}}
+  end
+
+  defp validate_worker_adapter_compat(_settings), do: :ok
 
   defp validate_tracker(tracker) do
     cond do
