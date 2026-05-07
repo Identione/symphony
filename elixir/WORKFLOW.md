@@ -29,39 +29,50 @@ agent:
   # is preserved so the swap is one-line.
   kind: claude
   claude:
-    # Absolute path so `bash -lc` resolves it regardless of the per-issue
-    # workspace cwd that the sidecar is launched in.
-    command: uv run --directory /home/hniska/stash.tail-f.com/identione/symphoni-test-claude/elixir/priv/claude_agent python -m symphony_claude_agent
+    # Approach A (../SETUP.md): jai is the outer sandbox. Run `make sidecar-deps`
+    # once outside jai to populate priv/claude_agent/.venv on the real
+    # filesystem; otherwise `uv run` inside the sandbox lands on the COW
+    # $HOME overlay and re-installs every fresh session.
+    # `$SYMPHONY_CLAUDE_PRIV_DIR` is injected by `Claude.AppServer` (resolves
+    # to this app's `priv/claude_agent`) and expanded by bash. The Port is
+    # spawned with cd:<issue-workspace>, so a workspace-relative path here
+    # would not work.
+    command: jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
     # Scope Claude auth to this CLAUDE_CONFIG_DIR so we use the identione
     # Max subscription, not whatever ~/.claude/ happens to be logged into.
     # Symphony's preflight checks <config_dir>/.credentials.json, and the
     # sidecar inherits CLAUDE_CONFIG_DIR=<config_dir> at run time.
     config_dir: ~/.claude-identione
     model: claude-sonnet-4-6
-    # `dontAsk` denies anything not in `allowed_tools` without prompting,
-    # which is what we want for unattended runs. The whitelist below mirrors
-    # what Codex's `approval_policy: never` + workspace-write sandbox grants:
-    # full filesystem access plus shell, but no WebFetch/WebSearch and no
-    # unsupervised sub-agents.
-    permission_mode: dontAsk
-    allowed_tools:
-      - Read
-      - Glob
-      - Grep
-      - Edit
-      - Write
-      - MultiEdit
-      - Bash
-      - BashOutput
-      - KillBash
-      - TodoWrite
-      - NotebookEdit
-      # In-process MCP tool the sidecar exposes; round-trips back to Symphony
-      # so Linear auth never leaves the orchestrator.
-      - mcp__symphony__linear_graphql
+    # jai is the security boundary, so the SDK steps out of the way —
+    # mirrors Codex's `--config sandbox_mode=danger-full-access` posture.
+    # Switch to `dontAsk` + an `allowed_tools` whitelist (see commented
+    # block under "Alternative" below) for hosts without jai (kernel < 6.13,
+    # non-Linux).
+    permission_mode: bypassPermissions
+    extra_env:
+      # Source dir is on jai's COW overlay; suppress .pyc writes so the
+      # overlay does not accumulate cache files between sessions.
+      PYTHONDONTWRITEBYTECODE: "1"
     # Do not inherit ~/.claude/settings.json or other host-level Claude Code
     # settings — keep the sidecar's posture deterministic.
     setting_sources: []
+    # Alternative (no jai — Approach B equivalent for Claude):
+    #   command: uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
+    #   permission_mode: dontAsk
+    #   allowed_tools:
+    #     - Read
+    #     - Glob
+    #     - Grep
+    #     - Edit
+    #     - Write
+    #     - MultiEdit
+    #     - Bash
+    #     - BashOutput
+    #     - KillBash
+    #     - TodoWrite
+    #     - NotebookEdit
+    #     - mcp__symphony__linear_graphql
   codex:
     # Pinned to <=0.114.0: Codex 0.115.0+ enforces a hard-coded workspace-write
     # `.git` deny rule that blocks unattended commits/pushes. See
@@ -144,7 +155,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `commit`: produce clean, logical commits during implementation.
 - `push`: keep remote branch current and publish updates.
 - `pull`: keep branch updated with latest `origin/main` before handoff.
-- `land`: when ticket reaches `Merging`, explicitly open and follow `.codex/skills/land/SKILL.md`, which includes the `land` loop.
+- `land`: when ticket reaches `Merging`, open and follow the `land` skill, which includes the `land` loop.
 
 ## Status map
 
@@ -167,7 +178,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
      - If PR is already attached, start by reviewing all open PR comments and deciding required changes vs explicit pushback responses.
    - `In Progress` -> continue execution flow from current scratchpad comment.
    - `Human Review` -> wait and poll for decision/review updates.
-   - `Merging` -> on entry, open and follow `.codex/skills/land/SKILL.md`; do not call `gh pr merge` directly.
+   - `Merging` -> on entry, open and follow the `land` skill; do not call `gh pr merge` directly.
    - `Rework` -> run rework flow.
    - `Done` -> do nothing and shut down.
 4. Check whether a PR already exists for the current branch and whether it is closed.
@@ -175,14 +186,14 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
    - Create a fresh branch from `origin/main` and restart execution flow as a new attempt.
 5. For `Todo` tickets, do startup sequencing in this exact order:
    - `update_issue(..., state: "In Progress")`
-   - find/create `## Codex Workpad` bootstrap comment
+   - find/create `## Symphony Workpad` bootstrap comment
    - only then begin analysis/planning/implementation work.
 6. Add a short comment if state and issue content are inconsistent, then proceed with the safest flow.
 
 ## Step 1: Start/continue execution (Todo or In Progress)
 
 1.  Find or create a single persistent scratchpad comment for the issue:
-    - Search existing comments for a marker header: `## Codex Workpad`.
+    - Search existing comments for a marker header: `## Symphony Workpad`.
     - Ignore resolved comments while searching; only active/unresolved comments are eligible to be reused as the live workpad.
     - If found, reuse that comment; do not create a new workpad comment.
     - If not found, create one workpad comment and use it for all updates.
@@ -289,7 +300,7 @@ Use this only when completion is blocked by missing required tools or missing au
 2. Poll for updates as needed, including GitHub PR review comments from humans and bots.
 3. If review feedback requires changes, move the issue to `Rework` and follow the rework flow.
 4. If approved, human moves the issue to `Merging`.
-5. When the issue is in `Merging`, open and follow `.codex/skills/land/SKILL.md`, then run the `land` skill in a loop until the PR is merged. Do not call `gh pr merge` directly.
+5. When the issue is in `Merging`, open and follow the `land` skill, then run it in a loop until the PR is merged. Do not call `gh pr merge` directly.
 6. After merge is complete, move the issue to `Done`.
 
 ## Step 4: Rework handling
@@ -297,11 +308,11 @@ Use this only when completion is blocked by missing required tools or missing au
 1. Treat `Rework` as a full approach reset, not incremental patching.
 2. Re-read the full issue body and all human comments; explicitly identify what will be done differently this attempt.
 3. Close the existing PR tied to the issue.
-4. Remove the existing `## Codex Workpad` comment from the issue.
+4. Remove the existing `## Symphony Workpad` comment from the issue.
 5. Create a fresh branch from `origin/main`.
 6. Start over from the normal kickoff flow:
    - If current issue state is `Todo`, move it to `In Progress`; otherwise keep the current state.
-   - Create a new bootstrap `## Codex Workpad` comment.
+   - Create a new bootstrap `## Symphony Workpad` comment.
    - Build a fresh plan/checklist and execute end-to-end.
 
 ## Completion bar before Human Review
@@ -320,7 +331,7 @@ Use this only when completion is blocked by missing required tools or missing au
 - For closed/merged branch PRs, create a new branch from `origin/main` and restart from reproduction/planning as if starting fresh.
 - If issue state is `Backlog`, do not modify it; wait for human to move to `Todo`.
 - Do not edit the issue body/description for planning or progress tracking.
-- Use exactly one persistent workpad comment (`## Codex Workpad`) per issue.
+- Use exactly one persistent workpad comment (`## Symphony Workpad`) per issue.
 - If comment editing is unavailable in-session, use the update script. Only report blocked if both MCP editing and script-based editing are unavailable.
 - Temporary proof edits are allowed only for local verification and must be reverted before commit.
 - If out-of-scope improvements are found, create a separate Backlog issue rather
@@ -339,7 +350,7 @@ Use this only when completion is blocked by missing required tools or missing au
 Use this exact structure for the persistent workpad comment and keep it updated in place throughout execution:
 
 ````md
-## Codex Workpad
+## Symphony Workpad
 
 ```text
 <hostname>:<abs-path>@<short-sha>

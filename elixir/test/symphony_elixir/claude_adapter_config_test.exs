@@ -96,7 +96,7 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
 
   test "agent.claude defaults are present" do
     assert {:ok, settings} = parse(~s|tracker: {kind: linear, project_slug: p, api_key: t}\n|)
-    assert settings.agent.claude.permission_mode == "dontAsk"
+    assert settings.agent.claude.permission_mode == "bypassPermissions"
     assert settings.agent.claude.system_prompt_preset == "claude_code"
     assert settings.agent.claude.allowed_tools == []
     assert settings.agent.claude.disallowed_tools == []
@@ -109,6 +109,27 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
     # `verbose=false` keeps the SDK's noisier streams (partial messages,
     # hook events) off by default; users opt in for debugging.
     assert settings.agent.claude.verbose == false
+  end
+
+  test "default command runs the sidecar under jai" do
+    assert {:ok, settings} = parse(~s|tracker: {kind: linear, project_slug: p, api_key: t}\n|)
+    assert String.starts_with?(settings.agent.claude.command, "jai ")
+    assert settings.agent.claude.command =~ "symphony_claude_agent"
+  end
+
+  test "user-supplied jai-prefixed command flows through unchanged" do
+    yaml = """
+    tracker: {kind: linear, project_slug: p, api_key: t}
+    agent:
+      kind: claude
+      claude:
+        command: "jai uv run --project priv/claude_agent python -m symphony_claude_agent"
+    """
+
+    assert {:ok, settings} = parse(yaml)
+
+    assert settings.agent.claude.command ==
+             "jai uv run --project priv/claude_agent python -m symphony_claude_agent"
   end
 
   test "agent.claude accepts overrides" do

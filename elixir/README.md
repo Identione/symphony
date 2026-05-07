@@ -19,10 +19,13 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
    - `agent.kind: codex` (default) — runs Codex in
      [App Server mode](https://developers.openai.com/codex/app-server/) (`agent.codex.command`).
    - `agent.kind: claude` — launches the Claude Agent SDK sidecar in `priv/claude_agent/`
-     (`agent.claude.command`, default `uv run --project priv/claude_agent python -m
-     symphony_claude_agent`). The sidecar hosts `claude-agent-sdk` and is configured for
-     unattended sandboxed operation: `permission_mode: dontAsk` + tight `allowed_tools` whitelist
-     + workspace-`cwd` boundary; anything not pre-approved is denied without prompting.
+     (`agent.claude.command`, default `jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR
+     python -m symphony_claude_agent` — the env var is injected by `Claude.AppServer`). The sidecar hosts `claude-agent-sdk` and runs under
+     [`jai`](https://jai.scs.stanford.edu/) as the outer sandbox, with `permission_mode:
+     bypassPermissions` so the SDK steps out of the way (Codex Approach A parity — see
+     [SETUP.md](../SETUP.md)). For hosts without jai, switch to `dontAsk` plus an explicit
+     `allowed_tools` whitelist; the shipped `WORKFLOW.md` carries the safe defaults in a
+     commented "Alternative" block.
 4. Sends the workflow prompt to the active adapter
 5. Keeps the agent working on the issue until the work is done (capped by `agent.max_turns`)
 
@@ -142,10 +145,15 @@ Notes:
   - **Approach A (current default):** wrap `codex` with [`jai`](https://jai.scs.stanford.edu/) as
     an outer sandbox and run Codex itself in `danger-full-access`. The shipped `WORKFLOW.md`
     uses `command: jai codex --config sandbox_mode=danger-full-access app-server` together with
-    `use_configured_permissions: true`.
-  - **Approach B:** keep Codex as the security boundary and define a `default_permissions`
-    profile in `~/.codex/config.toml` with explicit filesystem mounts and `:project_roots`
-    overlay. Useful when jai is not available (non-Linux host, kernel < 6.13).
+    `use_configured_permissions: true`. The Claude adapter follows the same pattern: the shipped
+    `WORKFLOW.md` uses `command: jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m
+    symphony_claude_agent` with `permission_mode: bypassPermissions`. Run `make sidecar-deps`
+    once before the first launch to populate `priv/claude_agent/.venv` outside jai.
+  - **Approach B:** keep the adapter as the security boundary. For Codex, define a
+    `default_permissions` profile in `~/.codex/config.toml` with explicit filesystem mounts and
+    `:project_roots` overlay. For Claude, drop the `jai ` prefix from `agent.claude.command`
+    and switch `permission_mode` to `dontAsk` with an explicit `allowed_tools` whitelist.
+    Useful when jai is not available (non-Linux host, kernel < 6.13).
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
