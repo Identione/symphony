@@ -34,7 +34,7 @@ defmodule SymphonyElixir.Workspace do
   defp ensure_workspace(workspace, nil) do
     cond do
       File.dir?(workspace) ->
-        {:ok, workspace, false}
+        {:ok, workspace, empty_workspace_needs_bootstrap?(workspace)}
 
       File.exists?(workspace) ->
         File.rm_rf!(workspace)
@@ -82,6 +82,19 @@ defmodule SymphonyElixir.Workspace do
     File.rm_rf!(workspace)
     File.mkdir_p!(workspace)
     {:ok, workspace, true}
+  end
+
+  defp empty_workspace_needs_bootstrap?(workspace) do
+    case Config.settings!().hooks.after_create do
+      nil ->
+        false
+
+      _command ->
+        case File.ls(workspace) do
+          {:ok, []} -> true
+          _ -> false
+        end
+    end
   end
 
   @spec remove(Path.t()) :: {:ok, [String.t()]} | {:error, term(), String.t()}
@@ -211,18 +224,57 @@ defmodule SymphonyElixir.Workspace do
     hooks = Config.settings!().hooks
 
     case created? do
-      true ->
-        case hooks.after_create do
-          nil ->
-            :ok
-
-          command ->
-            run_hook(command, workspace, issue_context, "after_create", worker_host)
-        end
-
-      false ->
-        :ok
+      true -> run_after_create_hook(hooks.after_create, workspace, issue_context, worker_host)
+      false -> :ok
     end
+  end
+
+  defp run_after_create_hook(nil, _workspace, _issue_context, _worker_host), do: :ok
+
+  defp run_after_create_hook(command, workspace, issue_context, worker_host) do
+    case run_hook(command, workspace, issue_context, "after_create", worker_host) do
+      :ok ->
+        :ok
+
+      {:error, reason} = error ->
+        remove_created_workspace_after_hook_failure(workspace, issue_context, worker_host, reason)
+        error
+    end
+  end
+
+  defp remove_created_workspace_after_hook_failure(workspace, issue_context, nil, reason) do
+    Logger.warning("Removing workspace after after_create hook failure #{issue_log_context(issue_context)} workspace=#{workspace} reason=#{inspect(reason)} worker_host=local")
+    File.rm_rf(workspace)
+    :ok
+  end
+
+  defp remove_created_workspace_after_hook_failure(workspace, issue_context, worker_host, reason)
+       when is_binary(worker_host) do
+    Logger.warning("Removing workspace after after_create hook failure #{issue_log_context(issue_context)} workspace=#{workspace} reason=#{inspect(reason)} worker_host=#{worker_host}")
+
+    script =
+      [
+        remote_shell_assign("workspace", workspace),
+        "rm -rf \"$workspace\""
+      ]
+      |> Enum.join("\n")
+
+    case run_remote_command(worker_host, script, Config.settings!().hooks.timeout_ms) do
+      {:ok, {_output, 0}} ->
+        :ok
+
+      {:ok, {output, status}} ->
+        Logger.warning(
+          "Failed to remove workspace after after_create hook failure #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host} status=#{status} output=#{inspect(sanitize_hook_output_for_log(output))}"
+        )
+
+      {:error, cleanup_reason} ->
+        Logger.warning(
+          "Failed to remove workspace after after_create hook failure #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host} reason=#{inspect(cleanup_reason)}"
+        )
+    end
+
+    :ok
   end
 
   defp maybe_run_before_remove_hook(workspace, nil) do

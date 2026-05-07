@@ -20,25 +20,37 @@ workspace:
   root: ~/code/workspaces
 hooks:
   after_create: |
-    git clone --depth 1 https://github.com/Identione/entry-product-spec.git .
+    set -e
+    MIRROR_ROOT="$HOME/code/.symphony-mirrors"
+    MIRROR="$MIRROR_ROOT/entry-product-spec"
+    mkdir -p "$MIRROR_ROOT"
+    if [ ! -d "$MIRROR" ]; then
+      git clone --bare git@github.com:Identione/entry-product-spec.git "$MIRROR"
+    fi
+    git -C "$MIRROR" fetch --prune origin
+    git -C "$MIRROR" worktree add --detach "$PWD" origin/main
+  before_remove: |
+    set -e
+    MIRROR="$HOME/code/.symphony-mirrors/entry-product-spec"
+    if [ -d "$MIRROR" ]; then
+      git -C "$MIRROR" worktree remove --force "$PWD" 2>/dev/null || true
+      git -C "$MIRROR" worktree prune
+    fi
 agent:
   max_concurrent_agents: 10
   max_turns: 20
 codex:
-  # Codex runs inside jai (https://jai.scs.stanford.edu/) as the outer sandbox.
-  # `sandbox_mode=danger-full-access` turns Codex's own sandbox off so we can
-  # bypass the workspace-write `.git` deny rule (https://github.com/openai/codex/issues/15505)
-  # without pinning to an old Codex. See ../SETUP.md (Approach A) for the
-  # full picture and the alternative `default_permissions`-based setup.
-  command: jai codex --config sandbox_mode=danger-full-access app-server
+  # Pinned to <=0.114.0: Codex 0.115.0+ enforces a hard-coded workspace-write
+  # `.git` deny rule that blocks unattended commits/pushes. See
+  # https://github.com/openai/codex/issues/15505 — lift the pin once fixed.
+  command: npx --yes -p @openai/codex@0.114.0 -- codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
   approval_policy: never
-  # Symphony skips supplying `sandbox`/`sandboxPolicy` on thread/start and
-  # turn/start; with Codex in danger-full-access there is nothing useful to
-  # supply. `thread_sandbox` and `turn_sandbox_policy` below are forced to nil
-  # by Symphony when this flag is true.
-  use_configured_permissions: true
   thread_sandbox: workspace-write
-  turn_sandbox_policy: null
+  turn_sandbox_policy:
+    type: workspaceWrite
+    writableRoots:
+      - /home/hniska/code/.symphony-mirrors
+    networkAccess: true
 server:
   port: 3453
 ---
@@ -157,7 +169,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 4.  Start work by writing/updating a hierarchical plan in the workpad comment.
 5.  Ensure the workpad includes a compact environment stamp at the top as a code fence line:
     - Format: `<host>:<abs-workdir>@<short-sha>`
-    - Example: `devbox-01:/home/dev-user/code/symphony-workspaces/MT-32@7bdde33bc`
+    - Example: `devbox-01:/home/dev-user/code/workspaces/MT-32@7bdde33bc`
     - Do not include metadata already inferable from Linear issue fields (`issue ID`, `status`, `branch`, `PR link`).
 6.  Add explicit acceptance criteria and TODOs in checklist form in the same comment.
     - If changes are user-facing, include a UI walkthrough acceptance criterion that describes the end-to-end user path to validate.

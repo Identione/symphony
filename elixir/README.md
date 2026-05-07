@@ -116,9 +116,27 @@ Notes:
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
 - Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
-- When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
-  unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
-  Symphony validation.
+- When `codex.turn_sandbox_policy` is set explicitly, Symphony forwards the configured map to
+  Codex, but for `workspaceWrite` policies it ensures the current issue workspace stays in
+  `writableRoots` at runtime. This allows adding extra writable paths without granting access to
+  sibling workspaces by default. Compatibility for the remaining fields still depends on the
+  targeted Codex app-server version rather than local Symphony validation.
+- Workflows that run package managers or other commands that resolve external hosts should set
+  `networkAccess: true` in `codex.turn_sandbox_policy`; otherwise DNS/network access may be denied
+  by the Codex turn sandbox. (This bullet only applies when Symphony supplies the policy. With
+  `codex.use_configured_permissions: true`, `turn_sandbox_policy` is ignored entirely and network
+  access is governed by whatever wraps `codex.command` — see [SETUP.md](../SETUP.md).)
+- For unattended `git commit` / `git push` flows, the Codex `workspace-write` sandbox is too
+  restrictive on its own (notably the 0.115+ `.git` deny rule, see
+  https://github.com/openai/codex/issues/15505). Two verified approaches are documented in
+  [SETUP.md](../SETUP.md):
+  - **Approach A (current default):** wrap `codex` with [`jai`](https://jai.scs.stanford.edu/) as
+    an outer sandbox and run Codex itself in `danger-full-access`. The shipped `WORKFLOW.md`
+    uses `command: jai codex --config sandbox_mode=danger-full-access app-server` together with
+    `use_configured_permissions: true`.
+  - **Approach B:** keep Codex as the security boundary and define a `default_permissions`
+    profile in `~/.codex/config.toml` with explicit filesystem mounts and `:project_roots`
+    overlay. Useful when jai is not available (non-Linux host, kernel < 6.13).
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
