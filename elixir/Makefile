@@ -1,5 +1,5 @@
 .PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer e2e \
-        start stop restart status logs foreground escript
+        start stop restart status logs foreground escript sidecar-deps
 
 MIX ?= mix
 
@@ -11,10 +11,19 @@ LOGFILE ?= $(RUN_DIR)/symphony.out
 SYMPHONY_FLAGS ?= --i-understand-that-this-will-be-running-without-the-usual-guardrails
 
 help:
-	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, ci"
+	@echo "Targets: setup, deps, sidecar-deps, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, ci"
 	@echo "Daemon:  start, stop, restart, status, logs, foreground (uses $(WORKFLOW))"
 
-setup:
+# Pre-build the Python sidecar's uv venv on the real filesystem. When
+# Symphony launches the sidecar under jai (Approach A in ../SETUP.md),
+# `priv/claude_agent` is on jai's COW $HOME overlay, so any install work
+# `uv run` does inside the sandbox is discarded on `jai -u`. Running this
+# once outside jai means the in-sandbox `uv run` finds the venv already
+# satisfied and skips network / write paths entirely.
+sidecar-deps:
+	cd priv/claude_agent && uv sync --frozen
+
+setup: sidecar-deps
 	$(MIX) setup
 
 deps:

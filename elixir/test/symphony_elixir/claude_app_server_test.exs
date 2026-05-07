@@ -611,6 +611,54 @@ defmodule SymphonyElixir.ClaudeAppServerTest do
     AppServer.stop_session(session)
   end
 
+  test "sidecar receives SYMPHONY_CLAUDE_PRIV_DIR pointing at the claude_agent priv dir",
+       %{workspace: workspace} do
+    {:ok, session} =
+      AppServer.start_session(workspace,
+        config: %{
+          default_claude_config()
+          | command: env_echo_command("SYMPHONY_CLAUDE_PRIV_DIR")
+        }
+      )
+
+    {:ok, result} = AppServer.run_turn(session, "go", issue(), turn_timeout_ms: 5_000)
+
+    priv_dir = result.session_id
+
+    assert is_binary(priv_dir) and priv_dir != ""
+
+    assert Path.type(priv_dir) == :absolute,
+           "SYMPHONY_CLAUDE_PRIV_DIR must be absolute so the default command works under cd: workspace"
+
+    assert String.ends_with?(priv_dir, "claude_agent"),
+           "expected path to point at the claude_agent priv subdir, got #{priv_dir}"
+
+    assert File.dir?(priv_dir),
+           "SYMPHONY_CLAUDE_PRIV_DIR must resolve to an existing directory, got #{priv_dir}"
+
+    AppServer.stop_session(session)
+  end
+
+  test "extra_env can override SYMPHONY_CLAUDE_PRIV_DIR when explicitly supplied",
+       %{workspace: workspace} do
+    override = "/tmp/symphony-claude-priv-override-#{System.unique_integer([:positive])}"
+
+    {:ok, session} =
+      AppServer.start_session(workspace,
+        config: %{
+          default_claude_config()
+          | command: env_echo_command("SYMPHONY_CLAUDE_PRIV_DIR"),
+            extra_env: %{"SYMPHONY_CLAUDE_PRIV_DIR" => override}
+        }
+      )
+
+    {:ok, result} = AppServer.run_turn(session, "go", issue(), turn_timeout_ms: 5_000)
+
+    assert result.session_id == override
+
+    AppServer.stop_session(session)
+  end
+
   test "sidecar receives extra_env entries on top of inherited host env",
        %{workspace: workspace} do
     custom_var = "SYMPHONY_CLAUDE_EXTRA_ENV_#{System.unique_integer([:positive])}"

@@ -205,20 +205,40 @@ defmodule SymphonyElixir.Claude.AppServer do
 
   defp open_port(_workspace, _config), do: {:error, {:claude_sidecar_not_found, :missing_command}}
 
+  # The sidecar Port spawns with `cd: workspace` (the per-issue workspace), so
+  # any relative path in `agent.claude.command` resolves *there*, not in the
+  # repo. Inject SYMPHONY_CLAUDE_PRIV_DIR pointing at this app's
+  # `priv/claude_agent` so the default command can `--project
+  # $SYMPHONY_CLAUDE_PRIV_DIR` and find the sidecar regardless of workspace.
   # When `agent.claude.config_dir` is set, force CLAUDE_CONFIG_DIR in the
   # sidecar env so the SDK's underlying `claude` CLI scopes its OAuth lookup
   # to that subscription's credentials directory. `extra_env` still wins if it
-  # explicitly sets CLAUDE_CONFIG_DIR.
+  # explicitly sets either variable.
   defp sidecar_env_overrides(config) do
     extra_env = Map.get(config, :extra_env, %{}) || %{}
 
+    base =
+      extra_env
+      |> stringify_env_keys()
+      |> Map.put_new("SYMPHONY_CLAUDE_PRIV_DIR", claude_priv_dir())
+
     case Map.get(config, :config_dir) do
       dir when is_binary(dir) and dir != "" ->
-        expanded = Path.expand(dir)
-        Map.put_new(stringify_env_keys(extra_env), "CLAUDE_CONFIG_DIR", expanded)
+        Map.put_new(base, "CLAUDE_CONFIG_DIR", Path.expand(dir))
 
       _ ->
-        stringify_env_keys(extra_env)
+        base
+    end
+  end
+
+  # Resolves to the `priv/claude_agent` directory for the running app. Works
+  # under `mix run` (returns `_build/<env>/lib/symphony_elixir/priv/...`) and
+  # under the escript launcher (falls back to a cwd-anchored path; the
+  # launcher always starts from `elixir/`).
+  defp claude_priv_dir do
+    case :code.priv_dir(:symphony_elixir) do
+      {:error, _} -> Path.expand("priv/claude_agent")
+      priv_dir when is_list(priv_dir) -> Path.join(to_string(priv_dir), "claude_agent")
     end
   end
 

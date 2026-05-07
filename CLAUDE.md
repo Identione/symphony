@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Symphony is a Linear-driven coding-agent orchestrator: it polls Linear for work, creates a per-issue workspace, and runs a coding-agent session against it. The active adapter is selected per workflow via `agent.kind` (SPEC.md §10):
 
 - `codex` (default) — runs `codex app-server` directly via `SymphonyElixir.Codex.AppServer` (§10.7).
-- `claude` — launches the Python sidecar in `elixir/priv/claude_agent/` via `SymphonyElixir.Claude.AppServer` (§10.8); the sidecar hosts `claude-agent-sdk` and is configured for unattended sandboxed operation by default (`permission_mode: dontAsk` + tight `allowed_tools` whitelist + workspace-cwd boundary).
+- `claude` — launches the Python sidecar in `elixir/priv/claude_agent/` via `SymphonyElixir.Claude.AppServer` (§10.8); the sidecar hosts `claude-agent-sdk` and runs under [`jai`](https://jai.scs.stanford.edu/) by default (Approach A in `SETUP.md`), with `permission_mode: bypassPermissions` so jai is the sole security boundary. Hosts without jai fall back to `dontAsk` + an explicit `allowed_tools` whitelist.
 
 Two layers live here:
 
@@ -103,7 +103,7 @@ WORKFLOW.md is YAML front matter + a Markdown body used as the Codex prompt temp
 - Reload failure at runtime → Symphony keeps running with last-known-good and logs the error.
 - Defaults are intentionally safe: omit `approval_policy` and you get reject-everything; omit `thread_sandbox` and you get `workspace-write`.
 - `tracker.api_key` reads `LINEAR_API_KEY` when unset or set to `$LINEAR_API_KEY`.
-- Path values support `~` and `$VAR` expansion (except `codex.command`, which is a shell string and expands at exec time).
+- Path values support `~` and `$VAR` expansion (except `agent.codex.command` and `agent.claude.command`, which are shell strings and expand at exec time).
 
 `elixir/WORKFLOW.md` is the single workflow file: `make start` runs against it, tests use it as a fixture, and it doubles as the canonical example to copy when adopting Symphony in another repo.
 
