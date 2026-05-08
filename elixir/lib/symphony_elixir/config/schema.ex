@@ -100,6 +100,32 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Repo do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      # `url` is the clone URL Symphony hands to `hooks.after_create` for fresh
+      # workspaces. Preflight uses it for an unauthenticated `git ls-remote`
+      # reachability check. Optional so legacy workflows that hardcode the URL
+      # in `hooks.after_create` keep parsing.
+      field(:url, :string)
+      # `path` is an optional pointer to a local copy of the repo. Symphony
+      # itself never reads or writes through this — it exists for skills that
+      # need to inspect or modify project-local files outside the per-issue
+      # workspace.
+      field(:path, :string)
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(attrs, [:url, :path], empty_values: [])
+    end
+  end
+
   defmodule Worker do
     @moduledoc false
     use Ecto.Schema
@@ -374,6 +400,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:repo, Repo, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
   end
@@ -503,6 +530,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
+    |> cast_embed(:repo, with: &Repo.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
   end

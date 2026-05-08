@@ -136,4 +136,44 @@ defmodule SymphonyElixir.CLITest do
 
     assert :ok = CLI.evaluate([@ack_flag, "WORKFLOW.md"], deps)
   end
+
+  test "treats `start` as an explicit alias of the legacy run flow" do
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert :ok = CLI.evaluate(["start", @ack_flag, "WORKFLOW.md"], deps)
+  end
+
+  test "routes `init` to the init subcommand parser" do
+    # We don't pass deps because Init has its own runtime deps; the subcommand
+    # is expected to surface its own usage error when required flags are missing.
+    deps = %{
+      file_regular?: fn _path -> false end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert {:error, message} = CLI.evaluate(["init"], deps)
+    assert message =~ "--linear-project is required"
+  end
+
+  test "routes `preflight` to the preflight subcommand parser" do
+    deps = %{
+      file_regular?: fn _path -> true end,
+      set_workflow_file_path: fn _path -> :ok end,
+      set_logs_root: fn _path -> :ok end,
+      set_server_port_override: fn _port -> :ok end,
+      ensure_all_started: fn -> {:ok, [:symphony_elixir]} end
+    }
+
+    assert {:error, message} = CLI.evaluate(["preflight", "a", "b"], deps)
+    assert message =~ "Usage: symphony preflight"
+  end
 end

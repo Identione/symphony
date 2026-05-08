@@ -125,6 +125,8 @@ defmodule SymphonyElixir.TestSupport do
           observability_render_interval_ms: 16,
           server_port: nil,
           server_host: nil,
+          repo_url: nil,
+          repo_path: nil,
           prompt: @workflow_prompt
         ],
         overrides
@@ -163,6 +165,8 @@ defmodule SymphonyElixir.TestSupport do
     observability_render_interval_ms = Keyword.get(config, :observability_render_interval_ms)
     server_port = Keyword.get(config, :server_port)
     server_host = Keyword.get(config, :server_host)
+    repo_url = Keyword.get(config, :repo_url)
+    repo_path = Keyword.get(config, :repo_path)
     prompt = Keyword.get(config, :prompt)
 
     sections =
@@ -196,6 +200,7 @@ defmodule SymphonyElixir.TestSupport do
         "  read_timeout_ms: #{yaml_value(codex_read_timeout_ms)}",
         "  stall_timeout_ms: #{yaml_value(codex_stall_timeout_ms)}",
         hooks_yaml(hook_after_create, hook_before_run, hook_after_run, hook_before_remove, hook_timeout_ms),
+        repo_yaml(repo_url, repo_path),
         observability_yaml(observability_enabled, observability_refresh_ms, observability_render_interval_ms),
         server_yaml(server_port, server_host),
         "---",
@@ -275,6 +280,18 @@ defmodule SymphonyElixir.TestSupport do
       "server:",
       port && "  port: #{yaml_value(port)}",
       host && "  host: #{yaml_value(host)}"
+    ]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.join("\n")
+  end
+
+  defp repo_yaml(nil, nil), do: nil
+
+  defp repo_yaml(url, path) do
+    [
+      "repo:",
+      url && "  url: #{yaml_value(url)}",
+      path && "  path: #{yaml_value(path)}"
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n")
