@@ -119,8 +119,10 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
     # regardless of the per-issue workspace cwd.
     assert settings.agent.claude.command =~ "$SYMPHONY_CLAUDE_PRIV_DIR"
     assert settings.agent.claude.command =~ "symphony_claude_agent"
-    # Default ships without `jai`; WORKFLOW.md opts into Approach A explicitly.
-    refute String.starts_with?(settings.agent.claude.command, "jai ")
+    # Default ships with `jai` so Approach A (outer sandbox containment) works
+    # out of the box on Linux 6.13+. Hosts without jai must override
+    # `agent.claude.command` to drop the prefix.
+    assert String.starts_with?(settings.agent.claude.command, "jai ")
   end
 
   test "agent.claude accepts overrides" do
