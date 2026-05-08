@@ -1626,15 +1626,39 @@ defmodule SymphonyElixir.StatusDashboard do
         ])
       )
 
+    # Claude per-turn `total_tokens` is `input + output` (codex parity);
+    # cache fields are siblings, never folded into `total_tokens` (SPEC §10.8).
     total =
+      case parse_integer(
+             map_value(usage, [
+               "total_tokens",
+               :total_tokens,
+               "total",
+               :total,
+               "totalTokens",
+               :totalTokens
+             ])
+           ) do
+        value when is_integer(value) ->
+          value
+
+        nil ->
+          if is_integer(input) and is_integer(output), do: input + output, else: nil
+      end
+
+    cache_create =
       parse_integer(
         map_value(usage, [
-          "total_tokens",
-          :total_tokens,
-          "total",
-          :total,
-          "totalTokens",
-          :totalTokens
+          "cache_creation_input_tokens",
+          :cache_creation_input_tokens
+        ])
+      )
+
+    cache_read =
+      parse_integer(
+        map_value(usage, [
+          "cache_read_input_tokens",
+          :cache_read_input_tokens
         ])
       )
 
@@ -1643,6 +1667,8 @@ defmodule SymphonyElixir.StatusDashboard do
       |> append_usage_part("in", input)
       |> append_usage_part("out", output)
       |> append_usage_part("total", total)
+      |> append_usage_part("cache_create", cache_create)
+      |> append_usage_part("cache_read", cache_read)
 
     case parts do
       [] -> nil

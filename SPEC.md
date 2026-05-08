@@ -242,9 +242,15 @@ Fields:
 - `agent_input_tokens` (integer)
 - `agent_output_tokens` (integer)
 - `agent_total_tokens` (integer)
-- `last_reported_input_tokens` (integer)
-- `last_reported_output_tokens` (integer)
-- `last_reported_total_tokens` (integer)
+  - For `agent_kind == claude`: defined as `agent_input_tokens + agent_output_tokens` (codex
+    parity); cache fields below are exposed as siblings, not folded into the total.
+- `last_reported_input_tokens` (integer; codex-only — claude `usage` is per-turn additive)
+- `last_reported_output_tokens` (integer; codex-only)
+- `last_reported_total_tokens` (integer; codex-only)
+- `cache_creation_input_tokens` (integer; claude-only — running sum of Anthropic
+  `cache_creation_input_tokens` across turns)
+- `cache_read_input_tokens` (integer; claude-only — running sum of Anthropic
+  `cache_read_input_tokens` across turns)
 - `turn_count` (integer)
   - Number of coding-agent turns started within the current worker lifetime.
 
@@ -273,7 +279,8 @@ Fields:
 - `claimed` (set of issue IDs reserved/running/retrying)
 - `retry_attempts` (map `issue_id -> RetryEntry`)
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
-- `agent_totals` (aggregate tokens + runtime seconds)
+- `agent_totals` (aggregate tokens + runtime seconds; tracked per active adapter — codex totals
+  and claude totals are stored separately so adapter-specific cache fields stay typed correctly)
 - `agent_rate_limits` (latest rate-limit snapshot from agent events; MAY be `null` for adapters that
   do not surface rate-limit data — Claude does not surface them today)
 
@@ -1579,6 +1586,13 @@ Token accounting rules:
   end of each turn (`input_tokens`, `output_tokens`, `cache_creation_input_tokens`,
   `cache_read_input_tokens`). The orchestrator MUST sum these across turns rather than treating
   any single turn's usage as cumulative.
+- For the Claude adapter, `total_tokens = input_tokens + output_tokens` for codex parity (the
+  `total_tokens` field reflects billable prompt+completion tokens). The two cache fields
+  (`cache_creation_input_tokens`, `cache_read_input_tokens`) are claude-specific and exposed as
+  siblings of `total_tokens` in storage, JSON, and humanized output — never folded into
+  `total_tokens` (cache_read often dwarfs the prompt+completion total).
+- The Claude `usage` map is already a per-turn delta (no cumulative→delta diffing needed); just
+  sum directly across turns.
 - Ignore delta-style payloads such as `last_token_usage` (Codex) for dashboard/API totals.
 - Extract input/output/total token counts leniently from common field names within the selected
   payload.
@@ -1670,8 +1684,9 @@ Minimum endpoints:
         {
           "issue_id": "abc123",
           "issue_identifier": "MT-649",
+          "agent_kind": "claude",
           "state": "In Progress",
-          "session_id": "thread-1-turn-1",
+          "session_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
           "turn_count": 7,
           "last_event": "turn_completed",
           "last_message": "",
@@ -1680,7 +1695,9 @@ Minimum endpoints:
           "tokens": {
             "input_tokens": 1200,
             "output_tokens": 800,
-            "total_tokens": 2000
+            "total_tokens": 2000,
+            "cache_creation_input_tokens": 320,
+            "cache_read_input_tokens": 5400
           }
         }
       ],
@@ -1702,6 +1719,14 @@ Minimum endpoints:
       "rate_limits": null
     }
     ```
+
+    For `agent_kind == claude` running entries, the `tokens` map carries the Anthropic-specific
+    `cache_creation_input_tokens` and `cache_read_input_tokens` siblings shown above. `total_tokens`
+    on a claude entry is `input_tokens + output_tokens` (codex parity); cache fields are never
+    folded into `total_tokens`. Codex entries omit the cache fields. Implementations MAY also expose
+    a top-level `claude_totals` block (parallel to a codex-shaped `agent_totals`) carrying the same
+    six-field aggregate so dashboards can render both shapes without re-deriving from running
+    entries.
 
 - `GET /api/v1/<issue_identifier>`
   - Returns issue-specific runtime/debug details for the identified issue, including any information

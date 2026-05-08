@@ -21,6 +21,17 @@ defmodule SymphonyElixir.Orchestrator do
     seconds_running: 0
   }
 
+  # Claude billing has two extra cache fields. `total_tokens` keeps codex parity
+  # — `input + output` only, never folded with the cache fields. SPEC §10.8.
+  @empty_claude_totals %{
+    input_tokens: 0,
+    output_tokens: 0,
+    total_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    seconds_running: 0
+  }
+
   defmodule State do
     @moduledoc """
     Runtime state for the orchestrator polling loop.
@@ -38,6 +49,7 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       retry_attempts: %{},
       codex_totals: nil,
+      claude_totals: nil,
       codex_rate_limits: nil
     ]
   end
@@ -61,6 +73,7 @@ defmodule SymphonyElixir.Orchestrator do
       tick_timer_ref: nil,
       tick_token: nil,
       codex_totals: @empty_codex_totals,
+      claude_totals: @empty_claude_totals,
       codex_rate_limits: nil
     }
 
@@ -189,15 +202,10 @@ defmodule SymphonyElixir.Orchestrator do
         {:noreply, state}
 
       running_entry ->
-        {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
-
-        state =
-          state
-          |> apply_codex_token_delta(token_delta)
-          |> apply_codex_rate_limits(update)
+        state = handle_worker_update(state, running, issue_id, running_entry, update)
 
         notify_dashboard()
-        {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
+        {:noreply, state}
     end
   end
 
@@ -717,6 +725,7 @@ defmodule SymphonyElixir.Orchestrator do
             worker_host: worker_host,
             workspace_path: nil,
             session_id: nil,
+            agent_kind: agent_kind_for_adapter(Config.adapter_module()),
             last_codex_message: nil,
             last_codex_timestamp: nil,
             last_codex_event: nil,
@@ -727,6 +736,11 @@ defmodule SymphonyElixir.Orchestrator do
             codex_last_reported_input_tokens: 0,
             codex_last_reported_output_tokens: 0,
             codex_last_reported_total_tokens: 0,
+            claude_input_tokens: 0,
+            claude_output_tokens: 0,
+            claude_total_tokens: 0,
+            claude_cache_creation_input_tokens: 0,
+            claude_cache_read_input_tokens: 0,
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
             started_at: DateTime.utc_now()
@@ -908,6 +922,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp notify_dashboard do
     StatusDashboard.notify_update()
   end
+
+  defp agent_kind_for_adapter(SymphonyElixir.Claude.AppServer), do: :claude
+  defp agent_kind_for_adapter(_other), do: :codex
 
   defp handle_active_retry(state, issue, attempt, metadata) do
     if retry_candidate_issue?(issue, terminal_state_set()) and
@@ -1122,10 +1139,16 @@ defmodule SymphonyElixir.Orchestrator do
           worker_host: Map.get(metadata, :worker_host),
           workspace_path: Map.get(metadata, :workspace_path),
           session_id: metadata.session_id,
-          codex_app_server_pid: metadata.codex_app_server_pid,
-          codex_input_tokens: metadata.codex_input_tokens,
-          codex_output_tokens: metadata.codex_output_tokens,
-          codex_total_tokens: metadata.codex_total_tokens,
+          agent_kind: Map.get(metadata, :agent_kind, :codex),
+          codex_app_server_pid: Map.get(metadata, :codex_app_server_pid),
+          codex_input_tokens: Map.get(metadata, :codex_input_tokens, 0),
+          codex_output_tokens: Map.get(metadata, :codex_output_tokens, 0),
+          codex_total_tokens: Map.get(metadata, :codex_total_tokens, 0),
+          claude_input_tokens: Map.get(metadata, :claude_input_tokens, 0),
+          claude_output_tokens: Map.get(metadata, :claude_output_tokens, 0),
+          claude_total_tokens: Map.get(metadata, :claude_total_tokens, 0),
+          claude_cache_creation_input_tokens: Map.get(metadata, :claude_cache_creation_input_tokens, 0),
+          claude_cache_read_input_tokens: Map.get(metadata, :claude_cache_read_input_tokens, 0),
           turn_count: Map.get(metadata, :turn_count, 0),
           started_at: metadata.started_at,
           last_codex_timestamp: metadata.last_codex_timestamp,
@@ -1154,6 +1177,7 @@ defmodule SymphonyElixir.Orchestrator do
        running: running,
        retrying: retrying,
        codex_totals: state.codex_totals,
+       claude_totals: state.claude_totals,
        rate_limits: Map.get(state, :codex_rate_limits),
        polling: %{
          checking?: state.poll_check_in_progress == true,
@@ -1177,6 +1201,63 @@ defmodule SymphonyElixir.Orchestrator do
        operations: ["poll", "reconcile"]
      }, state}
   end
+
+  # Branch on `update[:agent_kind]`; the Claude AppServer stamps `:claude` on
+  # every envelope. Anything else (including missing) stays on the codex path
+  # so existing fixtures and codex-only tests keep working.
+  defp handle_worker_update(state, running, issue_id, running_entry, %{agent_kind: :claude} = update) do
+    {updated_running_entry, token_delta} = integrate_claude_update(running_entry, update)
+
+    state
+    |> apply_claude_token_delta(token_delta)
+    |> Map.put(:running, Map.put(running, issue_id, updated_running_entry))
+  end
+
+  defp handle_worker_update(state, running, issue_id, running_entry, update) do
+    {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
+
+    state
+    |> apply_codex_token_delta(token_delta)
+    |> apply_codex_rate_limits(update)
+    |> Map.put(:running, Map.put(running, issue_id, updated_running_entry))
+  end
+
+  defp integrate_claude_update(running_entry, %{event: event, timestamp: timestamp} = update) do
+    token_delta = extract_claude_token_delta(update)
+    turn_count = Map.get(running_entry, :turn_count, 0)
+
+    {
+      Map.merge(running_entry, %{
+        last_codex_timestamp: timestamp,
+        last_codex_message: summarize_codex_update(update),
+        session_id: session_id_for_update(running_entry.session_id, update),
+        last_codex_event: event,
+        claude_input_tokens: Map.get(running_entry, :claude_input_tokens, 0) + token_delta.input_tokens,
+        claude_output_tokens: Map.get(running_entry, :claude_output_tokens, 0) + token_delta.output_tokens,
+        claude_total_tokens: Map.get(running_entry, :claude_total_tokens, 0) + token_delta.total_tokens,
+        claude_cache_creation_input_tokens:
+          Map.get(running_entry, :claude_cache_creation_input_tokens, 0) +
+            token_delta.cache_creation_input_tokens,
+        claude_cache_read_input_tokens:
+          Map.get(running_entry, :claude_cache_read_input_tokens, 0) +
+            token_delta.cache_read_input_tokens,
+        turn_count: claude_turn_count_for_update(turn_count, update)
+      }),
+      token_delta
+    }
+  end
+
+  # Claude advances `turn_count` on every `:turn_completed` event — there's no
+  # `:session_started` analogue in the claude wire vocabulary. The codex path
+  # uses `:session_started` as its tick.
+  defp claude_turn_count_for_update(existing_count, %{event: :turn_completed})
+       when is_integer(existing_count),
+       do: existing_count + 1
+
+  defp claude_turn_count_for_update(existing_count, _update) when is_integer(existing_count),
+    do: existing_count
+
+  defp claude_turn_count_for_update(_existing_count, _update), do: 0
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
     token_delta = extract_token_delta(running_entry, update)
@@ -1289,18 +1370,27 @@ defmodule SymphonyElixir.Orchestrator do
   defp record_session_completion_totals(state, running_entry) when is_map(running_entry) do
     runtime_seconds = running_seconds(running_entry.started_at, DateTime.utc_now())
 
-    codex_totals =
-      apply_token_delta(
-        state.codex_totals,
-        %{
-          input_tokens: 0,
-          output_tokens: 0,
-          total_tokens: 0,
-          seconds_running: runtime_seconds
-        }
-      )
+    case Map.get(running_entry, :agent_kind) do
+      :claude ->
+        claude_totals =
+          apply_claude_token_delta_map(state.claude_totals, %{seconds_running: runtime_seconds})
 
-    %{state | codex_totals: codex_totals}
+        %{state | claude_totals: claude_totals}
+
+      _ ->
+        codex_totals =
+          apply_token_delta(
+            state.codex_totals,
+            %{
+              input_tokens: 0,
+              output_tokens: 0,
+              total_tokens: 0,
+              seconds_running: runtime_seconds
+            }
+          )
+
+        %{state | codex_totals: codex_totals}
+    end
   end
 
   defp record_session_completion_totals(state, _running_entry), do: state
@@ -1334,6 +1424,25 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp apply_codex_token_delta(state, _token_delta), do: state
 
+  defp apply_claude_token_delta(%{claude_totals: claude_totals} = state, %{} = token_delta) do
+    %{state | claude_totals: apply_claude_token_delta_map(claude_totals, token_delta)}
+  end
+
+  defp apply_claude_token_delta_map(claude_totals, token_delta) do
+    %{
+      input_tokens: bump(claude_totals, :input_tokens, token_delta),
+      output_tokens: bump(claude_totals, :output_tokens, token_delta),
+      total_tokens: bump(claude_totals, :total_tokens, token_delta),
+      cache_creation_input_tokens: bump(claude_totals, :cache_creation_input_tokens, token_delta),
+      cache_read_input_tokens: bump(claude_totals, :cache_read_input_tokens, token_delta),
+      seconds_running: bump(claude_totals, :seconds_running, token_delta)
+    }
+  end
+
+  defp bump(totals, key, delta) do
+    max(0, Map.get(totals, key, 0) + Map.get(delta, key, 0))
+  end
+
   defp apply_codex_rate_limits(%State{} = state, update) when is_map(update) do
     case extract_rate_limits(update) do
       %{} = rate_limits ->
@@ -1360,6 +1469,50 @@ defmodule SymphonyElixir.Orchestrator do
       total_tokens: max(0, total_tokens),
       seconds_running: max(0, seconds_running)
     }
+  end
+
+  # The claude `turn_end` envelope's `usage` map is already a per-turn delta
+  # (per Anthropic SDK semantics), so accumulators just add it directly. No
+  # cumulative→delta diffing needed; no `claude_last_reported_*` bookkeeping.
+  # `total_tokens = input + output` (codex parity); cache counts are siblings
+  # and never folded into `total_tokens`.
+  defp extract_claude_token_delta(%{} = update) do
+    usage =
+      case update do
+        %{payload: %{usage: %{} = u}} -> u
+        %{payload: %{"usage" => %{} = u}} -> u
+        _ -> %{}
+      end
+
+    input = nonnegative_integer_or_zero(usage, [:input_tokens, "input_tokens"])
+    output = nonnegative_integer_or_zero(usage, [:output_tokens, "output_tokens"])
+
+    cache_creation =
+      nonnegative_integer_or_zero(usage, [
+        :cache_creation_input_tokens,
+        "cache_creation_input_tokens"
+      ])
+
+    cache_read =
+      nonnegative_integer_or_zero(usage, [:cache_read_input_tokens, "cache_read_input_tokens"])
+
+    %{
+      input_tokens: input,
+      output_tokens: output,
+      total_tokens: input + output,
+      cache_creation_input_tokens: cache_creation,
+      cache_read_input_tokens: cache_read,
+      seconds_running: 0
+    }
+  end
+
+  defp nonnegative_integer_or_zero(map, keys) when is_map(map) and is_list(keys) do
+    Enum.find_value(keys, 0, fn key ->
+      case Map.get(map, key) do
+        value when is_integer(value) and value >= 0 -> value
+        _ -> nil
+      end
+    end)
   end
 
   defp extract_token_delta(running_entry, %{event: _, timestamp: _} = update) do

@@ -1476,14 +1476,19 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       assert StatusDashboard.humanize_codex_message(msg) == "claude: session started (sess-x)"
     end
 
-    test "turn_completed → `claude: turn completed (<stop_reason>, in <X> out <Y>)`" do
+    test "turn_completed → `claude: turn completed (<stop_reason>, in <X> out <Y> total <T> cache_create <C> cache_read <R>)`" do
       msg = %{
         event: :turn_completed,
         agent_kind: :claude,
         message: %{
           stop_reason: "end_turn",
           num_turns: 1,
-          usage: %{input_tokens: 1234, output_tokens: 567}
+          usage: %{
+            input_tokens: 1234,
+            output_tokens: 567,
+            cache_creation_input_tokens: 10,
+            cache_read_input_tokens: 2000
+          }
         }
       }
 
@@ -1491,8 +1496,11 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       assert rendered =~ "claude: turn completed"
       assert rendered =~ "end_turn"
       # `format_usage_counts` adds locale-style commas (1,234).
-      assert rendered =~ "1,234"
-      assert rendered =~ "567"
+      assert rendered =~ "in 1,234"
+      assert rendered =~ "out 567"
+      assert rendered =~ "total 1,801"
+      assert rendered =~ "cache_create 10"
+      assert rendered =~ "cache_read 2,000"
     end
 
     test "assistant_message → `claude: <truncated text>`" do
@@ -1545,6 +1553,247 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
       assert StatusDashboard.humanize_codex_message(msg) =~ "turn completed (completed)"
       refute StatusDashboard.humanize_codex_message(msg) =~ "claude:"
+    end
+  end
+
+  describe "Claude adapter token accounting" do
+    setup do
+      issue_id = "issue-claude-tokens"
+
+      issue = %Issue{
+        id: issue_id,
+        identifier: "MT-CLAUDE-1",
+        title: "Claude token accounting",
+        description: "Verify claude usage accumulator",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-CLAUDE-1"
+      }
+
+      orchestrator_name = Module.concat(__MODULE__, :ClaudeTokenOrchestrator)
+      {:ok, pid} = Orchestrator.start_link(name: orchestrator_name)
+
+      on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :normal) end)
+
+      process_ref = make_ref()
+      started_at = DateTime.utc_now()
+
+      running_entry = %{
+        pid: self(),
+        ref: process_ref,
+        identifier: issue.identifier,
+        issue: issue,
+        session_id: nil,
+        turn_count: 0,
+        last_codex_message: nil,
+        last_codex_timestamp: nil,
+        last_codex_event: nil,
+        agent_kind: :claude,
+        claude_input_tokens: 0,
+        claude_output_tokens: 0,
+        claude_total_tokens: 0,
+        claude_cache_creation_input_tokens: 0,
+        claude_cache_read_input_tokens: 0,
+        started_at: started_at
+      }
+
+      :sys.replace_state(pid, fn state ->
+        state
+        |> Map.put(:running, %{issue_id => running_entry})
+        |> Map.put(:claimed, MapSet.put(state.claimed, issue_id))
+      end)
+
+      {:ok, pid: pid, issue_id: issue_id, process_ref: process_ref, issue: issue}
+    end
+
+    test "turn_completed sums into claude_totals and running entry per-turn delta", %{
+      pid: pid,
+      issue_id: issue_id
+    } do
+      send_claude_turn_completed(pid, issue_id, %{
+        input_tokens: 100,
+        output_tokens: 50,
+        cache_creation_input_tokens: 10,
+        cache_read_input_tokens: 200
+      })
+
+      _ = wait_for_snapshot(pid, fn s -> hd(s.running).claude_input_tokens == 100 end)
+      state = :sys.get_state(pid)
+
+      assert state.claude_totals == %{
+               input_tokens: 100,
+               output_tokens: 50,
+               total_tokens: 150,
+               cache_creation_input_tokens: 10,
+               cache_read_input_tokens: 200,
+               seconds_running: 0
+             }
+
+      snapshot = GenServer.call(pid, :snapshot)
+      assert [entry] = snapshot.running
+      assert entry.agent_kind == :claude
+      assert entry.claude_input_tokens == 100
+      assert entry.claude_output_tokens == 50
+      assert entry.claude_total_tokens == 150
+      assert entry.claude_cache_creation_input_tokens == 10
+      assert entry.claude_cache_read_input_tokens == 200
+    end
+
+    test "subsequent claude turns accumulate additively (per-turn deltas)", %{
+      pid: pid,
+      issue_id: issue_id
+    } do
+      send_claude_turn_completed(pid, issue_id, %{
+        input_tokens: 10,
+        output_tokens: 5,
+        cache_creation_input_tokens: 1,
+        cache_read_input_tokens: 2
+      })
+
+      send_claude_turn_completed(pid, issue_id, %{
+        input_tokens: 20,
+        output_tokens: 7,
+        cache_creation_input_tokens: 3,
+        cache_read_input_tokens: 4
+      })
+
+      _ = wait_for_snapshot(pid, fn s -> hd(s.running).claude_input_tokens == 30 end)
+      state = :sys.get_state(pid)
+
+      assert state.claude_totals.input_tokens == 30
+      assert state.claude_totals.output_tokens == 12
+      assert state.claude_totals.total_tokens == 42
+      assert state.claude_totals.cache_creation_input_tokens == 4
+      assert state.claude_totals.cache_read_input_tokens == 6
+
+      [entry] = state.running |> Map.values()
+      assert entry.claude_input_tokens == 30
+      assert entry.claude_output_tokens == 12
+      assert entry.claude_total_tokens == 42
+      assert entry.claude_cache_creation_input_tokens == 4
+      assert entry.claude_cache_read_input_tokens == 6
+    end
+
+    test "claude turn advances last_codex_event/timestamp/turn_count", %{
+      pid: pid,
+      issue_id: issue_id
+    } do
+      timestamp = DateTime.utc_now()
+
+      send(
+        pid,
+        {:codex_worker_update, issue_id,
+         %{
+           event: :turn_completed,
+           agent_kind: :claude,
+           session_id: "claude-sess-1",
+           payload: %{
+             stop_reason: "end_turn",
+             num_turns: 1,
+             usage: %{input_tokens: 1, output_tokens: 1}
+           },
+           timestamp: timestamp
+         }}
+      )
+
+      snapshot =
+        wait_for_snapshot(pid, fn s ->
+          [entry | _] = s.running
+          entry.last_codex_event == :turn_completed
+        end)
+
+      [entry] = snapshot.running
+      assert entry.last_codex_event == :turn_completed
+      assert entry.last_codex_timestamp == timestamp
+      assert entry.turn_count == 1
+      assert is_map(entry.last_codex_message)
+      assert entry.last_codex_message.agent_kind == :claude
+      assert entry.session_id == "claude-sess-1"
+    end
+
+    test "codex update on a separate codex-kind running entry does not touch claude_totals",
+         %{pid: pid} do
+      codex_issue_id = "issue-codex-leak-check"
+
+      codex_issue = %Issue{
+        id: codex_issue_id,
+        identifier: "MT-CODEX-1",
+        title: "Codex usage cohabits",
+        description: "Verify codex doesn't touch claude_totals",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-CODEX-1"
+      }
+
+      codex_running = %{
+        pid: self(),
+        ref: make_ref(),
+        identifier: codex_issue.identifier,
+        issue: codex_issue,
+        session_id: nil,
+        turn_count: 0,
+        last_codex_message: nil,
+        last_codex_timestamp: nil,
+        last_codex_event: nil,
+        agent_kind: :codex,
+        codex_input_tokens: 0,
+        codex_output_tokens: 0,
+        codex_total_tokens: 0,
+        codex_last_reported_input_tokens: 0,
+        codex_last_reported_output_tokens: 0,
+        codex_last_reported_total_tokens: 0,
+        started_at: DateTime.utc_now()
+      }
+
+      :sys.replace_state(pid, fn s ->
+        Map.update!(s, :running, fn running ->
+          Map.put(running, codex_issue_id, codex_running)
+        end)
+      end)
+
+      send(
+        pid,
+        {:codex_worker_update, codex_issue_id,
+         %{
+           event: :turn_completed,
+           payload: %{
+             method: "turn/completed",
+             usage: %{"input_tokens" => 12, "output_tokens" => 4, "total_tokens" => 16}
+           },
+           timestamp: DateTime.utc_now()
+         }}
+      )
+
+      _ =
+        wait_for_snapshot(pid, fn s ->
+          Enum.any?(s.running, fn entry ->
+            entry.identifier == codex_issue.identifier and entry.codex_input_tokens == 12
+          end)
+        end)
+
+      state = :sys.get_state(pid)
+
+      assert state.claude_totals == %{
+               input_tokens: 0,
+               output_tokens: 0,
+               total_tokens: 0,
+               cache_creation_input_tokens: 0,
+               cache_read_input_tokens: 0,
+               seconds_running: 0
+             }
+    end
+
+    test "session completion adds runtime seconds to claude_totals.seconds_running but not codex_totals",
+         %{pid: pid, issue_id: issue_id, process_ref: ref} do
+      send_claude_turn_completed(pid, issue_id, %{input_tokens: 10, output_tokens: 5})
+      _ = wait_for_snapshot(pid, fn s -> hd(s.running).claude_input_tokens == 10 end)
+
+      send(pid, {:DOWN, ref, :process, self(), :normal})
+      completed_state = :sys.get_state(pid)
+
+      assert completed_state.claude_totals.input_tokens == 10
+      assert completed_state.claude_totals.output_tokens == 5
+      assert completed_state.claude_totals.total_tokens == 15
+      assert is_integer(completed_state.claude_totals.seconds_running)
+      assert completed_state.codex_totals.seconds_running == 0
     end
   end
 
@@ -1644,6 +1893,23 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
 
     assert rendered =~ "app_status=offline"
     refute rendered =~ "Timestamp:"
+  end
+
+  defp send_claude_turn_completed(pid, issue_id, usage) when is_map(usage) do
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :turn_completed,
+         agent_kind: :claude,
+         payload: %{
+           stop_reason: "end_turn",
+           num_turns: 1,
+           usage: usage
+         },
+         timestamp: DateTime.utc_now()
+       }}
+    )
   end
 
   defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do
