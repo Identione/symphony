@@ -106,9 +106,11 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
     assert settings.agent.claude.stall_timeout_ms == 300_000
     assert settings.agent.claude.extra_env == %{}
     assert is_binary(settings.agent.claude.command)
-    # `verbose=false` keeps the SDK's noisier streams (partial messages,
-    # hook events) off by default; users opt in for debugging.
-    assert settings.agent.claude.verbose == false
+    # `verbose_logging=false` keeps Claude's debug feed off by default
+    # (SDK partial-message/hook streams, forwarded `claude_cli` stderr,
+    # and Symphony's per-envelope log lines all stay quiet); users opt in
+    # for debugging.
+    assert settings.agent.claude.verbose_logging == false
   end
 
   test "default command resolves the sidecar via $SYMPHONY_CLAUDE_PRIV_DIR" do
@@ -145,7 +147,7 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
         turn_timeout_ms: 1800000
         read_timeout_ms: 7000
         stall_timeout_ms: 60000
-        verbose: true
+        verbose_logging: true
     """
 
     assert {:ok, settings} = parse(yaml)
@@ -163,7 +165,7 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
     assert claude.turn_timeout_ms == 1_800_000
     assert claude.read_timeout_ms == 7_000
     assert claude.stall_timeout_ms == 60_000
-    assert claude.verbose == true
+    assert claude.verbose_logging == true
   end
 
   test "agent.claude.config_dir defaults to nil" do

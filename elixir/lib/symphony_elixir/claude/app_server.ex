@@ -164,7 +164,7 @@ defmodule SymphonyElixir.Claude.AppServer do
       extra_env: claude.extra_env,
       config_dir: claude.config_dir,
       read_timeout_ms: claude.read_timeout_ms,
-      verbose: claude.verbose
+      verbose_logging: claude.verbose_logging
     }
   end
 
@@ -270,7 +270,7 @@ defmodule SymphonyElixir.Claude.AppServer do
         setting_sources: Map.get(config, :setting_sources, []),
         max_turns: Map.get(config, :max_turns),
         max_budget_usd: Map.get(config, :max_budget_usd),
-        verbose: Map.get(config, :verbose, false),
+        verbose_logging: Map.get(config, :verbose_logging, false),
         # Push the canonical Codex `linear_graphql` schema (and any future
         # client-side tools) into the sidecar so it can register MCP tools
         # without maintaining its own copy of the JSON Schema. See SPEC §10.4.

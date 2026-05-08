@@ -210,10 +210,17 @@ defmodule SymphonyElixir.Config.Schema do
       # time (sidecar Port inherits CLAUDE_CONFIG_DIR=<config_dir>). Useful
       # for users with multiple Claude logins on one machine.
       field(:config_dir, :string)
-      # When true, the sidecar enables `include_partial_messages` and
-      # `include_hook_events` on ClaudeAgentOptions for richer tracing.
-      # Off by default — partial-stream events would flood symphony.log.
-      field(:verbose, :boolean, default: false)
+      # When true, opts into the verbose Claude debug feed:
+      #   - the sidecar enables `include_partial_messages` and
+      #     `include_hook_events` on ClaudeAgentOptions for richer tracing,
+      #   - the sidecar forwards the underlying `claude` CLI's stderr (always
+      #     `--verbose` under the SDK) back to Symphony as `log` envelopes,
+      #   - Symphony's `AgentRunner` emits per-envelope `claude tool_call` /
+      #     `assistant_message` / `turn_completed` / `permission_request` /
+      #     `system_init` log lines.
+      # Off by default — these streams together flood symphony.log and
+      # drown out per-issue orchestration output during normal runs.
+      field(:verbose_logging, :boolean, default: false)
     end
 
     @spec permission_modes() :: [String.t()]
@@ -242,7 +249,7 @@ defmodule SymphonyElixir.Config.Schema do
           :read_timeout_ms,
           :stall_timeout_ms,
           :config_dir,
-          :verbose
+          :verbose_logging
         ],
         empty_values: []
       )

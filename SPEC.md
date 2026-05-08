@@ -712,6 +712,12 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.claude.turn_timeout_ms`: integer, default `3600000`
 - `agent.claude.read_timeout_ms`: integer, default `5000`
 - `agent.claude.stall_timeout_ms`: integer, default `300000`
+- `agent.claude.verbose_logging`: boolean, default `false`. When `true`, opt
+  into the Claude debug feed (SDK partial-message + hook-event streams, the
+  underlying `claude` CLI's stderr forwarded as `log` envelopes, and the
+  orchestrator's per-envelope `tool_call`/`assistant_message`/`turn_completed`/
+  `permission_request`/`system_init` log lines). Off by default so normal
+  operation stays quiet — see §10.8.
 
 ## 7. Orchestration State Machine
 
@@ -1406,6 +1412,23 @@ Timeouts:
 
 - `agent.claude.read_timeout_ms`, `agent.claude.turn_timeout_ms`, and
   `agent.claude.stall_timeout_ms` mirror the Codex semantics described in §10.5.
+
+Logging verbosity:
+
+- `agent.claude.verbose_logging` (boolean, default `false`) is the single knob that gates
+  Claude's debug feed across both the orchestrator and the sidecar. When `false`:
+  - The sidecar MUST omit `include_partial_messages` and `include_hook_events` from
+    `ClaudeAgentOptions` so the SDK does not surface partial-stream/hook events.
+  - The sidecar MUST NOT forward the underlying `claude` CLI's stderr to Symphony as
+    `log` envelopes (the SDK launches the CLI with `--verbose` unconditionally, so the
+    forwarder is the only path through which that stderr would otherwise reach the
+    orchestrator).
+  - The orchestrator MUST suppress per-envelope `tool_call`/`assistant_message`/
+    `turn_completed`/`permission_request`/`system_init`/`log` log lines. Per-issue
+    and per-session lifecycle logging (e.g. session start/completion/error) stays at
+    `info` regardless.
+- When `true`, all three streams are restored — the recommended posture when debugging
+  adapter or sidecar issues.
 
 ## 11. Issue Tracker Integration Contract (Linear-Compatible)
 

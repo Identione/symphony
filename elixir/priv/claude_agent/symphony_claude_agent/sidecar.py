@@ -272,7 +272,7 @@ def build_options_payload(init_envelope: dict[str, Any]) -> dict[str, Any]:
     if init_envelope.get("max_budget_usd") is not None:
         payload["max_budget_usd"] = init_envelope["max_budget_usd"]
 
-    if init_envelope.get("verbose"):
+    if init_envelope.get("verbose_logging"):
         # Surface partial-stream events and hook lifecycle messages so a
         # reader can see Claude's per-token output and PreToolUse/PostToolUse
         # decisions. Symphony's runner handler decides what to log; the SDK
@@ -401,17 +401,22 @@ async def _handle_init(state: SessionState, env: dict[str, Any]) -> None:
     payload = build_options_payload(env)
     state.tool_schemas = extract_tool_schemas(env)
     payload["mcp_servers"] = {"symphony": _build_symphony_mcp_server(state)}
-    # Forward the underlying `claude` CLI's stderr (always --verbose under
-    # the SDK) back to Symphony as `log` envelopes. Symphony's Logger handler
-    # tags them with `claude_cli:` and writes them to symphony.log.
-    payload["stderr"] = lambda line: emit(
-        {
-            "type": "log",
-            "level": "info",
-            "source": "claude_cli",
-            "message": line.rstrip(),
-        }
-    )
+    # The underlying `claude` CLI is always launched with `--verbose` by the
+    # SDK, so its stderr is unconditionally chatty. Forward it back to
+    # Symphony as `log` envelopes only when `init.verbose_logging` is on;
+    # otherwise discard it so it doesn't reach the orchestrator (and isn't
+    # attached at all to ClaudeAgentOptions, letting the SDK drop it).
+    if env.get("verbose_logging"):
+        payload["stderr"] = lambda line: emit(
+            {
+                "type": "log",
+                "level": "info",
+                "source": "claude_cli",
+                "message": line.rstrip(),
+            }
+        )
+    else:
+        payload["stderr"] = lambda _line: None
     options = ClaudeAgentOptions(**payload)
     state.client = ClaudeSDKClient(options=options)
     await state.client.__aenter__()

@@ -74,6 +74,12 @@ agent:
     # Do not inherit ~/.claude/settings.json or other host-level Claude Code
     # settings — keep the sidecar's posture deterministic.
     setting_sources: []
+    # Quiet by default so Claude's debug feed doesn't drown out per-issue
+    # orchestration output. Flip to `true` to restore the noisy debugging view:
+    # SDK partial-message + hook-event streams, the underlying `claude` CLI's
+    # stderr forwarded as `log` envelopes, and Symphony's per-envelope
+    # `claude tool_call` / `assistant_message` / `turn_completed` log lines.
+    verbose_logging: false
   codex:
     # ── command: pick ONE of (A) or (B) ──
     # Both variants run with `use_configured_permissions: true`, which makes
