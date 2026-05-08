@@ -22,12 +22,23 @@ This doc covers host configuration for Symphony's coding-agent adapters
   sandbox_mode=danger-full-access …` form is preserved as a commented
   alternative for hosts that prefer the jai outer sandbox here too.
 
-The schema defaults (used when `WORKFLOW.md` omits `command:`) are the
-no-jai variant for both adapters, so a fresh adopter without jai can copy
-`WORKFLOW.md`, comment out the active `command:` line for whichever
-adapter they're using, and rely on the schema default. The repo's
-`WORKFLOW.md` ships with the live config the maintainers run, not the
-minimum-viable default.
+The schema defaults (used when `WORKFLOW.md` omits `command:`) differ by
+adapter:
+
+- **Claude** ships with jai active by default
+  (`jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m
+  symphony_claude_agent`). Hosts without jai must override
+  `agent.claude.command` to drop the `jai` prefix — the SDK's
+  `permission_mode: dontAsk` + `allowed_tools` whitelist remain the inner
+  boundary either way.
+- **Codex** ships with the no-jai variant by default
+  (`npx --yes -p @openai/codex@0.114.0 -- codex app-server …`); switch to
+  the jai variant explicitly when you want outer containment.
+
+`$SYMPHONY_CLAUDE_PRIV_DIR` is injected by `SymphonyElixir.Claude.AppServer`
+at sidecar launch time and points at this app's `priv/claude_agent` —
+bash expands it at exec time, so the path resolves regardless of the
+per-issue workspace cwd.
 
 ## Why Codex needs help
 
@@ -97,21 +108,21 @@ For the **Codex variant**, also have `codex` on `PATH` (any recent version).
 `~/.codex/config.toml` controls the default model and reasoning effort.
 
 For the **Claude variant**, have `uv` on `PATH` so `bash -lc` can launch the
-Python sidecar (`uv run --directory <abs-path> python -m
+Python sidecar (`uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m
 symphony_claude_agent`). On first invocation `uv` provisions the sidecar's
 venv under `~/.cache/uv`; inside jai that lands in the COW overlay and is
 rebuilt every session. Pre-warm a host-side cache to keep first-turn latency
 down:
 
 ```bash
-uv run --directory /abs/path/to/elixir/priv/claude_agent python -m symphony_claude_agent --help
+uv run --project /abs/path/to/elixir/priv/claude_agent python -m symphony_claude_agent --help
 ```
 
 ### Claude variant — `WORKFLOW.md` snippet
 
 ```yaml
 claude:
-  command: jai uv run --directory /abs/path/to/elixir/priv/claude_agent python -m symphony_claude_agent
+  command: jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
   config_dir: ~/.claude-identione
   model: claude-opus-4-7
   permission_mode: dontAsk
@@ -123,8 +134,12 @@ What each piece does:
 
 - `jai uv run …` — jai launches `uv run`, which provisions the sidecar venv
   and execs `python -m symphony_claude_agent`.
-- The sidecar command path is absolute because Symphony launches it via
-  `bash -lc` with the per-issue workspace as cwd, not the sidecar source dir.
+- `$SYMPHONY_CLAUDE_PRIV_DIR` is injected by `SymphonyElixir.Claude.AppServer`
+  at sidecar launch time (resolves to this app's `priv/claude_agent`) and
+  expanded by bash at exec. Symphony launches the sidecar via `bash -lc`
+  with the per-issue workspace as cwd, so a relative path here would not
+  resolve to the sidecar source dir — the env-var indirection keeps the
+  command portable across hosts.
 - `config_dir: ~/.claude-identione` — auth scope. Symphony preflight-checks
   `<config_dir>/.credentials.json` and exports `CLAUDE_CONFIG_DIR=<config_dir>`
   to the sidecar so it uses the corresponding Claude account. Reads pass
@@ -297,13 +312,13 @@ to Approach A.
 - **Con:** the path list grows as your tool ecosystem grows — a new tool that
   caches under a new directory will silently fail until added.
 
-## No outer sandbox (Claude alternative; schema default)
+## No outer sandbox (Claude alternative)
 
 `agent.kind: claude` does not require an outer sandbox to run safely. The
-shipped `WORKFLOW.md` ships with jai active, but the Claude block keeps
-the no-jai variant as a commented `command:` alternative, and the schema
-default (used when `WORKFLOW.md` omits `command:`) is also the no-jai
-form. The Claude Agent SDK in the Python sidecar enforces:
+shipped `WORKFLOW.md` and the schema default both ship with jai active,
+but the Claude block keeps the no-jai variant as a commented `command:`
+alternative — uncomment it (and comment out the jai one) on hosts without
+jai. The Claude Agent SDK in the Python sidecar enforces:
 
 - `permission_mode: dontAsk` — anything not in `allowed_tools` is denied
   without prompting.

@@ -19,12 +19,13 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
    - `agent.kind: codex` (default) — runs Codex in
      [App Server mode](https://developers.openai.com/codex/app-server/) (`agent.codex.command`).
    - `agent.kind: claude` — launches the Claude Agent SDK sidecar in `priv/claude_agent/`
-     (`agent.claude.command`, default `uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m
-     symphony_claude_agent` — `$SYMPHONY_CLAUDE_PRIV_DIR` is injected by `Claude.AppServer`
-     so the path resolves regardless of the per-issue workspace cwd). The sidecar hosts
-     `claude-agent-sdk` and is configured for unattended sandboxed operation:
-     `permission_mode: dontAsk` + tight `allowed_tools` whitelist + workspace-`cwd` boundary;
-     anything not pre-approved is denied without prompting.
+     (`agent.claude.command`, default `jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR
+     python -m symphony_claude_agent`; `$SYMPHONY_CLAUDE_PRIV_DIR` is injected by
+     `SymphonyElixir.Claude.AppServer` and points at the priv dir). Hosts without jai
+     must override `agent.claude.command` to drop the prefix. The sidecar hosts
+     `claude-agent-sdk` and is configured for
+     unattended sandboxed operation: `permission_mode: dontAsk` + tight `allowed_tools` whitelist
+     + workspace-`cwd` boundary; anything not pre-approved is denied without prompting.
 4. Sends the workflow prompt to the active adapter
 5. Keeps the agent working on the issue until the work is done (capped by `agent.max_turns`)
 

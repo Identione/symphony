@@ -208,9 +208,10 @@ defmodule SymphonyElixir.Claude.AppServer do
   # The sidecar Port spawns with `cd: workspace` (the per-issue workspace), so
   # any relative path in `agent.claude.command` resolves *there*, not in the
   # repo. Inject SYMPHONY_CLAUDE_PRIV_DIR pointing at this app's
-  # `priv/claude_agent` so the default command can `--project
-  # $SYMPHONY_CLAUDE_PRIV_DIR` and find the sidecar regardless of workspace.
-  # When `agent.claude.config_dir` is set, force CLAUDE_CONFIG_DIR in the
+  # `priv/claude_agent` so commands like `uv run --project
+  # $SYMPHONY_CLAUDE_PRIV_DIR …` find the sidecar regardless of workspace.
+  #
+  # When `agent.claude.config_dir` is set, also force CLAUDE_CONFIG_DIR in the
   # sidecar env so the SDK's underlying `claude` CLI scopes its OAuth lookup
   # to that subscription's credentials directory. `extra_env` still wins if it
   # explicitly sets either variable.
@@ -231,14 +232,24 @@ defmodule SymphonyElixir.Claude.AppServer do
     end
   end
 
-  # Resolves to the `priv/claude_agent` directory for the running app. Works
-  # under `mix run` (returns `_build/<env>/lib/symphony_elixir/priv/...`) and
-  # under the escript launcher (falls back to a cwd-anchored path; the
-  # launcher always starts from `elixir/`).
+  # Resolves to the `priv/claude_agent` directory for the running app. Under
+  # `mix run`, `:code.priv_dir/1` returns `_build/<env>/lib/symphony_elixir/priv`
+  # and the joined path is a real directory. Under the escript launcher, the
+  # call returns a non-error charlist pointing *inside* the zip archive
+  # (e.g. `bin/symphony/symphony_elixir/priv`) — the path string is well-formed
+  # but does not exist on disk, so we must `File.dir?/1`-validate it and fall
+  # back to a cwd-anchored path. The launcher always starts from `elixir/`,
+  # where `priv/claude_agent` lives in the source tree.
   defp claude_priv_dir do
+    fallback = Path.expand("priv/claude_agent")
+
     case :code.priv_dir(:symphony_elixir) do
-      {:error, _} -> Path.expand("priv/claude_agent")
-      priv_dir when is_list(priv_dir) -> Path.join(to_string(priv_dir), "claude_agent")
+      priv_dir when is_list(priv_dir) ->
+        candidate = Path.join(to_string(priv_dir), "claude_agent")
+        if File.dir?(candidate), do: candidate, else: fallback
+
+      _ ->
+        fallback
     end
   end
 
