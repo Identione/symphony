@@ -10,18 +10,7 @@ _In this [demo video](.github/media/symphony-demo.mp4), Symphony monitors a Line
 Symphony's coding-agent runtime is pluggable (SPEC.md §10). Two adapters ship with the reference implementation:
 
 - **Codex App-Server** (`agent.kind: codex`, default) — runs OpenAI Codex via its app-server protocol.
-- **Claude Agent SDK** (`agent.kind: claude`) — launches a Python sidecar that hosts `claude-agent-sdk`.
-
-Both adapters run each turn fully unattended. Two sandboxing approaches are verified
-end-to-end (see [SETUP.md](SETUP.md) and [elixir/README.md](elixir/README.md#sandboxing-approaches)):
-
-- **Approach A** (current default): wrap the agent with [`jai`](https://jai.scs.stanford.edu/)
-  as an outer sandbox; Codex runs in `--config sandbox_mode=danger-full-access` and Claude in
-  `permission_mode: bypassPermissions`. Linux 6.13+ only.
-- **Approach B**: keep the adapter as the security boundary. Codex enforces a
-  `default_permissions` profile from `~/.codex/config.toml`; Claude uses
-  `permission_mode: dontAsk` with an explicit `allowed_tools` whitelist. Works on any host
-  that runs the adapter.
+- **Claude Agent SDK** (`agent.kind: claude`) — launches a Python sidecar that hosts `claude-agent-sdk`. Sandbox-by-default: `permission_mode: dontAsk` + an explicit `allowed_tools` whitelist + workspace-`cwd` boundary, so the agent runs unattended without ever pausing for human input.
 
 > [!WARNING]
 > Symphony is a low-key engineering preview for testing in trusted environments.
@@ -50,9 +39,8 @@ help with the setup:
 > Set up Symphony for my repository based on
 > https://github.com/Identione/symphony/blob/main/elixir/README.md
 
-For operator setup that lives outside the repo — installing jai (Approach A) or building the
-Codex `default_permissions` profile in `~/.codex/config.toml` (Approach B) — see
-[SETUP.md](SETUP.md).
+For operator setup that lives outside the repo — in particular the Codex permissions profile
+required when `WORKFLOW.md` sets `codex.use_configured_permissions: true` — see [SETUP.md](SETUP.md).
 
 ---
 
