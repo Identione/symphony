@@ -138,22 +138,11 @@ Notes:
   by the Codex turn sandbox. (This bullet only applies when Symphony supplies the policy. With
   `codex.use_configured_permissions: true`, `turn_sandbox_policy` is ignored entirely and network
   access is governed by whatever wraps `codex.command` — see [SETUP.md](../SETUP.md).)
-- For unattended `git commit` / `git push` flows, the Codex `workspace-write` sandbox is too
-  restrictive on its own (notably the 0.115+ `.git` deny rule, see
-  https://github.com/openai/codex/issues/15505). Two verified approaches are documented in
-  [SETUP.md](../SETUP.md):
-  - **Approach A (current default):** wrap `codex` with [`jai`](https://jai.scs.stanford.edu/) as
-    an outer sandbox and run Codex itself in `danger-full-access`. The shipped `WORKFLOW.md`
-    uses `command: jai codex --config sandbox_mode=danger-full-access app-server` together with
-    `use_configured_permissions: true`. The Claude adapter follows the same pattern: the shipped
-    `WORKFLOW.md` uses `command: jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m
-    symphony_claude_agent` with `permission_mode: bypassPermissions`. Run `make sidecar-deps`
-    once before the first launch to populate `priv/claude_agent/.venv` outside jai.
-  - **Approach B:** keep the adapter as the security boundary. For Codex, define a
-    `default_permissions` profile in `~/.codex/config.toml` with explicit filesystem mounts and
-    `:project_roots` overlay. For Claude, drop the `jai ` prefix from `agent.claude.command`
-    and switch `permission_mode` to `dontAsk` with an explicit `allowed_tools` whitelist.
-    Useful when jai is not available (non-Linux host, kernel < 6.13).
+- Codex's own `workspace-write` sandbox cannot do unattended `git commit` / `git push` on its
+  own (notably the 0.115+ `.git` deny rule, https://github.com/openai/codex/issues/15505). Two
+  verified approaches cover both adapters — see [Sandboxing approaches](#sandboxing-approaches)
+  below for full snippets, and [SETUP.md](../SETUP.md) for the rationale. The shipped
+  `WORKFLOW.md` uses Approach A (jai as outer sandbox) for both Codex and Claude.
 - `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
@@ -185,6 +174,136 @@ codex:
   reload error until the file is fixed.
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
+
+## Sandboxing approaches
+
+Symphony runs each turn unattended (`approval_policy: never` for Codex, `permission_mode:
+bypassPermissions` for Claude under jai), so the host needs *some* sandbox — Codex's own
+permissions, jai, or both. Two approaches are verified end-to-end; pick one and configure both
+the workflow file and `~/.codex/config.toml` to match. The shipped `WORKFLOW.md` uses
+Approach A. Full discussion is in [SETUP.md](../SETUP.md).
+
+### Approach A — jai as the outer sandbox *(default)*
+
+[`jai`](https://jai.scs.stanford.edu/) wraps the agent process with a copy-on-write `$HOME`
+overlay and a writable cwd, so the adapter's own sandbox can step out of the way. Requires
+Linux 6.13+; install per <https://jai.scs.stanford.edu/install.html> and run `jai --init` once.
+
+`WORKFLOW.md` — Codex:
+
+```yaml
+codex:
+  command: jai codex --config sandbox_mode=danger-full-access app-server
+  approval_policy: never
+  use_configured_permissions: true
+  thread_sandbox: workspace-write   # ignored when use_configured_permissions: true
+  turn_sandbox_policy: null         # ignored when use_configured_permissions: true
+```
+
+`WORKFLOW.md` — Claude:
+
+```yaml
+claude:
+  command: jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
+  config_dir: ~/.claude-identione
+  model: claude-sonnet-4-6
+  permission_mode: bypassPermissions
+  extra_env:
+    PYTHONDONTWRITEBYTECODE: "1"
+  setting_sources: []
+```
+
+`~/.codex/config.toml` (Codex adapter only — alternative to passing the same `--config` flags
+on the command line):
+
+```toml
+model = "gpt-5.5"
+model_reasoning_effort = "xhigh"
+
+[shell_environment_policy]
+inherit = "all"
+```
+
+Other host setup:
+
+- Run `make sidecar-deps` once *outside* jai to populate `priv/claude_agent/.venv` on the real
+  filesystem — otherwise `uv run` lands on jai's COW overlay and re-installs every fresh
+  session, and that work is discarded by `jai -u`.
+- Have `codex` and `uv` on `PATH` (jai inherits the parent shell's `PATH`).
+- For Claude: `ANTHROPIC_API_KEY` or `<config_dir>/.credentials.json` must be reachable from
+  inside jai. Refresh OAuth tokens *outside* jai for Max-subscription users — refreshes write
+  back to the credentials file and the writes land in the COW overlay (lost on `jai -u`).
+
+### Approach B — adapter-internal sandbox *(no jai)*
+
+Use this when jai is unavailable (non-Linux host, kernel < 6.13, no setuid permission). Each
+adapter remains its own security boundary.
+
+`WORKFLOW.md` — Codex (Codex enforces sandboxing via the named profile in `config.toml`):
+
+```yaml
+codex:
+  command: codex app-server   # or `npx --yes -p @openai/codex@<pinned> -- codex …`
+  approval_policy: never
+  use_configured_permissions: true
+  thread_sandbox: workspace-write
+  turn_sandbox_policy: null
+```
+
+`WORKFLOW.md` — Claude (explicit allowlist via `dontAsk`):
+
+```yaml
+claude:
+  command: uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
+  config_dir: ~/.claude-identione
+  model: claude-sonnet-4-6
+  permission_mode: dontAsk
+  allowed_tools:
+    - Read
+    - Glob
+    - Grep
+    - Edit
+    - Write
+    - MultiEdit
+    - Bash
+    - BashOutput
+    - KillBash
+    - TodoWrite
+    - NotebookEdit
+    - mcp__symphony__linear_graphql
+  setting_sources: []
+```
+
+`~/.codex/config.toml` (Approach B *requires* this — the named profile is what grants `.git`
+writes and the cache/credential paths Codex needs for `git push`):
+
+```toml
+default_permissions = "workspace-git"
+
+[permissions.workspace-git.filesystem]
+":root"          = "read"
+":tmpdir"        = "write"
+"/tmp"           = "write"
+"~/.npm"         = "write"
+"~/.config/git"  = "write"
+"~/.cache"       = "write"
+"~/.local/share" = "write"
+
+[permissions.workspace-git.filesystem.":project_roots"]
+"."       = "write"
+".git"    = "write"
+".agents" = "read"
+".codex"  = "read"
+
+[permissions.workspace-git.network]
+enabled = true
+```
+
+Codex 0.115+ has a hard-coded workspace-write `.git` deny rule that can override the
+`:project_roots ".git" = "write"` grant in some versions
+(https://github.com/openai/codex/issues/15505). If your installed Codex regresses, pin via
+`npx --yes -p @openai/codex@0.114.0 -- codex …` in `command:`. See [SETUP.md](../SETUP.md)
+(Approach B) for the full rationale and verification steps.
 
 ## Web dashboard
 

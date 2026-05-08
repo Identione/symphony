@@ -1,7 +1,7 @@
 ---
 tracker:
   kind: linear
-  project_slug: "entry-13d0d573cb17"
+  project_slug: "symphony-2e32f5d86d8c"
   assignee: "me"
   active_states:
     - Todo
@@ -20,7 +20,7 @@ workspace:
   root: ~/code/workspaces
 hooks:
   after_create: |
-    git clone --depth 1 https://github.com/Identione/entry-product-spec.git .
+    git clone --depth 1 https://github.com/Identione/symphony.git .
 agent:
   max_concurrent_agents: 10
   max_turns: 20
@@ -43,7 +43,7 @@ agent:
     # Symphony's preflight checks <config_dir>/.credentials.json, and the
     # sidecar inherits CLAUDE_CONFIG_DIR=<config_dir> at run time.
     config_dir: ~/.claude-identione
-    model: claude-sonnet-4-6
+    model: claude-opus-4-7
     # jai is the security boundary, so the SDK steps out of the way —
     # mirrors Codex's `--config sandbox_mode=danger-full-access` posture.
     # Switch to `dontAsk` + an `allowed_tools` whitelist (see commented
@@ -74,20 +74,35 @@ agent:
     #     - NotebookEdit
     #     - mcp__symphony__linear_graphql
   codex:
-    # Pinned to <=0.114.0: Codex 0.115.0+ enforces a hard-coded workspace-write
-    # `.git` deny rule that blocks unattended commits/pushes. See
-    # https://github.com/openai/codex/issues/15505 — lift the pin once fixed.
-    # Alternative (no pin needed): run via jai with
-    # `sandbox_mode=danger-full-access` and set `use_configured_permissions: true`
-    # below — see ../SETUP.md (Approach A).
-    command: npx --yes -p @openai/codex@0.114.0 -- codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
+    # Approach A (../SETUP.md): jai is the outer sandbox. Codex itself runs in
+    # `danger-full-access` so jai is the security boundary; this sidesteps the
+    # workspace-write `.git` deny rule that Codex 0.115+ enforces
+    # (https://github.com/openai/codex/issues/15505) without pinning Codex.
+    # Model and reasoning effort can stay on the command line (as below) or
+    # move into `~/.codex/config.toml` — see ../SETUP.md (Approach A).
+    command: jai codex --config sandbox_mode=danger-full-access --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
     approval_policy: never
+    # `use_configured_permissions: true` makes Symphony omit `sandbox` and
+    # `sandboxPolicy` on thread/start and turn/start. With Codex in
+    # danger-full-access there is nothing useful to supply, and Symphony
+    # forces `thread_sandbox`/`turn_sandbox_policy` to nil internally — the
+    # values below are kept for documentation and for swapping back.
+    use_configured_permissions: true
     thread_sandbox: workspace-write
-    turn_sandbox_policy:
-      type: workspaceWrite
-      writableRoots:
-        - /home/hniska/code/.symphony-mirrors
-      networkAccess: true
+    turn_sandbox_policy: null
+    # Alternative (no jai — Approach B in ../SETUP.md): pin Codex to a version
+    # without the .git deny rule, and let Codex remain the security boundary.
+    # Requires `~/.codex/config.toml` to define a `default_permissions`
+    # profile that grants `.git` writes (see ../SETUP.md). To switch:
+    #   command: npx --yes -p @openai/codex@0.114.0 -- codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
+    #   approval_policy: never
+    #   use_configured_permissions: false
+    #   thread_sandbox: workspace-write
+    #   turn_sandbox_policy:
+    #     type: workspaceWrite
+    #     writableRoots:
+    #       - /home/hniska/code/.symphony-mirrors
+    #     networkAccess: true
 server:
   port: 3453
 ---
