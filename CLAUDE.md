@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Symphony is a Linear-driven coding-agent orchestrator: it polls Linear for work, creates a per-issue workspace, and runs a coding-agent session against it. The active adapter is selected per workflow via `agent.kind` (SPEC.md §10):
 
 - `codex` (default) — runs `codex app-server` directly via `SymphonyElixir.Codex.AppServer` (§10.7).
-- `claude` — launches the Python sidecar in `elixir/priv/claude_agent/` via `SymphonyElixir.Claude.AppServer` (§10.8); the sidecar hosts `claude-agent-sdk` and runs under [`jai`](https://jai.scs.stanford.edu/) by default (Approach A in `SETUP.md`), with `permission_mode: bypassPermissions` so jai is the sole security boundary. Hosts without jai fall back to `dontAsk` + an explicit `allowed_tools` whitelist.
+- `claude` — launches the Python sidecar in `elixir/priv/claude_agent/` via `SymphonyElixir.Claude.AppServer` (§10.8); the sidecar hosts `claude-agent-sdk` and is configured for unattended sandboxed operation by default (`permission_mode: dontAsk` + tight `allowed_tools` whitelist + workspace-cwd boundary).
 
 Two layers live here:
 
@@ -103,7 +103,7 @@ WORKFLOW.md is YAML front matter + a Markdown body used as the Codex prompt temp
 - Reload failure at runtime → Symphony keeps running with last-known-good and logs the error.
 - Defaults are intentionally safe: omit `approval_policy` and you get reject-everything; omit `thread_sandbox` and you get `workspace-write`.
 - `tracker.api_key` reads `LINEAR_API_KEY` when unset or set to `$LINEAR_API_KEY`.
-- Path values support `~` and `$VAR` expansion (except `agent.codex.command` and `agent.claude.command`, which are shell strings and expand at exec time).
+- Path values support `~` and `$VAR` expansion (except `codex.command`, which is a shell string and expands at exec time).
 
 `elixir/WORKFLOW.md` is the single workflow file: `make start` runs against it, tests use it as a fixture, and it doubles as the canonical example to copy when adopting Symphony in another repo.
 
@@ -129,4 +129,4 @@ When behavior or config changes, update docs in the same PR: root `README.md` (c
 - Prefer adding config knobs through `SymphonyElixir.Config` over ad-hoc `System.get_env` reads.
 - `.codex/skills/` contains repo-local Codex skills (`commit`, `push`, `pull`, `land`, `linear`, `debug`) — these are referenced by WORKFLOW.md prompts, not Elixir code.
 - `run/symphony.pid` and `run/symphony.out` are daemon state; `elixir/log/` is structured per-issue logs. `make clean` only touches `run/`.
-- Codex is pinned to `<=0.114.0` in both `WORKFLOW.md` files (Codex 0.115.0+ makes `.git` read-only under `workspace-write` regardless of `writableRoots`, breaking unattended commits — see `elixir/README.md` and [openai/codex#15505](https://github.com/openai/codex/issues/15505)). Don't "upgrade" the pin until that regression is fixed.
+- Codex 0.115+ enforces a hard-coded `.git` deny rule under `workspace-write` regardless of `writableRoots`, breaking unattended commits — see [openai/codex#15505](https://github.com/openai/codex/issues/15505). The shipped `elixir/WORKFLOW.md` works around this via Approach B (a `~/.codex/config.toml` `default_permissions` profile that grants `:project_roots ".git" = "write"`); the `jai codex --config sandbox_mode=danger-full-access` form (Approach A) is preserved as a commented alternative. See [SETUP.md](SETUP.md) for both. Don't "downgrade" to a `npx -p @openai/codex@0.114.0` pin without first checking whether the host has either approach configured.

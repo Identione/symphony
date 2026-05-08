@@ -96,7 +96,7 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
 
   test "agent.claude defaults are present" do
     assert {:ok, settings} = parse(~s|tracker: {kind: linear, project_slug: p, api_key: t}\n|)
-    assert settings.agent.claude.permission_mode == "bypassPermissions"
+    assert settings.agent.claude.permission_mode == "dontAsk"
     assert settings.agent.claude.system_prompt_preset == "claude_code"
     assert settings.agent.claude.allowed_tools == []
     assert settings.agent.claude.disallowed_tools == []
@@ -111,25 +111,16 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
     assert settings.agent.claude.verbose == false
   end
 
-  test "default command runs the sidecar under jai" do
+  test "default command resolves the sidecar via $SYMPHONY_CLAUDE_PRIV_DIR" do
     assert {:ok, settings} = parse(~s|tracker: {kind: linear, project_slug: p, api_key: t}\n|)
-    assert String.starts_with?(settings.agent.claude.command, "jai ")
+    # The sidecar Port spawns with cd:workspace, so a workspace-relative
+    # `--project priv/claude_agent` would not resolve. The default uses
+    # $SYMPHONY_CLAUDE_PRIV_DIR (injected by Claude.AppServer) so it works
+    # regardless of the per-issue workspace cwd.
+    assert settings.agent.claude.command =~ "$SYMPHONY_CLAUDE_PRIV_DIR"
     assert settings.agent.claude.command =~ "symphony_claude_agent"
-  end
-
-  test "user-supplied jai-prefixed command flows through unchanged" do
-    yaml = """
-    tracker: {kind: linear, project_slug: p, api_key: t}
-    agent:
-      kind: claude
-      claude:
-        command: "jai uv run --project priv/claude_agent python -m symphony_claude_agent"
-    """
-
-    assert {:ok, settings} = parse(yaml)
-
-    assert settings.agent.claude.command ==
-             "jai uv run --project priv/claude_agent python -m symphony_claude_agent"
+    # Default ships without `jai`; WORKFLOW.md opts into Approach A explicitly.
+    refute String.starts_with?(settings.agent.claude.command, "jai ")
   end
 
   test "agent.claude accepts overrides" do

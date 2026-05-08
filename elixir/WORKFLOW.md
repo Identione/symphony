@@ -1,7 +1,7 @@
 ---
 tracker:
   kind: linear
-  project_slug: "entry-13d0d573cb17"
+  project_slug: "symphony-2e32f5d86d8c"
   assignee: "me"
   active_states:
     - Todo
@@ -20,7 +20,7 @@ workspace:
   root: ~/code/workspaces
 hooks:
   after_create: |
-    git clone --depth 1 https://github.com/Identione/entry-product-spec.git .
+    git clone --depth 1 https://github.com/Identione/symphony.git .
 agent:
   max_concurrent_agents: 10
   max_turns: 20
@@ -29,59 +29,68 @@ agent:
   # is preserved so the swap is one-line.
   kind: claude
   claude:
-    # Approach A (../SETUP.md): jai is the outer sandbox. Run `make sidecar-deps`
-    # once outside jai to populate priv/claude_agent/.venv on the real
-    # filesystem; otherwise `uv run` inside the sandbox lands on the COW
-    # $HOME overlay and re-installs every fresh session.
-    # `$SYMPHONY_CLAUDE_PRIV_DIR` is injected by `Claude.AppServer` (resolves
-    # to this app's `priv/claude_agent`) and expanded by bash. The Port is
-    # spawned with cd:<issue-workspace>, so a workspace-relative path here
-    # would not work.
+    # ── command: pick ONE ──
+    # `$SYMPHONY_CLAUDE_PRIV_DIR` is injected by `Claude.AppServer` and
+    # points at this app's `priv/claude_agent`; bash expands it at exec
+    # time, so the path resolves regardless of the per-issue workspace cwd.
+    # The Claude Agent SDK enforces its own boundary via `permission_mode`
+    # + `allowed_tools` below. `jai` is an optional outer sandbox — see
+    # ../SETUP.md (Approach A — Claude variant).
+    #
+    # (A) jai outer sandbox: COW $HOME overlay protects ~/.ssh, ~/.gnupg, etc.
     command: jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
+    #
+    # (B) no outer sandbox (Claude SDK is the only boundary):
+    #command: uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
     # Scope Claude auth to this CLAUDE_CONFIG_DIR so we use the identione
     # Max subscription, not whatever ~/.claude/ happens to be logged into.
     # Symphony's preflight checks <config_dir>/.credentials.json, and the
     # sidecar inherits CLAUDE_CONFIG_DIR=<config_dir> at run time.
+    # Under (A), writes to this dir land in jai's COW overlay and are lost on
+    # session end — accepted tradeoff (auth reads still pass through).
     config_dir: ~/.claude-identione
-    model: claude-sonnet-4-6
-    # jai is the security boundary, so the SDK steps out of the way —
-    # mirrors Codex's `--config sandbox_mode=danger-full-access` posture.
-    # Switch to `dontAsk` + an `allowed_tools` whitelist (see commented
-    # block under "Alternative" below) for hosts without jai (kernel < 6.13,
-    # non-Linux).
-    permission_mode: bypassPermissions
-    extra_env:
-      # Source dir is on jai's COW overlay; suppress .pyc writes so the
-      # overlay does not accumulate cache files between sessions.
-      PYTHONDONTWRITEBYTECODE: "1"
+    model: claude-opus-4-7
+    # `dontAsk` denies anything not in `allowed_tools` without prompting,
+    # which is what we want for unattended runs. The whitelist below mirrors
+    # what Codex's `approval_policy: never` + workspace-write sandbox grants:
+    # full filesystem access plus shell, but no WebFetch/WebSearch and no
+    # unsupervised sub-agents.
+    permission_mode: dontAsk
+    allowed_tools:
+      - Read
+      - Glob
+      - Grep
+      - Edit
+      - Write
+      - MultiEdit
+      - Bash
+      - BashOutput
+      - KillBash
+      - TodoWrite
+      - NotebookEdit
+      # In-process MCP tool the sidecar exposes; round-trips back to Symphony
+      # so Linear auth never leaves the orchestrator.
+      - mcp__symphony__linear_graphql
     # Do not inherit ~/.claude/settings.json or other host-level Claude Code
     # settings — keep the sidecar's posture deterministic.
     setting_sources: []
-    # Alternative (no jai — Approach B equivalent for Claude):
-    #   command: uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
-    #   permission_mode: dontAsk
-    #   allowed_tools:
-    #     - Read
-    #     - Glob
-    #     - Grep
-    #     - Edit
-    #     - Write
-    #     - MultiEdit
-    #     - Bash
-    #     - BashOutput
-    #     - KillBash
-    #     - TodoWrite
-    #     - NotebookEdit
-    #     - mcp__symphony__linear_graphql
   codex:
-    # Pinned to <=0.114.0: Codex 0.115.0+ enforces a hard-coded workspace-write
-    # `.git` deny rule that blocks unattended commits/pushes. See
-    # https://github.com/openai/codex/issues/15505 — lift the pin once fixed.
-    # Alternative (no pin needed): run via jai with
-    # `sandbox_mode=danger-full-access` and set `use_configured_permissions: true`
-    # below — see ../SETUP.md (Approach A).
-    command: npx --yes -p @openai/codex@0.114.0 -- codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
+    # ── command: pick ONE of (A) or (B) ──
+    # Both variants run with `use_configured_permissions: true`, which makes
+    # Symphony omit `sandbox`/`sandboxPolicy` on thread/turn start. The
+    # thread_sandbox / turn_sandbox_policy fields below are ignored under
+    # that flag and kept only as documentation. See ../SETUP.md.
+    #
+    # (A) jai outer sandbox; Codex's own sandbox disabled at the CLI.
+    # command: jai codex --config sandbox_mode=danger-full-access app-server
+    #
+    # (B) host `codex` with `~/.codex/config.toml` permissions profile.
+    #     The profile's `:project_roots".git" = "write"` grant overrides the
+    #     0.115+ `.git` deny rule (https://github.com/openai/codex/issues/15505),
+    #     so no version pin is needed.
+    command: codex --config shell_environment_policy.inherit=all --config 'model="gpt-5.5"' --config model_reasoning_effort=xhigh app-server
     approval_policy: never
+    use_configured_permissions: true
     thread_sandbox: workspace-write
     turn_sandbox_policy:
       type: workspaceWrite
@@ -155,7 +164,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `commit`: produce clean, logical commits during implementation.
 - `push`: keep remote branch current and publish updates.
 - `pull`: keep branch updated with latest `origin/main` before handoff.
-- `land`: when ticket reaches `Merging`, open and follow the `land` skill, which includes the `land` loop.
+- `land`: when ticket reaches `Merging`, explicitly open and follow `.codex/skills/land/SKILL.md`, which includes the `land` loop.
 
 ## Status map
 
@@ -178,7 +187,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
      - If PR is already attached, start by reviewing all open PR comments and deciding required changes vs explicit pushback responses.
    - `In Progress` -> continue execution flow from current scratchpad comment.
    - `Human Review` -> wait and poll for decision/review updates.
-   - `Merging` -> on entry, open and follow the `land` skill; do not call `gh pr merge` directly.
+   - `Merging` -> on entry, open and follow `.codex/skills/land/SKILL.md`; do not call `gh pr merge` directly.
    - `Rework` -> run rework flow.
    - `Done` -> do nothing and shut down.
 4. Check whether a PR already exists for the current branch and whether it is closed.
@@ -300,7 +309,7 @@ Use this only when completion is blocked by missing required tools or missing au
 2. Poll for updates as needed, including GitHub PR review comments from humans and bots.
 3. If review feedback requires changes, move the issue to `Rework` and follow the rework flow.
 4. If approved, human moves the issue to `Merging`.
-5. When the issue is in `Merging`, open and follow the `land` skill, then run it in a loop until the PR is merged. Do not call `gh pr merge` directly.
+5. When the issue is in `Merging`, open and follow `.codex/skills/land/SKILL.md`, then run the `land` skill in a loop until the PR is merged. Do not call `gh pr merge` directly.
 6. After merge is complete, move the issue to `Done`.
 
 ## Step 4: Rework handling
