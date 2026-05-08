@@ -493,7 +493,12 @@ long-lived subprocess (the "sidecar") that hosts the Claude Agent SDK and expose
 protocol to Symphony shaped like the Codex app-server client.
 
 - `command` (string shell command)
-  - Default: `uv run --project <priv-claude-agent> python -m symphony_claude_agent`
+  - Default: `jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent`
+  - `$SYMPHONY_CLAUDE_PRIV_DIR` is injected by the implementation at sidecar launch and points
+    at the Python sidecar's `priv` directory (`<priv-claude-agent>`); `bash` expands it at exec.
+  - The default ships with `jai` so the recommended outer-sandbox containment (Linux 6.13+) works
+    out of the box; hosts without jai MUST override this to drop the prefix
+    (`uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent`).
   - Mirrors `agent.codex.command` semantics: launched via `bash -lc` in the workspace directory.
 - `model` (string)
   - Default: implementation-defined; SHOULD be a current Anthropic model id.
@@ -699,7 +704,8 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.codex.read_timeout_ms`: integer, default `5000`
 - `agent.codex.stall_timeout_ms`: integer, default `300000`
 - `agent.claude.command`: shell command string, default
-  `uv run --project <priv-claude-agent> python -m symphony_claude_agent`
+  `jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent`
+  (see §10.8 for the `jai` default and the `SYMPHONY_CLAUDE_PRIV_DIR` env-var indirection)
 - `agent.claude.model`: string, default implementation-defined
 - `agent.claude.permission_mode`: enum
   (`default` | `acceptEdits` | `plan` | `dontAsk` | `bypassPermissions`), default `dontAsk`
@@ -1305,13 +1311,21 @@ Protocol source of truth:
 Launch contract:
 
 - Command: `agent.claude.command` (default
-  `uv run --project <priv-claude-agent> python -m symphony_claude_agent`).
+  `jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent`;
+  `SYMPHONY_CLAUDE_PRIV_DIR` is injected by the implementation and resolves to the
+  `<priv-claude-agent>` directory).
 - Invocation: `bash -lc <agent.claude.command>` in the per-issue workspace.
 - Required environment: `ANTHROPIC_API_KEY` (or the equivalent provider auth env var when routing
   through Bedrock/Vertex/Foundry — see §5.3.5.2).
 - Forwarded environment: `agent.claude.extra_env` plus the standard provider env vars
   (`CLAUDE_CODE_USE_BEDROCK`, `CLAUDE_CODE_USE_VERTEX`, `ANTHROPIC_AUTH_TOKEN`, etc.) when
   present in the host environment.
+- Implementation-injected environment:
+  - `SYMPHONY_CLAUDE_PRIV_DIR` always points at the `<priv-claude-agent>` directory so
+    `agent.claude.command` can be portable across hosts (see default above).
+  - `CLAUDE_CONFIG_DIR` is set to `agent.claude.config_dir` (path-expanded) when that field
+    is non-empty, so the sidecar's `claude` CLI scopes its OAuth lookup to that subscription.
+  - Both are `Map.put_new`-style: `extra_env` entries with the same key win.
 
 Sidecar wire protocol (Symphony ↔ sidecar over stdio, line-delimited JSON):
 

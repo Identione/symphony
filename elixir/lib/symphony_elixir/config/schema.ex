@@ -178,19 +178,20 @@ defmodule SymphonyElixir.Config.Schema do
     @permission_modes ~w(default acceptEdits plan dontAsk bypassPermissions)
     @system_prompt_presets ~w(claude_code minimal)
 
-    # Default mirrors Codex Approach A in SETUP.md: jai is the outer sandbox.
-    # Hosts without jai (kernel < 6.13, non-Linux) can override `command` and
-    # `permission_mode` in WORKFLOW.md to fall back to a non-jai posture.
-    # `$SYMPHONY_CLAUDE_PRIV_DIR` is injected by `Claude.AppServer` and
-    # expanded by bash; it resolves to `priv/claude_agent` independent of
-    # the per-issue workspace cwd the sidecar is launched in.
+    # The sidecar Port spawns with `cd: workspace`, so a workspace-relative
+    # path here would not resolve to the priv dir. `$SYMPHONY_CLAUDE_PRIV_DIR`
+    # is injected by `Claude.AppServer` (resolves to this app's
+    # `priv/claude_agent`) and expanded by bash. The default ships with a
+    # `jai` prefix so the recommended Approach A — outer sandbox containment
+    # via jai (Linux 6.13+) — works out of the box; hosts without jai must
+    # override `agent.claude.command` to drop the prefix (Approach B).
     @default_command "jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent"
 
     @primary_key false
     embedded_schema do
       field(:command, :string, default: @default_command)
       field(:model, :string)
-      field(:permission_mode, :string, default: "bypassPermissions")
+      field(:permission_mode, :string, default: "dontAsk")
       field(:allowed_tools, {:array, :string}, default: [])
       field(:disallowed_tools, {:array, :string}, default: [])
       field(:system_prompt_preset, :string, default: "claude_code")
