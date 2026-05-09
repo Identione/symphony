@@ -63,7 +63,7 @@ The launcher passes the `--i-understand-that-this-will-be-running-without-the-us
 
 `LINEAR_API_KEY` is expected to come from `elixir/mise.local.toml` (gitignored) — `make` checks for it via `mise exec`.
 
-> **Note for in-workspace testing:** the host running this repo already has Symphony bound to the default dashboard port (`server.port: 3453` in `elixir/WORKFLOW.md`, also the `DASHBOARD_URL` in the root `Makefile`). When you launch a second instance from inside an issue workspace (`make foreground`, `make start`, or `mix test` paths that spin up `HttpServer`), set a different TCP port — pass `--port <free-port>` to `bin/symphony`, override `server.port` in your local `WORKFLOW.md`, or set `:server_port_override` — otherwise Bandit will fail to bind because 3453 is already in use.
+> **Note for in-workspace daemon launches:** the host running this repo already has Symphony bound to the default dashboard port (`server.port: 3453` in `elixir/WORKFLOW.md`, also the `DASHBOARD_URL` in the root `Makefile`). When you launch a second instance from inside an issue workspace (`make foreground` / `make start`), set a different TCP port — pass `--port <free-port>` to `bin/symphony` or override `server.port` in your local `WORKFLOW.md` — otherwise Bandit will fail to bind because 3453 is already in use. (`mix test` / `make all` are unaffected: `config/test.exs` pins `:server_port_override` to `0` so the test boot picks an OS-assigned ephemeral port.)
 
 ## Architecture (big picture)
 
