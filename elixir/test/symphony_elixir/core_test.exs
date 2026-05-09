@@ -1010,6 +1010,59 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt == "Retry #2"
   end
 
+  test "prompt builder exposes agent.kind to Solid for both kinds" do
+    workflow_prompt = "agent_kind={{ agent.kind }}"
+
+    issue = %Issue{
+      identifier: "IDE-67",
+      title: "Expose agent.kind",
+      description: "Threads agent.kind into Solid context",
+      state: "In Progress",
+      url: "https://example.org/issues/IDE-67",
+      labels: []
+    }
+
+    for kind <- ["claude", "codex"] do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        prompt: workflow_prompt,
+        agent_kind: kind
+      )
+
+      assert PromptBuilder.build_prompt(issue) == "agent_kind=#{kind}",
+             "expected agent.kind to render as #{inspect(kind)}"
+    end
+  end
+
+  test "prompt builder honors {%- if agent.kind == \"claude\" -%} guard" do
+    workflow_prompt =
+      "before|" <>
+        "{%- if agent.kind == \"claude\" -%}/simplify-marker{%- endif -%}" <>
+        "|after"
+
+    issue = %Issue{
+      identifier: "IDE-67",
+      title: "Liquid guard on agent.kind",
+      description: "Claude-only block must vanish for codex",
+      state: "In Progress",
+      url: "https://example.org/issues/IDE-67",
+      labels: []
+    }
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      prompt: workflow_prompt,
+      agent_kind: "claude"
+    )
+
+    assert PromptBuilder.build_prompt(issue) == "before|/simplify-marker|after"
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      prompt: workflow_prompt,
+      agent_kind: "codex"
+    )
+
+    assert PromptBuilder.build_prompt(issue) == "before||after"
+  end
+
   test "agent runner keeps workspace after successful codex run" do
     test_root =
       Path.join(
