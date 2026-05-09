@@ -5,6 +5,8 @@ defmodule SymphonyElixir.Config.Schema do
 
   import Ecto.Changeset
 
+  require Logger
+
   alias SymphonyElixir.PathSafety
 
   @primary_key false
@@ -390,6 +392,7 @@ defmodule SymphonyElixir.Config.Schema do
     config
     |> normalize_keys()
     |> apply_legacy_codex_alias()
+    |> apply_legacy_claude_verbose_alias()
     |> drop_nil_values()
     |> changeset()
     |> apply_action(:validate)
@@ -427,6 +430,43 @@ defmodule SymphonyElixir.Config.Schema do
 
       _ ->
         config
+    end
+  end
+
+  # `agent.claude.verbose` was the original toggle; it was renamed to
+  # `agent.claude.verbose_logging` so the name covers all three noise sources
+  # (SDK partial/hook streams, forwarded `claude_cli` stderr, Symphony's
+  # per-envelope log lines). `Ecto.Changeset.cast/3` would otherwise drop the
+  # legacy key silently and switch users to quiet mode without warning.
+  # Accept it for one release: warn loudly, then map onto `verbose_logging`
+  # when the new key is absent.
+  defp apply_legacy_claude_verbose_alias(config) when is_map(config) do
+    with %{"agent" => agent_block} <- config,
+         %{"claude" => claude_block} when is_map(claude_block) <- agent_block,
+         true <- Map.has_key?(claude_block, "verbose") do
+      legacy_value = Map.get(claude_block, "verbose")
+      claude_block_pruned = Map.delete(claude_block, "verbose")
+
+      claude_block_final =
+        if Map.has_key?(claude_block_pruned, "verbose_logging") do
+          Logger.warning(
+            "agent.claude.verbose is deprecated; agent.claude.verbose_logging takes " <>
+              "precedence. Remove the legacy `verbose` key from WORKFLOW.md."
+          )
+
+          claude_block_pruned
+        else
+          Logger.warning(
+            "agent.claude.verbose is deprecated; rename to agent.claude.verbose_logging. " <>
+              "Honoring the legacy value (#{inspect(legacy_value)}) for this release."
+          )
+
+          Map.put(claude_block_pruned, "verbose_logging", legacy_value)
+        end
+
+      Map.put(config, "agent", Map.put(agent_block, "claude", claude_block_final))
+    else
+      _ -> config
     end
   end
 

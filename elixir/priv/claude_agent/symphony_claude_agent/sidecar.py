@@ -404,8 +404,9 @@ async def _handle_init(state: SessionState, env: dict[str, Any]) -> None:
     # The underlying `claude` CLI is always launched with `--verbose` by the
     # SDK, so its stderr is unconditionally chatty. Forward it back to
     # Symphony as `log` envelopes only when `init.verbose_logging` is on;
-    # otherwise discard it so it doesn't reach the orchestrator (and isn't
-    # attached at all to ClaudeAgentOptions, letting the SDK drop it).
+    # otherwise install a no-op sink so the SDK's stderr pump still drains
+    # the pipe (avoids a back-pressure stall when buffers fill) but nothing
+    # reaches the orchestrator.
     if env.get("verbose_logging"):
         payload["stderr"] = lambda line: emit(
             {

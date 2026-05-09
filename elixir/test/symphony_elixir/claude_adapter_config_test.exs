@@ -186,6 +186,90 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
     assert settings.agent.claude.config_dir == "~/.claude-identione"
   end
 
+  describe "legacy agent.claude.verbose alias" do
+    # The original toggle was `agent.claude.verbose`. It was renamed to
+    # `verbose_logging` to cover all three noise sources (SDK partial/hook
+    # streams, forwarded claude_cli stderr, Symphony per-envelope log lines).
+    # `Ecto.Changeset.cast/3` would silently drop the old key and quietly
+    # switch users to quiet mode — a UX trap. The schema accepts the legacy
+    # key for one release: warn loudly, then map onto `verbose_logging`.
+
+    test "legacy agent.claude.verbose: true migrates to verbose_logging with a warning" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      agent:
+        kind: claude
+        claude:
+          verbose: true
+      """
+
+      log =
+        capture_log(fn ->
+          assert {:ok, settings} = parse(yaml)
+          assert settings.agent.claude.verbose_logging == true
+        end)
+
+      assert log =~ "agent.claude.verbose is deprecated"
+      assert log =~ "rename to agent.claude.verbose_logging"
+    end
+
+    test "legacy agent.claude.verbose: false migrates to verbose_logging: false with a warning" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      agent:
+        kind: claude
+        claude:
+          verbose: false
+      """
+
+      log =
+        capture_log(fn ->
+          assert {:ok, settings} = parse(yaml)
+          assert settings.agent.claude.verbose_logging == false
+        end)
+
+      assert log =~ "agent.claude.verbose is deprecated"
+    end
+
+    test "agent.claude.verbose_logging takes precedence when both keys are set" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      agent:
+        kind: claude
+        claude:
+          verbose: false
+          verbose_logging: true
+      """
+
+      log =
+        capture_log(fn ->
+          assert {:ok, settings} = parse(yaml)
+          assert settings.agent.claude.verbose_logging == true
+        end)
+
+      assert log =~ "agent.claude.verbose is deprecated"
+      assert log =~ "verbose_logging takes"
+    end
+
+    test "no warning when only the new key is set" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      agent:
+        kind: claude
+        claude:
+          verbose_logging: true
+      """
+
+      log =
+        capture_log(fn ->
+          assert {:ok, settings} = parse(yaml)
+          assert settings.agent.claude.verbose_logging == true
+        end)
+
+      refute log =~ "deprecated"
+    end
+  end
+
   test "agent.claude rejects bad permission_mode" do
     yaml = """
     tracker: {kind: linear, project_slug: p, api_key: t}
