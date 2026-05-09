@@ -13,7 +13,11 @@ defmodule SymphonyElixir.CLI.LinearProject do
 
   @url_pattern ~r"^https?://[^/]+/[^/]+/project/(?<slug>[A-Za-z0-9._-]+)"
   @slug_pattern ~r"^[A-Za-z0-9._-]+$"
-  @hex_id_pattern ~r"[0-9a-f]{12}$"
+  # Anchor on the start of the slug or a `-` separator so a longer hex run
+  # (e.g. a hypothetical 16-hex slug) does not silently surface its trailing
+  # 12 chars as a "slug id". Today's Linear slugs are always `<name>-<12hex>`
+  # or the bare 12-hex form, but the anchor keeps the parse defensive.
+  @hex_id_pattern ~r"(?:^|-)([0-9a-f]{12})$"
 
   @spec parse(String.t() | nil) :: {:ok, parsed()} | {:error, String.t()}
   def parse(value) when is_binary(value) do
@@ -23,7 +27,7 @@ defmodule SymphonyElixir.CLI.LinearProject do
       trimmed == "" ->
         {:error, "missing Linear project URL or slug"}
 
-      String.starts_with?(trimmed, "http://") or String.starts_with?(trimmed, "https://") ->
+      String.starts_with?(trimmed, ["http://", "https://"]) ->
         from_url(trimmed)
 
       Regex.match?(@slug_pattern, trimmed) ->
@@ -52,7 +56,7 @@ defmodule SymphonyElixir.CLI.LinearProject do
 
   defp extract_slug_id(slug) do
     case Regex.run(@hex_id_pattern, slug) do
-      [hex] -> hex
+      [_match, hex] -> hex
       _ -> nil
     end
   end

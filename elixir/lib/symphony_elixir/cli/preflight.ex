@@ -24,6 +24,8 @@ defmodule SymphonyElixir.CLI.Preflight do
           touch_temp: (Path.t() -> :ok | {:error, term()}),
           tcp_listen: (non_neg_integer() -> :ok | {:error, term()}),
           graphql: (String.t(), map() -> {:ok, map()} | {:error, term()}),
+          ensure_http_app: (-> :ok),
+          silence_logger: (-> :ok),
           puts: (IO.chardata() -> :ok),
           puts_err: (IO.chardata() -> :ok)
         }
@@ -93,6 +95,19 @@ defmodule SymphonyElixir.CLI.Preflight do
       touch_temp: &touch_temp_file/1,
       tcp_listen: &check_tcp_listen/1,
       graphql: &Client.graphql/2,
+      # Linear queries go out through `Req`, which needs its `Finch` supervisor
+      # up. Preflight runs as a one-shot escript without booting the full
+      # orchestrator, so we start just enough of the OTP graph to make HTTP
+      # calls. Tests inject a no-op since `graphql` is already mocked.
+      ensure_http_app: fn ->
+        {:ok, _} = Application.ensure_all_started(:req)
+        :ok
+      end,
+      # Linear.Client logs every non-200 response at :error. Preflight already
+      # surfaces those failures inline, so silence the duplicate Logger output.
+      # Tests inject a no-op so the global Logger level is not mutated for the
+      # rest of the suite.
+      silence_logger: fn -> Logger.configure(level: :critical) end,
       puts: fn output -> IO.puts(output) end,
       puts_err: fn output -> IO.puts(:stderr, output) end
     }
@@ -107,11 +122,11 @@ defmodule SymphonyElixir.CLI.Preflight do
   def run(args, deps \\ runtime_deps()) do
     case args do
       [] ->
-        ensure_http_started()
+        prime_http(deps)
         do_run(Path.expand("WORKFLOW.md"), deps)
 
       [path] ->
-        ensure_http_started()
+        prime_http(deps)
         do_run(Path.expand(path), deps)
 
       _ ->
@@ -119,14 +134,9 @@ defmodule SymphonyElixir.CLI.Preflight do
     end
   end
 
-  # Linear queries go out through `Req`, which needs its `Finch` supervisor up.
-  # Preflight runs as a one-shot escript without booting the full orchestrator,
-  # so we start just enough of the OTP graph to make HTTP calls.
-  defp ensure_http_started do
-    {:ok, _} = Application.ensure_all_started(:req)
-    # The Linear client logs every non-200 response at :error. Preflight already
-    # surfaces those failures inline, so silence the duplicate Logger output.
-    Logger.configure(level: :critical)
+  defp prime_http(deps) do
+    deps.ensure_http_app.()
+    deps.silence_logger.()
     :ok
   end
 
@@ -201,7 +211,7 @@ defmodule SymphonyElixir.CLI.Preflight do
         {:error, "tracker.project_slug not set"}
 
       true ->
-        slug_id = LinearProject.parse(settings.tracker.project_slug) |> resolve_slug_id()
+        slug_id = parse_slug_id(settings.tracker.project_slug)
 
         case deps.graphql.(@project_query, %{slugId: slug_id || settings.tracker.project_slug}) do
           {:ok, %{"data" => %{"projects" => %{"nodes" => [%{"name" => name} | _]}}}} ->
@@ -219,8 +229,12 @@ defmodule SymphonyElixir.CLI.Preflight do
     end
   end
 
-  defp resolve_slug_id({:ok, %{slug_id: slug_id}}) when is_binary(slug_id), do: slug_id
-  defp resolve_slug_id(_), do: nil
+  defp parse_slug_id(slug) do
+    case LinearProject.parse(slug) do
+      {:ok, %{slug_id: hex}} when is_binary(hex) -> hex
+      _ -> nil
+    end
+  end
 
   defp check_states(settings, deps) do
     cond do

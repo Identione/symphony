@@ -29,6 +29,10 @@ defmodule SymphonyElixir.CLI.PreflightTest do
         responses = Map.get(overrides, :graphql, %{})
         find_response(responses, query)
       end,
+      # No-ops in tests: graphql is mocked, so we don't need the Req app, and
+      # mutating the global Logger level here would leak into other suites.
+      ensure_http_app: fn -> :ok end,
+      silence_logger: fn -> :ok end,
       puts: fn output ->
         send(parent, {:puts, IO.iodata_to_binary(output)})
         :ok
@@ -247,6 +251,37 @@ defmodule SymphonyElixir.CLI.PreflightTest do
     assert Enum.any?(fails, &String.contains?(&1, "Agent availability"))
     assert Enum.any?(fails, &String.contains?(&1, "Workspace root writability"))
     assert Enum.any?(fails, &String.contains?(&1, "Dashboard port"))
+  end
+
+  test "legacy workflow without a repo: block warns instead of failing repo clone access" do
+    project_slug = "symphony-2e32f5d86d8c"
+
+    # Workflow that mirrors the pre-IDE-61 shape: no top-level `repo:` block,
+    # so `settings.repo.url` is nil. Preflight should report that as a [warn]
+    # ("legacy workflows hardcode the URL in hooks.after_create") rather than
+    # spawning an unauthenticated `git ls-remote` against a missing URL.
+    workflow_file =
+      tmp_workflow!("legacy-no-repo",
+        tracker_api_token: "secret",
+        tracker_project_slug: project_slug,
+        repo_url: nil,
+        repo_path: nil,
+        server_port: 0
+      )
+
+    deps = build_deps(%{graphql: graphql_responses(project_slug, 0)})
+
+    assert :ok = Preflight.run([workflow_file], deps)
+
+    msgs = collect_puts()
+    full = Enum.join(msgs, "\n")
+
+    assert full =~ "[warn] Repo clone access"
+    assert full =~ "repo.url not set in WORKFLOW.md"
+    refute full =~ "[fail] Repo clone access"
+
+    # The check must not have shelled out to git when the URL is absent.
+    refute_received {:system_cmd, "git", _}
   end
 
   test "warns when project resolution fails but missing-state coverage falls back gracefully" do

@@ -45,7 +45,13 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
-  @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t()}
+  # Subcommands carry their own runtime deps shaped for what they actually need
+  # (see `CLI.Init.deps` / `CLI.Preflight.deps`), so the legacy `deps` argument
+  # only applies to the start path. Failures from `init`/`preflight` use the
+  # `:silent_failure` sentinel because those subcommands have already rendered
+  # their own diagnostics; `main/1` translates the sentinel into a non-zero
+  # exit without re-printing.
+  @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t() | :silent_failure}
   def evaluate(args, deps \\ runtime_deps()) do
     case args do
       ["init" | rest] -> CLI.Init.run(rest)

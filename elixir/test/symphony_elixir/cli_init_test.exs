@@ -264,6 +264,49 @@ defmodule SymphonyElixir.CLI.InitTest do
     assert_received {:write_forced, "/tmp/existing.md", _}
   end
 
+  test "wraps repo URLs containing shell metacharacters in single quotes" do
+    # Operator-supplied repo URL with shell-active characters: dollar sign,
+    # backtick, backslash, double quote, apostrophe. The generated hook line
+    # must single-quote the URL so that none of these expand when an unattended
+    # `hooks.after_create` shell later runs the workflow.
+    repo_url = ~S{git@example.com:o`r$g/repo\name'with".git}
+
+    rendered =
+      Init.render_workflow(%{
+        project_slug: "symphony-2e32f5d86d8c",
+        repo_url: repo_url,
+        repo_path: nil,
+        agent: "codex",
+        workspace_root: "~/code/symphony-workspaces/repo"
+      })
+
+    [hook_line] =
+      rendered
+      |> String.split(~r/\R/)
+      |> Enum.filter(&String.contains?(&1, "git clone --depth 1"))
+
+    # POSIX-safe: a single outer quote pair, with every embedded `'` rewritten
+    # as `'\''` (close, escaped quote, reopen). No backslash, dollar sign, or
+    # backtick escapes the quoted region.
+    expected_hook =
+      ~S{    git clone --depth 1 'git@example.com:o`r$g/repo\name} <>
+        ~S{'\''} <> ~S{with".git' .}
+
+    assert hook_line == expected_hook
+
+    # YAML scalar: backslashes doubled, double quotes escaped — a round-trip
+    # through YamlElixir must recover the exact input.
+    {:ok, decoded} =
+      rendered
+      |> String.split(~r/\R/, trim: false)
+      |> Enum.drop(1)
+      |> Enum.take_while(&(&1 != "---"))
+      |> Enum.join("\n")
+      |> YamlElixir.read_from_string()
+
+    assert get_in(decoded, ["repo", "url"]) == repo_url
+  end
+
   test "generated workflow parses against the Symphony schema" do
     rendered =
       Init.render_workflow(%{

@@ -5,6 +5,7 @@ defmodule SymphonyElixir.CLI.Init do
   """
 
   alias SymphonyElixir.CLI.LinearProject
+  alias SymphonyElixir.Config.Schema
 
   @switches [
     linear_project: :string,
@@ -18,7 +19,8 @@ defmodule SymphonyElixir.CLI.Init do
 
   @aliases [o: :output, f: :force]
 
-  @valid_agents ~w(codex claude)
+  @valid_agents Schema.Agent.kinds()
+  @setup_url "https://github.com/Identione/symphony/blob/main/SETUP.md"
 
   @ack_flag "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
 
@@ -251,8 +253,10 @@ defmodule SymphonyElixir.CLI.Init do
       "  max_concurrent_agents: 4",
       "  max_turns: 20",
       agent_block(agent),
-      "server:",
-      "  port: 3453",
+      "# The Phoenix dashboard is disabled by default. Enable it by uncommenting",
+      "# the block below (or by passing `--port <PORT>` to `symphony start`).",
+      "# server:",
+      "#   port: 3453",
       "---",
       "",
       prompt_body()
@@ -268,7 +272,7 @@ defmodule SymphonyElixir.CLI.Init do
   defp agent_block("codex") do
     """
       codex:
-        # See ../SETUP.md for the full operator setup. The defaults below assume
+        # See #{@setup_url} for the full operator setup. The defaults below assume
         # `~/.codex/config.toml` defines a permissions profile that allows
         # unattended `git commit` / `git push` (Approach B in SETUP.md), or that
         # `codex.command` is wrapped with an outer sandbox such as jai (Approach A).
@@ -285,7 +289,7 @@ defmodule SymphonyElixir.CLI.Init do
         # `$SYMPHONY_CLAUDE_PRIV_DIR` is injected by Symphony at sidecar launch
         # time. The Claude Agent SDK's `permission_mode: dontAsk` plus the
         # `allowed_tools` whitelist below is the inner sandbox boundary; jai
-        # (../SETUP.md, Approach A) is an optional outer sandbox.
+        # (#{@setup_url}, Approach A) is an optional outer sandbox.
         command: uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
         permission_mode: dontAsk
         allowed_tools:
@@ -328,13 +332,25 @@ defmodule SymphonyElixir.CLI.Init do
     |> String.trim_trailing("\n")
   end
 
+  # Double-quoted YAML scalars interpret `\` as an escape introducer
+  # (e.g. `\n`, `\t`), so a literal `\` in the value must become `\\`. Escape
+  # backslashes first, then double quotes, so the doubled-up `\\` we just
+  # wrote is not re-escaped by the second pass.
   defp yaml_string(value) when is_binary(value) do
-    escaped = String.replace(value, "\"", "\\\"")
+    escaped =
+      value
+      |> String.replace("\\", "\\\\")
+      |> String.replace("\"", "\\\"")
+
     "\"" <> escaped <> "\""
   end
 
+  # Use POSIX single-quote escaping (`'foo'\''bar'`) so the value survives
+  # shell expansion verbatim — single-quoted strings expand neither `$` nor
+  # backticks nor backslashes, so any operator-supplied repo URL is safe even
+  # when this `WORKFLOW.md` is later executed by an unattended hook.
   defp shell_quote(value) when is_binary(value) do
-    "\"" <> String.replace(value, "\"", "\\\"") <> "\""
+    "'" <> String.replace(value, "'", "'\\''") <> "'"
   end
 
   defp ensure_trailing_newline(value) do
