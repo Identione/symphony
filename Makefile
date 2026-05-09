@@ -29,7 +29,7 @@ RESET  := $(shell tput sgr0)
 endif
 
 .DEFAULT_GOAL := help
-.PHONY: help start stop restart status logs foreground build clean check-key check-built check-workflow
+.PHONY: help start stop restart status logs foreground build clean check-key check-built check-workflow ensure-deps
 
 help: ## Show this help.
 	@printf '$(BOLD)Symphony$(RESET)  $(DIM)— Linear-driven Codex orchestrator$(RESET)\n'
@@ -131,7 +131,7 @@ logs: ## Tail run/symphony.out (Ctrl-C to stop).
 
 # --- Build / clean ---------------------------------------------------------
 ##@ Build
-build: ## Rebuild elixir/bin/symphony (mix build).
+build: ensure-deps ## Rebuild elixir/bin/symphony (mix build).
 	@cd $(ELIXIR_DIR) && mise exec -- mix build
 
 clean: ## Remove run/ (PID + stdout log). Does not touch elixir/log/.
@@ -157,4 +157,13 @@ check-workflow:
 	@if [ ! -f $(WORKFLOW) ]; then \
 		echo "$(RED)error:$(RESET) $(WORKFLOW) not found"; \
 		exit 1; \
+	fi
+
+# Mix refuses to build with unfetched hex deps and dumps a wall of
+# "package … not available" errors. Detect the empty deps/ dir up front and
+# run `mix setup` so `make build` is self-healing on a fresh checkout.
+ensure-deps:
+	@if [ ! -d $(ELIXIR_DIR)/deps ] || [ -z "$$(ls -A $(ELIXIR_DIR)/deps 2>/dev/null)" ]; then \
+		echo "$(YELLOW)deps not fetched$(RESET); running '$(CYAN)mix setup$(RESET)' first..."; \
+		cd $(ELIXIR_DIR) && mise exec -- mix setup; \
 	fi
