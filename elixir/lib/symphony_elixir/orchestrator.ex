@@ -736,6 +736,7 @@ defmodule SymphonyElixir.Orchestrator do
             codex_last_reported_input_tokens: 0,
             codex_last_reported_output_tokens: 0,
             codex_last_reported_total_tokens: 0,
+            claude_app_server_pid: nil,
             claude_input_tokens: 0,
             claude_output_tokens: 0,
             claude_total_tokens: 0,
@@ -1144,6 +1145,7 @@ defmodule SymphonyElixir.Orchestrator do
           codex_input_tokens: Map.get(metadata, :codex_input_tokens, 0),
           codex_output_tokens: Map.get(metadata, :codex_output_tokens, 0),
           codex_total_tokens: Map.get(metadata, :codex_total_tokens, 0),
+          claude_app_server_pid: Map.get(metadata, :claude_app_server_pid),
           claude_input_tokens: Map.get(metadata, :claude_input_tokens, 0),
           claude_output_tokens: Map.get(metadata, :claude_output_tokens, 0),
           claude_total_tokens: Map.get(metadata, :claude_total_tokens, 0),
@@ -1225,6 +1227,7 @@ defmodule SymphonyElixir.Orchestrator do
   defp integrate_claude_update(running_entry, %{event: event, timestamp: timestamp} = update) do
     token_delta = extract_claude_token_delta(update)
     turn_count = Map.get(running_entry, :turn_count, 0)
+    claude_app_server_pid = Map.get(running_entry, :claude_app_server_pid)
 
     {
       Map.merge(running_entry, %{
@@ -1232,6 +1235,7 @@ defmodule SymphonyElixir.Orchestrator do
         last_codex_message: summarize_codex_update(update),
         session_id: session_id_for_update(running_entry.session_id, update),
         last_codex_event: event,
+        claude_app_server_pid: claude_app_server_pid_for_update(claude_app_server_pid, update),
         claude_input_tokens: Map.get(running_entry, :claude_input_tokens, 0) + token_delta.input_tokens,
         claude_output_tokens: Map.get(running_entry, :claude_output_tokens, 0) + token_delta.output_tokens,
         claude_total_tokens: Map.get(running_entry, :claude_total_tokens, 0) + token_delta.total_tokens,
@@ -1246,6 +1250,22 @@ defmodule SymphonyElixir.Orchestrator do
       token_delta
     }
   end
+
+  # Mirrors codex_app_server_pid_for_update/2 — Claude.AppServer stamps the
+  # bash wrapper's os_pid as a string on every envelope, so once it lands we
+  # keep it sticky for the remainder of the run.
+  defp claude_app_server_pid_for_update(_existing, %{claude_app_server_pid: pid})
+       when is_binary(pid),
+       do: pid
+
+  defp claude_app_server_pid_for_update(_existing, %{claude_app_server_pid: pid})
+       when is_integer(pid),
+       do: Integer.to_string(pid)
+
+  defp claude_app_server_pid_for_update(_existing, %{claude_app_server_pid: pid}) when is_list(pid),
+    do: to_string(pid)
+
+  defp claude_app_server_pid_for_update(existing, _update), do: existing
 
   # Claude advances `turn_count` on every `:turn_completed` event — there's no
   # `:session_started` analogue in the claude wire vocabulary. The codex path

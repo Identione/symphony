@@ -1607,6 +1607,11 @@ Token accounting rules:
   `total_tokens` (cache_read often dwarfs the prompt+completion total).
 - The Claude `usage` map is already a per-turn delta (no cumulative→delta diffing needed); just
   sum directly across turns.
+- When an implementation presents a unified status panel across adapter kinds (for example a single
+  "Tokens" line in a terminal dashboard), it SHOULD sum the per-adapter aggregates
+  (`agent_totals` + `claude_totals`) since each adapter accounts for its own disjoint sessions.
+  Per-running-row token columns SHOULD branch on `agent_kind` and read the matching adapter's
+  cumulative field; mixing the two on a single row would conflate distinct accounting domains.
 - Ignore delta-style payloads such as `last_token_usage` (Codex) for dashboard/API totals.
 - Extract input/output/total token counts leniently from common field names within the selected
   payload.
