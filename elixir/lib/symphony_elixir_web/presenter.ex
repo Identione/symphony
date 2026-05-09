@@ -5,6 +5,15 @@ defmodule SymphonyElixirWeb.Presenter do
 
   alias SymphonyElixir.{Config, Orchestrator, StatusDashboard}
 
+  @empty_claude_totals %{
+    input_tokens: 0,
+    output_tokens: 0,
+    total_tokens: 0,
+    cache_creation_input_tokens: 0,
+    cache_read_input_tokens: 0,
+    seconds_running: 0
+  }
+
   @spec state_payload(GenServer.name(), timeout()) :: map()
   def state_payload(orchestrator, snapshot_timeout_ms) do
     generated_at = DateTime.utc_now() |> DateTime.truncate(:second) |> DateTime.to_iso8601()
@@ -13,6 +22,7 @@ defmodule SymphonyElixirWeb.Presenter do
       %{} = snapshot ->
         %{
           generated_at: generated_at,
+          agent_kind: active_agent_kind(),
           counts: %{
             running: length(snapshot.running),
             retrying: length(snapshot.retrying)
@@ -20,6 +30,7 @@ defmodule SymphonyElixirWeb.Presenter do
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           codex_totals: snapshot.codex_totals,
+          claude_totals: Map.get(snapshot, :claude_totals) || @empty_claude_totals,
           rate_limits: snapshot.rate_limits
         }
 
@@ -103,16 +114,13 @@ defmodule SymphonyElixirWeb.Presenter do
       worker_host: Map.get(entry, :worker_host),
       workspace_path: Map.get(entry, :workspace_path),
       session_id: entry.session_id,
+      agent_kind: agent_kind_string(entry),
       turn_count: Map.get(entry, :turn_count, 0),
       last_event: entry.last_codex_event,
       last_message: summarize_message(entry.last_codex_message),
       started_at: iso8601(entry.started_at),
       last_event_at: iso8601(entry.last_codex_timestamp),
-      tokens: %{
-        input_tokens: entry.codex_input_tokens,
-        output_tokens: entry.codex_output_tokens,
-        total_tokens: entry.codex_total_tokens
-      }
+      tokens: tokens_payload(entry)
     }
   end
 
@@ -133,18 +141,52 @@ defmodule SymphonyElixirWeb.Presenter do
       worker_host: Map.get(running, :worker_host),
       workspace_path: Map.get(running, :workspace_path),
       session_id: running.session_id,
+      agent_kind: agent_kind_string(running),
       turn_count: Map.get(running, :turn_count, 0),
       state: running.state,
       started_at: iso8601(running.started_at),
       last_event: running.last_codex_event,
       last_message: summarize_message(running.last_codex_message),
       last_event_at: iso8601(running.last_codex_timestamp),
-      tokens: %{
-        input_tokens: running.codex_input_tokens,
-        output_tokens: running.codex_output_tokens,
-        total_tokens: running.codex_total_tokens
-      }
+      tokens: tokens_payload(running)
     }
+  end
+
+  # Codex JSON shape stays as-is so existing consumers don't break. Claude
+  # entries get the four Anthropic billing fields as siblings of `total_tokens`
+  # — never folded in (`total_tokens = input + output`, codex parity).
+  defp tokens_payload(entry) do
+    case Map.get(entry, :agent_kind, :codex) do
+      :claude ->
+        %{
+          input_tokens: Map.get(entry, :claude_input_tokens, 0),
+          output_tokens: Map.get(entry, :claude_output_tokens, 0),
+          total_tokens: Map.get(entry, :claude_total_tokens, 0),
+          cache_creation_input_tokens: Map.get(entry, :claude_cache_creation_input_tokens, 0),
+          cache_read_input_tokens: Map.get(entry, :claude_cache_read_input_tokens, 0)
+        }
+
+      _ ->
+        %{
+          input_tokens: Map.get(entry, :codex_input_tokens, 0),
+          output_tokens: Map.get(entry, :codex_output_tokens, 0),
+          total_tokens: Map.get(entry, :codex_total_tokens, 0)
+        }
+    end
+  end
+
+  defp agent_kind_string(entry) do
+    case Map.get(entry, :agent_kind, :codex) do
+      :claude -> "claude"
+      _ -> "codex"
+    end
+  end
+
+  defp active_agent_kind do
+    case Config.adapter_module() do
+      SymphonyElixir.Claude.AppServer -> "claude"
+      _ -> "codex"
+    end
   end
 
   defp retry_issue_payload(retry) do
