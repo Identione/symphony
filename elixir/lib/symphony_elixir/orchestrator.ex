@@ -742,6 +742,11 @@ defmodule SymphonyElixir.Orchestrator do
             claude_total_tokens: 0,
             claude_cache_creation_input_tokens: 0,
             claude_cache_read_input_tokens: 0,
+            claude_turn_provisional_input_tokens: 0,
+            claude_turn_provisional_output_tokens: 0,
+            claude_turn_provisional_total_tokens: 0,
+            claude_turn_provisional_cache_creation_input_tokens: 0,
+            claude_turn_provisional_cache_read_input_tokens: 0,
             turn_count: 0,
             retry_attempt: normalize_retry_attempt(attempt),
             started_at: DateTime.utc_now()
@@ -1224,30 +1229,125 @@ defmodule SymphonyElixir.Orchestrator do
     |> Map.put(:running, Map.put(running, issue_id, updated_running_entry))
   end
 
-  defp integrate_claude_update(running_entry, %{event: event, timestamp: timestamp} = update) do
-    token_delta = extract_claude_token_delta(update)
+  # Three event paths share the same envelope-level merge (last_event, pid,
+  # session_id) but differ in how they touch the cumulative token totals:
+  #
+  # * `:token_usage`   — per-AssistantMessage live signal. Add the delta to
+  #                      both `claude_*_tokens` and `claude_turn_provisional_*`.
+  # * `:turn_completed`— authoritative ResultMessage rollup. Add the
+  #                      *correction* `result.usage - turn_provisional` so the
+  #                      running total ends at the authoritative value, then
+  #                      reset turn_provisional. Correction is non-negative
+  #                      (clamped to zero) so totals never move backwards if a
+  #                      provisional already exceeded the rollup.
+  # * everything else  — token totals untouched; only the envelope-level
+  #                      bookkeeping moves forward.
+  defp integrate_claude_update(running_entry, %{event: :token_usage} = update) do
+    delta = extract_claude_token_delta(update)
+    integrate_claude_envelope(running_entry, update, delta, &add_to_provisional/2)
+  end
+
+  defp integrate_claude_update(running_entry, %{event: :turn_completed} = update) do
+    result_usage = extract_claude_token_delta(update)
+    correction = compute_turn_correction(running_entry, result_usage)
+    integrate_claude_envelope(running_entry, update, correction, &reset_provisional/1)
+  end
+
+  defp integrate_claude_update(running_entry, update) do
+    integrate_claude_envelope(running_entry, update, zero_token_delta(), &noop_provisional/1)
+  end
+
+  defp integrate_claude_envelope(running_entry, %{event: event, timestamp: timestamp} = update, token_delta, provisional_fn) do
     turn_count = Map.get(running_entry, :turn_count, 0)
     claude_app_server_pid = Map.get(running_entry, :claude_app_server_pid)
 
-    {
-      Map.merge(running_entry, %{
-        last_codex_timestamp: timestamp,
-        last_codex_message: summarize_codex_update(update),
-        session_id: session_id_for_update(running_entry.session_id, update),
-        last_codex_event: event,
-        claude_app_server_pid: claude_app_server_pid_for_update(claude_app_server_pid, update),
-        claude_input_tokens: Map.get(running_entry, :claude_input_tokens, 0) + token_delta.input_tokens,
-        claude_output_tokens: Map.get(running_entry, :claude_output_tokens, 0) + token_delta.output_tokens,
-        claude_total_tokens: Map.get(running_entry, :claude_total_tokens, 0) + token_delta.total_tokens,
-        claude_cache_creation_input_tokens:
-          Map.get(running_entry, :claude_cache_creation_input_tokens, 0) +
-            token_delta.cache_creation_input_tokens,
-        claude_cache_read_input_tokens:
-          Map.get(running_entry, :claude_cache_read_input_tokens, 0) +
-            token_delta.cache_read_input_tokens,
-        turn_count: claude_turn_count_for_update(turn_count, update)
-      }),
-      token_delta
+    base_merge = %{
+      last_codex_timestamp: timestamp,
+      last_codex_message: summarize_codex_update(update),
+      session_id: session_id_for_update(running_entry.session_id, update),
+      last_codex_event: event,
+      claude_app_server_pid: claude_app_server_pid_for_update(claude_app_server_pid, update),
+      claude_input_tokens: Map.get(running_entry, :claude_input_tokens, 0) + token_delta.input_tokens,
+      claude_output_tokens: Map.get(running_entry, :claude_output_tokens, 0) + token_delta.output_tokens,
+      claude_total_tokens: Map.get(running_entry, :claude_total_tokens, 0) + token_delta.total_tokens,
+      claude_cache_creation_input_tokens:
+        Map.get(running_entry, :claude_cache_creation_input_tokens, 0) +
+          token_delta.cache_creation_input_tokens,
+      claude_cache_read_input_tokens:
+        Map.get(running_entry, :claude_cache_read_input_tokens, 0) +
+          token_delta.cache_read_input_tokens,
+      turn_count: claude_turn_count_for_update(turn_count, update)
+    }
+
+    provisional_merge =
+      case provisional_fn do
+        fun when is_function(fun, 1) -> fun.(running_entry)
+        fun when is_function(fun, 2) -> fun.(running_entry, token_delta)
+      end
+
+    {Map.merge(running_entry, Map.merge(base_merge, provisional_merge)), token_delta}
+  end
+
+  defp add_to_provisional(running_entry, delta) do
+    %{
+      claude_turn_provisional_input_tokens: Map.get(running_entry, :claude_turn_provisional_input_tokens, 0) + delta.input_tokens,
+      claude_turn_provisional_output_tokens: Map.get(running_entry, :claude_turn_provisional_output_tokens, 0) + delta.output_tokens,
+      claude_turn_provisional_total_tokens: Map.get(running_entry, :claude_turn_provisional_total_tokens, 0) + delta.total_tokens,
+      claude_turn_provisional_cache_creation_input_tokens:
+        Map.get(running_entry, :claude_turn_provisional_cache_creation_input_tokens, 0) +
+          delta.cache_creation_input_tokens,
+      claude_turn_provisional_cache_read_input_tokens:
+        Map.get(running_entry, :claude_turn_provisional_cache_read_input_tokens, 0) +
+          delta.cache_read_input_tokens
+    }
+  end
+
+  defp reset_provisional(_running_entry) do
+    %{
+      claude_turn_provisional_input_tokens: 0,
+      claude_turn_provisional_output_tokens: 0,
+      claude_turn_provisional_total_tokens: 0,
+      claude_turn_provisional_cache_creation_input_tokens: 0,
+      claude_turn_provisional_cache_read_input_tokens: 0
+    }
+  end
+
+  defp noop_provisional(_running_entry), do: %{}
+
+  # `correction = max(0, ResultMessage.usage - turn_provisional)`. Clamping at
+  # zero matters when a per-message stream already counted more than the
+  # rollup (rare, but happens when AssistantMessage.usage races ahead of
+  # ResultMessage in long turns); we never want the running total to move
+  # backwards mid-flight.
+  defp compute_turn_correction(running_entry, %{} = result_usage) do
+    %{
+      input_tokens: max(0, result_usage.input_tokens - Map.get(running_entry, :claude_turn_provisional_input_tokens, 0)),
+      output_tokens: max(0, result_usage.output_tokens - Map.get(running_entry, :claude_turn_provisional_output_tokens, 0)),
+      total_tokens: max(0, result_usage.total_tokens - Map.get(running_entry, :claude_turn_provisional_total_tokens, 0)),
+      cache_creation_input_tokens:
+        max(
+          0,
+          result_usage.cache_creation_input_tokens -
+            Map.get(running_entry, :claude_turn_provisional_cache_creation_input_tokens, 0)
+        ),
+      cache_read_input_tokens:
+        max(
+          0,
+          result_usage.cache_read_input_tokens -
+            Map.get(running_entry, :claude_turn_provisional_cache_read_input_tokens, 0)
+        ),
+      seconds_running: 0
+    }
+  end
+
+  defp zero_token_delta do
+    %{
+      input_tokens: 0,
+      output_tokens: 0,
+      total_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+      seconds_running: 0
     }
   end
 

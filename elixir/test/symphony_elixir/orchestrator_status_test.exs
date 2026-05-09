@@ -1795,6 +1795,145 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       assert is_integer(completed_state.claude_totals.seconds_running)
       assert completed_state.codex_totals.seconds_running == 0
     end
+
+    test "token_usage event accumulates into claude_*_tokens and turn_provisional", %{
+      pid: pid,
+      issue_id: issue_id
+    } do
+      send_claude_token_usage(pid, issue_id, %{
+        input_tokens: 800,
+        output_tokens: 40,
+        cache_creation_input_tokens: 50,
+        cache_read_input_tokens: 100
+      })
+
+      _ = wait_for_snapshot(pid, fn s -> hd(s.running).claude_input_tokens == 800 end)
+      state = :sys.get_state(pid)
+
+      assert state.claude_totals.input_tokens == 800
+      assert state.claude_totals.output_tokens == 40
+      assert state.claude_totals.total_tokens == 840
+      assert state.claude_totals.cache_creation_input_tokens == 50
+      assert state.claude_totals.cache_read_input_tokens == 100
+
+      [entry] = Map.values(state.running)
+      assert entry.claude_input_tokens == 800
+      assert entry.claude_output_tokens == 40
+      assert entry.claude_total_tokens == 840
+      assert entry.claude_cache_creation_input_tokens == 50
+      assert entry.claude_cache_read_input_tokens == 100
+
+      assert entry.claude_turn_provisional_input_tokens == 800
+      assert entry.claude_turn_provisional_output_tokens == 40
+      assert entry.claude_turn_provisional_total_tokens == 840
+      assert entry.claude_turn_provisional_cache_creation_input_tokens == 50
+      assert entry.claude_turn_provisional_cache_read_input_tokens == 100
+    end
+
+    test "turn_completed reconciles against prior token_usage and resets turn_provisional", %{
+      pid: pid,
+      issue_id: issue_id
+    } do
+      send_claude_token_usage(pid, issue_id, %{
+        input_tokens: 800,
+        output_tokens: 40,
+        cache_creation_input_tokens: 50,
+        cache_read_input_tokens: 100
+      })
+
+      send_claude_token_usage(pid, issue_id, %{
+        input_tokens: 200,
+        output_tokens: 60,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0
+      })
+
+      _ = wait_for_snapshot(pid, fn s -> hd(s.running).claude_input_tokens == 1_000 end)
+
+      send_claude_turn_completed(pid, issue_id, %{
+        input_tokens: 1_050,
+        output_tokens: 100,
+        cache_creation_input_tokens: 50,
+        cache_read_input_tokens: 100
+      })
+
+      _ = wait_for_snapshot(pid, fn s -> hd(s.running).claude_input_tokens == 1_050 end)
+      state = :sys.get_state(pid)
+
+      assert state.claude_totals.input_tokens == 1_050,
+             "expected ResultMessage to be authoritative: 1000 (provisional) + 50 (correction) = 1050"
+
+      assert state.claude_totals.output_tokens == 100
+      assert state.claude_totals.total_tokens == 1_150
+      assert state.claude_totals.cache_creation_input_tokens == 50
+      assert state.claude_totals.cache_read_input_tokens == 100
+
+      [entry] = Map.values(state.running)
+      assert entry.claude_input_tokens == 1_050
+      assert entry.claude_output_tokens == 100
+      assert entry.claude_total_tokens == 1_150
+
+      assert entry.claude_turn_provisional_input_tokens == 0,
+             "turn_provisional must reset on :turn_completed so the next turn starts fresh"
+
+      assert entry.claude_turn_provisional_output_tokens == 0
+      assert entry.claude_turn_provisional_total_tokens == 0
+      assert entry.claude_turn_provisional_cache_creation_input_tokens == 0
+      assert entry.claude_turn_provisional_cache_read_input_tokens == 0
+
+      assert entry.turn_count == 1
+    end
+
+    test "turn_completed without prior token_usage events still applies full ResultMessage usage",
+         %{pid: pid, issue_id: issue_id} do
+      send_claude_turn_completed(pid, issue_id, %{
+        input_tokens: 1_000,
+        output_tokens: 100,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0
+      })
+
+      _ = wait_for_snapshot(pid, fn s -> hd(s.running).claude_input_tokens == 1_000 end)
+      state = :sys.get_state(pid)
+
+      assert state.claude_totals.input_tokens == 1_000
+      assert state.claude_totals.output_tokens == 100
+      assert state.claude_totals.total_tokens == 1_100
+    end
+
+    test "turn_completed never applies a negative correction (provisional > result is clamped)",
+         %{pid: pid, issue_id: issue_id} do
+      send_claude_token_usage(pid, issue_id, %{
+        input_tokens: 1_500,
+        output_tokens: 200,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0
+      })
+
+      _ = wait_for_snapshot(pid, fn s -> hd(s.running).claude_input_tokens == 1_500 end)
+
+      send_claude_turn_completed(pid, issue_id, %{
+        input_tokens: 1_000,
+        output_tokens: 150,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0
+      })
+
+      _ =
+        wait_for_snapshot(pid, fn s ->
+          [entry | _] = s.running
+          entry.last_codex_event == :turn_completed
+        end)
+
+      state = :sys.get_state(pid)
+
+      assert state.claude_totals.input_tokens == 1_500,
+             "running totals must not move backwards if provisional already exceeded the final"
+
+      assert state.claude_totals.output_tokens == 200
+      [entry] = Map.values(state.running)
+      assert entry.claude_turn_provisional_input_tokens == 0
+    end
   end
 
   test "status dashboard uses shell command line as exec command status text" do
@@ -1907,6 +2046,19 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            num_turns: 1,
            usage: usage
          },
+         timestamp: DateTime.utc_now()
+       }}
+    )
+  end
+
+  defp send_claude_token_usage(pid, issue_id, usage) when is_map(usage) do
+    send(
+      pid,
+      {:codex_worker_update, issue_id,
+       %{
+         event: :token_usage,
+         agent_kind: :claude,
+         payload: %{usage: usage},
          timestamp: DateTime.utc_now()
        }}
     )

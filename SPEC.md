@@ -1375,6 +1375,21 @@ Turn processing:
   a `ResultMessage`, at which point it emits `turn_end` carrying `stop_reason`, `num_turns`, and
   `usage`. The `usage` payload uses snake_case keys: `input_tokens`, `output_tokens`,
   `cache_creation_input_tokens`, `cache_read_input_tokens`.
+- For each `AssistantMessage` whose underlying message carries a non-`None` `usage` field
+  (claude-agent-sdk ≥0.1.49 — *"Preserve per-turn `usage` on `AssistantMessage`"*), the sidecar
+  SHOULD also emit a separate `token_usage` envelope carrying that API call's billing
+  (`session_id` + four-field `usage` payload, same snake_case shape as `turn_end.usage`). This is
+  the live mid-turn signal; the SDK does not expose Anthropic's raw `message_start` /
+  `message_delta` SSE events. Suppress the envelope when `usage` is `None` to avoid claiming a
+  billing event that didn't happen.
+- Implementations that consume both `token_usage` and `turn_end.usage` MUST reconcile rather than
+  sum. Per-turn semantics: per-message `token_usage` is provisional; `ResultMessage.usage` from
+  `turn_end` is authoritative for the turn rollup. The recommended reconciliation is to track a
+  per-running-entry "turn-provisional" accumulator that is bumped on each `token_usage` and reset
+  on `turn_end`; on `turn_end`, apply `correction = max(0, turn_end.usage - turn_provisional)` to
+  the cumulative totals so they end at the authoritative value without ever moving backwards. If
+  no `token_usage` envelopes arrived for a turn (legacy sidecar / error path), `turn_provisional`
+  stays at 0 and the correction equals the full rollup, matching the pre-`token_usage` behaviour.
 - The sidecar subprocess remains alive across continuation turns.
 - Symphony's `interrupt` request MUST be implemented as `await client.interrupt()` on the live
   `ClaudeSDKClient`; it is an async method, not a wire-level signal sent into the subprocess.
