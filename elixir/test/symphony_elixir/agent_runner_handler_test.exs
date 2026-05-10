@@ -25,12 +25,12 @@ defmodule SymphonyElixir.AgentRunnerHandlerTest do
     }
   end
 
-  defp run_handler(adapter, event) do
-    handler = AgentRunner.compose_message_handler(adapter, self(), issue())
+  defp run_handler(adapter, event, opts \\ [verbose_logging: true]) do
+    handler = AgentRunner.compose_message_handler(adapter, self(), issue(), opts)
     handler.(event)
   end
 
-  describe "compose_message_handler/3 for the Claude adapter" do
+  describe "compose_message_handler/4 for the Claude adapter (verbose_logging=true)" do
     test "logs `tool_call` with name + folded input + issue + session context" do
       event =
         event(:tool_call, %{
@@ -130,7 +130,15 @@ defmodule SymphonyElixir.AgentRunnerHandlerTest do
 
     test "still send/2's events to the recipient (so the dashboard works)" do
       parent = self()
-      handler = AgentRunner.compose_message_handler(SymphonyElixir.Claude.AppServer, parent, issue())
+
+      handler =
+        AgentRunner.compose_message_handler(
+          SymphonyElixir.Claude.AppServer,
+          parent,
+          issue(),
+          verbose_logging: true
+        )
+
       ev = event(:assistant_message, %{text: "hi"})
       capture_log(fn -> handler.(ev) end)
 
@@ -138,7 +146,66 @@ defmodule SymphonyElixir.AgentRunnerHandlerTest do
     end
   end
 
-  describe "compose_message_handler/3 for non-Claude adapters" do
+  describe "compose_message_handler/4 for the Claude adapter (verbose_logging=false)" do
+    # Quiet mode is the default and the documented "noticeably less Claude
+    # noise" posture (IDE-62). The handler must skip every per-envelope log
+    # line — including forwarded `claude_cli` stderr — while still
+    # forwarding events to the dashboard recipient.
+
+    for type <- [:tool_call, :assistant_message, :turn_completed, :permission_request, :system_init, :log] do
+      @tag claude_event: type
+      test "drops `#{type}` log line when verbose_logging is off", %{claude_event: type} do
+        payload =
+          case type do
+            :tool_call -> %{name: "Read", input: %{"path" => "/x"}}
+            :assistant_message -> %{text: "hello"}
+            :turn_completed -> %{stop_reason: "end_turn", num_turns: 1, usage: %{input_tokens: 1, output_tokens: 2}}
+            :permission_request -> %{request: %{"tool" => "Bash"}}
+            :system_init -> %{}
+            :log -> %{level: "info", source: "claude_cli", message: "boot ok"}
+          end
+
+        log =
+          capture_log(fn ->
+            run_handler(SymphonyElixir.Claude.AppServer, event(type, payload), verbose_logging: false)
+          end)
+
+        assert log == "",
+               "expected no log lines for #{inspect(type)} when verbose_logging=false, got: #{log}"
+      end
+    end
+
+    test "still send/2's events to the recipient when quiet" do
+      parent = self()
+
+      handler =
+        AgentRunner.compose_message_handler(
+          SymphonyElixir.Claude.AppServer,
+          parent,
+          issue(),
+          verbose_logging: false
+        )
+
+      capture_log(fn -> handler.(event(:tool_call, %{name: "Read", input: %{}})) end)
+
+      assert_received {:codex_worker_update, "issue-1", _msg}
+    end
+
+    test "default opts (no `:verbose_logging` key) behave as quiet mode" do
+      log =
+        capture_log(fn ->
+          handler =
+            AgentRunner.compose_message_handler(SymphonyElixir.Claude.AppServer, self(), issue())
+
+          handler.(event(:tool_call, %{name: "Read", input: %{}}))
+        end)
+
+      assert log == "", "expected default-quiet handler to emit no log lines, got: #{log}"
+      assert_received {:codex_worker_update, "issue-1", _msg}
+    end
+  end
+
+  describe "compose_message_handler/4 for non-Claude adapters" do
     test "Codex adapter produces no log lines (regression guard)" do
       event = event(:tool_call, %{name: "shell", input: %{"cmd" => "ls"}})
 

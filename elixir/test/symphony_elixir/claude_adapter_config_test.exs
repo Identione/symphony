@@ -106,9 +106,11 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
     assert settings.agent.claude.stall_timeout_ms == 300_000
     assert settings.agent.claude.extra_env == %{}
     assert is_binary(settings.agent.claude.command)
-    # `verbose=false` keeps the SDK's noisier streams (partial messages,
-    # hook events) off by default; users opt in for debugging.
-    assert settings.agent.claude.verbose == false
+    # `verbose_logging=false` keeps Claude's debug feed off by default
+    # (SDK partial-message/hook streams, forwarded `claude_cli` stderr,
+    # and Symphony's per-envelope log lines all stay quiet); users opt in
+    # for debugging.
+    assert settings.agent.claude.verbose_logging == false
   end
 
   test "default command resolves the sidecar via $SYMPHONY_CLAUDE_PRIV_DIR" do
@@ -145,7 +147,7 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
         turn_timeout_ms: 1800000
         read_timeout_ms: 7000
         stall_timeout_ms: 60000
-        verbose: true
+        verbose_logging: true
     """
 
     assert {:ok, settings} = parse(yaml)
@@ -163,7 +165,7 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
     assert claude.turn_timeout_ms == 1_800_000
     assert claude.read_timeout_ms == 7_000
     assert claude.stall_timeout_ms == 60_000
-    assert claude.verbose == true
+    assert claude.verbose_logging == true
   end
 
   test "agent.claude.config_dir defaults to nil" do
@@ -182,6 +184,90 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
 
     assert {:ok, settings} = parse(yaml)
     assert settings.agent.claude.config_dir == "~/.claude-identione"
+  end
+
+  describe "legacy agent.claude.verbose alias" do
+    # The original toggle was `agent.claude.verbose`. It was renamed to
+    # `verbose_logging` to cover all three noise sources (SDK partial/hook
+    # streams, forwarded claude_cli stderr, Symphony per-envelope log lines).
+    # `Ecto.Changeset.cast/3` would silently drop the old key and quietly
+    # switch users to quiet mode — a UX trap. The schema accepts the legacy
+    # key for one release: warn loudly, then map onto `verbose_logging`.
+
+    test "legacy agent.claude.verbose: true migrates to verbose_logging with a warning" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      agent:
+        kind: claude
+        claude:
+          verbose: true
+      """
+
+      log =
+        capture_log(fn ->
+          assert {:ok, settings} = parse(yaml)
+          assert settings.agent.claude.verbose_logging == true
+        end)
+
+      assert log =~ "agent.claude.verbose is deprecated"
+      assert log =~ "rename to agent.claude.verbose_logging"
+    end
+
+    test "legacy agent.claude.verbose: false migrates to verbose_logging: false with a warning" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      agent:
+        kind: claude
+        claude:
+          verbose: false
+      """
+
+      log =
+        capture_log(fn ->
+          assert {:ok, settings} = parse(yaml)
+          assert settings.agent.claude.verbose_logging == false
+        end)
+
+      assert log =~ "agent.claude.verbose is deprecated"
+    end
+
+    test "agent.claude.verbose_logging takes precedence when both keys are set" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      agent:
+        kind: claude
+        claude:
+          verbose: false
+          verbose_logging: true
+      """
+
+      log =
+        capture_log(fn ->
+          assert {:ok, settings} = parse(yaml)
+          assert settings.agent.claude.verbose_logging == true
+        end)
+
+      assert log =~ "agent.claude.verbose is deprecated"
+      assert log =~ "verbose_logging takes"
+    end
+
+    test "no warning when only the new key is set" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      agent:
+        kind: claude
+        claude:
+          verbose_logging: true
+      """
+
+      log =
+        capture_log(fn ->
+          assert {:ok, settings} = parse(yaml)
+          assert settings.agent.claude.verbose_logging == true
+        end)
+
+      refute log =~ "deprecated"
+    end
   end
 
   test "agent.claude rejects bad permission_mode" do
