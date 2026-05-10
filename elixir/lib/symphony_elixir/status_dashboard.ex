@@ -333,13 +333,18 @@ defmodule SymphonyElixir.StatusDashboard do
   defp format_snapshot_content(snapshot_data, tps, terminal_columns_override \\ nil) do
     case snapshot_data do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
+        claude_totals = Map.get(snapshot, :claude_totals) || %{}
         rate_limits = Map.get(snapshot, :rate_limits)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
-        codex_input_tokens = Map.get(codex_totals, :input_tokens, 0)
-        codex_output_tokens = Map.get(codex_totals, :output_tokens, 0)
-        codex_total_tokens = Map.get(codex_totals, :total_tokens, 0)
-        codex_seconds_running = Map.get(codex_totals, :seconds_running, 0)
+        input_tokens = Map.get(codex_totals, :input_tokens, 0) + Map.get(claude_totals, :input_tokens, 0)
+        output_tokens = Map.get(codex_totals, :output_tokens, 0) + Map.get(claude_totals, :output_tokens, 0)
+        total_tokens = Map.get(codex_totals, :total_tokens, 0) + Map.get(claude_totals, :total_tokens, 0)
+
+        seconds_running =
+          Map.get(codex_totals, :seconds_running, 0) + Map.get(claude_totals, :seconds_running, 0)
+
+        cache_line = format_claude_cache_line(claude_totals)
         agent_count = length(running)
         max_agents = Config.settings!().agent.max_concurrent_agents
         running_event_width = running_event_width(terminal_columns_override)
@@ -355,13 +360,14 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize("#{max_agents}", @ansi_gray),
            colorize("│ Throughput: ", @ansi_bold) <> colorize("#{format_tps(tps)} tps", @ansi_cyan),
            colorize("│ Runtime: ", @ansi_bold) <>
-             colorize(format_runtime_seconds(codex_seconds_running), @ansi_magenta),
+             colorize(format_runtime_seconds(seconds_running), @ansi_magenta),
            colorize("│ Tokens: ", @ansi_bold) <>
-             colorize("in #{format_count(codex_input_tokens)}", @ansi_yellow) <>
+             colorize("in #{format_count(input_tokens)}", @ansi_yellow) <>
              colorize(" | ", @ansi_gray) <>
-             colorize("out #{format_count(codex_output_tokens)}", @ansi_yellow) <>
+             colorize("out #{format_count(output_tokens)}", @ansi_yellow) <>
              colorize(" | ", @ansi_gray) <>
-             colorize("total #{format_count(codex_total_tokens)}", @ansi_yellow),
+             colorize("total #{format_count(total_tokens)}", @ansi_yellow),
+           cache_line,
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
            project_link_lines,
            project_refresh_line,
@@ -376,6 +382,7 @@ defmodule SymphonyElixir.StatusDashboard do
            backoff_rows ++
            [closing_border()])
         |> List.flatten()
+        |> Enum.reject(&is_nil/1)
         |> Enum.join("\n")
 
       :error ->
@@ -561,6 +568,7 @@ defmodule SymphonyElixir.StatusDashboard do
              running: running,
              retrying: retrying,
              codex_totals: codex_totals,
+             claude_totals: Map.get(snapshot, :claude_totals),
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
            }}
@@ -592,8 +600,8 @@ defmodule SymphonyElixir.StatusDashboard do
     state = running_entry.state || "unknown"
     state_display = format_cell(to_string(state), @running_stage_width)
     session = running_entry.session_id |> compact_session_id() |> format_cell(@running_session_width)
-    pid = format_cell(running_entry.codex_app_server_pid || "n/a", @running_pid_width)
-    total_tokens = running_entry.codex_total_tokens || 0
+    {pid_value, total_tokens} = running_row_pid_and_tokens(running_entry)
+    pid = format_cell(pid_value || "n/a", @running_pid_width)
     runtime_seconds = running_entry.runtime_seconds || 0
     turn_count = Map.get(running_entry, :turn_count, 0)
     age = format_cell(format_runtime_and_turns(runtime_seconds, turn_count), @running_age_width)
@@ -630,6 +638,30 @@ defmodule SymphonyElixir.StatusDashboard do
       colorize(event_label, status_color)
     ]
     |> Enum.join("")
+  end
+
+  # Per-row pid/tokens columns branch on `agent_kind`. Codex stamps
+  # `codex_app_server_pid` from the Port; Claude stamps `claude_app_server_pid`
+  # from the sidecar Port. Token totals live in parallel `*_total_tokens`
+  # fields on the running entry — see Orchestrator.handle_call(:snapshot, …).
+  defp running_row_pid_and_tokens(%{agent_kind: :claude} = entry) do
+    {Map.get(entry, :claude_app_server_pid), Map.get(entry, :claude_total_tokens) || 0}
+  end
+
+  defp running_row_pid_and_tokens(entry) do
+    {Map.get(entry, :codex_app_server_pid), Map.get(entry, :codex_total_tokens) || 0}
+  end
+
+  defp format_claude_cache_line(claude_totals) do
+    created = Map.get(claude_totals, :cache_creation_input_tokens, 0)
+    read = Map.get(claude_totals, :cache_read_input_tokens, 0)
+
+    if created > 0 or read > 0 do
+      colorize("│ Cache: ", @ansi_bold) <>
+        colorize("created #{format_count(created)}", @ansi_yellow) <>
+        colorize(" · ", @ansi_gray) <>
+        colorize("read #{format_count(read)}", @ansi_yellow)
+    end
   end
 
   @doc false
@@ -1626,15 +1658,39 @@ defmodule SymphonyElixir.StatusDashboard do
         ])
       )
 
+    # Claude per-turn `total_tokens` is `input + output` (codex parity);
+    # cache fields are siblings, never folded into `total_tokens` (SPEC §10.8).
     total =
+      case parse_integer(
+             map_value(usage, [
+               "total_tokens",
+               :total_tokens,
+               "total",
+               :total,
+               "totalTokens",
+               :totalTokens
+             ])
+           ) do
+        value when is_integer(value) ->
+          value
+
+        nil ->
+          if is_integer(input) and is_integer(output), do: input + output, else: nil
+      end
+
+    cache_create =
       parse_integer(
         map_value(usage, [
-          "total_tokens",
-          :total_tokens,
-          "total",
-          :total,
-          "totalTokens",
-          :totalTokens
+          "cache_creation_input_tokens",
+          :cache_creation_input_tokens
+        ])
+      )
+
+    cache_read =
+      parse_integer(
+        map_value(usage, [
+          "cache_read_input_tokens",
+          :cache_read_input_tokens
         ])
       )
 
@@ -1643,6 +1699,8 @@ defmodule SymphonyElixir.StatusDashboard do
       |> append_usage_part("in", input)
       |> append_usage_part("out", output)
       |> append_usage_part("total", total)
+      |> append_usage_part("cache_create", cache_create)
+      |> append_usage_part("cache_read", cache_read)
 
     case parts do
       [] -> nil

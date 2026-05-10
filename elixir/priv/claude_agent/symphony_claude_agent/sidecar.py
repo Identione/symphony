@@ -24,6 +24,7 @@ from typing import Any
 # SDK to be installed.
 try:  # pragma: no cover - import-time guard
     from claude_agent_sdk import (  # type: ignore[import-not-found]
+        AssistantMessage,
         ClaudeAgentOptions,
         ClaudeSDKClient,
         ResultMessage,
@@ -471,6 +472,27 @@ async def _forward_message(state: SessionState, message: Any) -> None:
                 "session_id": state.session_id,
             }
         )
+        return
+
+    if _SDK_AVAILABLE and isinstance(message, AssistantMessage):
+        text = render_message_text(message)
+        if text is not None:
+            emit({"type": "assistant_message", "text": text, "session_id": state.session_id})
+
+        # Per-API-call billing arrives on AssistantMessage (claude-agent-sdk
+        # ≥0.1.49 — "Preserve per-turn usage on AssistantMessage"). Surface it
+        # as a token_usage envelope so the orchestrator can show live tokens
+        # before turn_end arrives. Suppress when usage is None to avoid
+        # claiming a billing event that didn't happen.
+        usage = getattr(message, "usage", None)
+        if usage is not None:
+            emit(
+                {
+                    "type": "token_usage",
+                    "session_id": state.session_id,
+                    "usage": usage_to_envelope(usage),
+                }
+            )
         return
 
     text = render_message_text(message)

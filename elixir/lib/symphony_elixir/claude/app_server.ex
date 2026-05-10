@@ -20,6 +20,7 @@ defmodule SymphonyElixir.Claude.AppServer do
           port: port(),
           workspace: Path.t(),
           session_id: String.t() | nil,
+          claude_app_server_pid: String.t() | nil,
           read_timeout_ms: pos_integer(),
           buffer: binary()
         }
@@ -45,6 +46,7 @@ defmodule SymphonyElixir.Claude.AppServer do
          # yields its first message. We therefore start with `session_id: nil`
          # and capture it lazily inside `do_collect`/`handle_envelope`.
          session_id: nil,
+         claude_app_server_pid: port_os_pid(port),
          read_timeout_ms: config_read_timeout(config),
          buffer: leftover
        }}
@@ -480,11 +482,22 @@ defmodule SymphonyElixir.Claude.AppServer do
       event: type,
       session_id: session.session_id,
       agent_kind: :claude,
+      claude_app_server_pid: Map.get(session, :claude_app_server_pid),
       payload: payload,
       timestamp: DateTime.utc_now()
     })
 
     :ok
+  end
+
+  # Mirrors Codex.AppServer.port_metadata/2's pid extraction. The pid is the
+  # `bash -lc` wrapper's pid, not the python sidecar's — same caveat as the
+  # codex case, where it's the spawned shell's pid rather than the codex CLI's.
+  defp port_os_pid(port) when is_port(port) do
+    case :erlang.port_info(port, :os_pid) do
+      {:os_pid, os_pid} -> to_string(os_pid)
+      _ -> nil
+    end
   end
 
   defp build_turn_result(session, env) do

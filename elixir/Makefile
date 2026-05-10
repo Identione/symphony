@@ -1,5 +1,5 @@
 .PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer e2e \
-        start stop restart status logs foreground escript
+        start stop restart status logs foreground escript ensure-deps
 
 MIX ?= mix
 
@@ -20,7 +20,16 @@ setup:
 deps:
 	$(MIX) deps.get
 
-build:
+# Self-heal `make build` when deps haven't been fetched yet (e.g. fresh
+# checkout). Without this, mix dumps a wall of "package … not available"
+# errors and exits non-zero.
+ensure-deps:
+	@if [ ! -d deps ] || [ -z "$$(ls -A deps 2>/dev/null)" ]; then \
+	  echo "deps not fetched; running 'mix setup' first..."; \
+	  $(MIX) setup; \
+	fi
+
+build: ensure-deps
 	$(MIX) build
 
 fmt:

@@ -15,12 +15,10 @@ config :symphony_elixir, SymphonyElixirWeb.Endpoint,
   check_origin: false,
   server: false
 
-# Tests rewrite WORKFLOW.md per-suite via TestSupport, but the application
-# boots once at the start of `mix test` against the project's real
-# WORKFLOW.md — which sets `server.port: 3453`. That collides with the host's
-# Symphony daemon on the same port. Pin the override to `0` (random ephemeral
-# port) under `:test` so the boot-time HttpServer either picks a free port or
-# is short-circuited by the per-test workflow that sets `server_port: nil`.
+# Bind the default observability HttpServer to a random free port during the
+# test suite so it doesn't collide with a daemon already on port 3453. Tests
+# that need their own endpoint terminate this one first via
+# `SymphonyElixir.TestSupport.stop_default_http_server/0`.
 if config_env() == :test do
-  config :symphony_elixir, server_port_override: 0
+  config :symphony_elixir, :server_port_override, 0
 end
