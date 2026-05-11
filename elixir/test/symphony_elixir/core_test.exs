@@ -1063,6 +1063,68 @@ defmodule SymphonyElixir.CoreTest do
     assert PromptBuilder.build_prompt(issue) == "before||after"
   end
 
+  test "live WORKFLOW.md codex render is invariant under removing the simplify guard block" do
+    workflow_body =
+      File.cwd!()
+      |> Path.join("WORKFLOW.md")
+      |> File.read!()
+      |> extract_workflow_prompt_body!()
+
+    workflow_body_without_guard =
+      Regex.replace(
+        ~r/\n[ \t]*\{%-?\s*if\s+agent\.kind\s*==\s*"claude"\s*-?%\}.*?\{%-?\s*endif\s*-?%\}/s,
+        workflow_body,
+        ""
+      )
+
+    refute workflow_body == workflow_body_without_guard,
+           "expected live WORKFLOW.md to contain a claude-only Liquid guard block — update this test if the block moved or its syntax changed"
+
+    issue = %Issue{
+      identifier: "IDE-67",
+      title: "Live render invariant",
+      description: "Codex render must be byte-identical with or without the simplify guard block",
+      state: "In Progress",
+      url: "https://example.org/issues/IDE-67",
+      labels: ["symphony"]
+    }
+
+    for kind <- ["codex", "claude"] do
+      write_workflow_file!(Workflow.workflow_file_path(),
+        prompt: workflow_body,
+        agent_kind: kind
+      )
+
+      with_guard = PromptBuilder.build_prompt(issue, attempt: 1)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        prompt: workflow_body_without_guard,
+        agent_kind: kind
+      )
+
+      without_guard = PromptBuilder.build_prompt(issue, attempt: 1)
+
+      case kind do
+        "codex" ->
+          assert with_guard == without_guard,
+                 "codex render diverged after stripping the simplify guard block — the guard's whitespace trimming no longer preserves byte-identity"
+
+          refute String.contains?(with_guard, "/simplify"),
+                 "codex render must not mention /simplify"
+
+        "claude" ->
+          refute with_guard == without_guard,
+                 "claude render should change when the simplify guard block is removed"
+
+          assert String.contains?(with_guard, "/simplify"),
+                 "claude render should contain the /simplify instruction"
+
+          refute String.contains?(without_guard, "/simplify"),
+                 "render without the guard block must not contain /simplify"
+      end
+    end
+  end
+
   test "agent runner keeps workspace after successful codex run" do
     test_root =
       Path.join(
@@ -1888,6 +1950,13 @@ defmodule SymphonyElixir.CoreTest do
              end)
     after
       File.rm_rf(test_root)
+    end
+  end
+
+  defp extract_workflow_prompt_body!(text) do
+    case String.split(text, ~r/^---\s*$/m, parts: 3) do
+      [_pre_frontmatter, _frontmatter, body] -> String.trim_leading(body, "\n")
+      _ -> raise "WORKFLOW.md does not have the expected `---` frontmatter delimiters"
     end
   end
 end
