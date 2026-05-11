@@ -21,7 +21,7 @@ defmodule SymphonyElixir.CLI.Preflight do
           set_workflow_file_path: (Path.t() -> :ok),
           system_cmd: (String.t(), [String.t()], keyword() -> {Collectable.t(), non_neg_integer()}),
           system_find_executable: (String.t() -> Path.t() | nil),
-          mkdir_p: (Path.t() -> :ok | {:error, term()}),
+          file_exists?: (Path.t() -> boolean()),
           touch_temp: (Path.t() -> :ok | {:error, term()}),
           tcp_listen: (non_neg_integer() -> :ok | {:error, term()}),
           graphql: (String.t(), map() -> {:ok, map()} | {:error, term()}),
@@ -99,7 +99,7 @@ defmodule SymphonyElixir.CLI.Preflight do
       set_workflow_file_path: &Workflow.set_workflow_file_path/1,
       system_cmd: &System.cmd/3,
       system_find_executable: &System.find_executable/1,
-      mkdir_p: &File.mkdir_p/1,
+      file_exists?: &File.exists?/1,
       touch_temp: &touch_temp_file/1,
       tcp_listen: &check_tcp_listen/1,
       graphql: &Client.graphql/2,
@@ -352,16 +352,49 @@ defmodule SymphonyElixir.CLI.Preflight do
     end
   end
 
+  # Probe writability without materializing anything. If `workspace.root`
+  # already exists we touch a temp file inside it; otherwise we walk up to
+  # the nearest existing ancestor and probe there — Symphony itself will
+  # `mkdir -p` the tree on first issue, so confirming the parent is writable
+  # is the right semantic. The earlier implementation called `File.mkdir_p`
+  # as part of preflight, silently creating `~/code/symphony-workspaces/...`
+  # the first time the operator ran it.
   defp check_workspace_root(settings, deps) do
     root = Path.expand(settings.workspace.root)
 
-    with :ok <- deps.mkdir_p.(root),
-         probe <- Path.join(root, ".symphony-preflight-#{System.unique_integer([:positive])}"),
-         :ok <- deps.touch_temp.(probe) do
-      {:ok_with_detail, "writable: #{root}"}
+    if deps.file_exists?.(root) do
+      probe_writable(root, deps, "writable: #{root}")
     else
-      {:error, reason} ->
-        {:error, "workspace root not writable (#{root}): #{format_error(reason)}"}
+      case nearest_existing_ancestor(root, deps) do
+        nil ->
+          {:error, "no existing ancestor of #{root} on disk"}
+
+        ancestor ->
+          probe_writable(
+            ancestor,
+            deps,
+            "#{root} will be created under writable ancestor #{ancestor}"
+          )
+      end
+    end
+  end
+
+  defp probe_writable(dir, deps, ok_detail) do
+    probe = Path.join(dir, ".symphony-preflight-#{System.unique_integer([:positive])}")
+
+    case deps.touch_temp.(probe) do
+      :ok -> {:ok_with_detail, ok_detail}
+      {:error, reason} -> {:error, "workspace root not writable (#{dir}): #{format_error(reason)}"}
+    end
+  end
+
+  defp nearest_existing_ancestor(path, deps) do
+    parent = Path.dirname(path)
+
+    cond do
+      parent == path -> nil
+      deps.file_exists?.(parent) -> parent
+      true -> nearest_existing_ancestor(parent, deps)
     end
   end
 

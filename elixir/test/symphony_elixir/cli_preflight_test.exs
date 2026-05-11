@@ -23,7 +23,7 @@ defmodule SymphonyElixir.CLI.PreflightTest do
           _ -> Path.join("/usr/bin", name)
         end
       end,
-      mkdir_p: Map.get(overrides, :mkdir_p, fn _path -> :ok end),
+      file_exists?: Map.get(overrides, :file_exists?, fn _path -> true end),
       touch_temp: Map.get(overrides, :touch_temp, fn _path -> :ok end),
       tcp_listen: fn _port -> Map.get(overrides, :tcp_listen, :ok) end,
       graphql: fn query, vars ->
@@ -144,6 +144,54 @@ defmodule SymphonyElixir.CLI.PreflightTest do
     bogus = Path.join(System.tmp_dir!(), "no-such-workflow-#{System.unique_integer([:positive])}.md")
 
     assert {:error, :silent_failure} = Preflight.run([bogus], deps)
+  end
+
+  test "does not materialize workspace.root as a side effect (regression: preflight used to mkdir_p)" do
+    project_slug = "symphony-2e32f5d86d8c"
+
+    tmp_ancestor = Path.join(System.tmp_dir!(), "preflight-ws-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(tmp_ancestor)
+    on_exit(fn -> File.rm_rf(tmp_ancestor) end)
+
+    workspace_root = Path.join([tmp_ancestor, "nested", "leaf"])
+    refute File.exists?(workspace_root)
+
+    workflow_file =
+      tmp_workflow!("ws-no-mkdir",
+        tracker_api_token: "secret",
+        tracker_project_slug: project_slug,
+        workspace_root: workspace_root,
+        server_port: nil
+      )
+
+    parent = self()
+
+    deps =
+      build_deps(%{
+        graphql: graphql_responses(project_slug, 0),
+        # Use the real filesystem so the absence of `workspace_root` actually
+        # forces the ancestor-walk path.
+        file_exists?: &File.exists?/1,
+        touch_temp: fn path ->
+          send(parent, {:touch_temp, path})
+          :ok
+        end
+      })
+
+    assert :ok = Preflight.run([workflow_file], deps)
+
+    # Preflight must NOT have created the workspace tree.
+    refute File.exists?(workspace_root)
+
+    # The probe must have landed on the nearest existing ancestor (`tmp_ancestor`),
+    # not on the never-created `workspace_root` itself.
+    assert_received {:touch_temp, probe_path}
+    assert Path.dirname(probe_path) == tmp_ancestor
+
+    msgs = collect_puts()
+    full = Enum.join(msgs, "\n")
+    assert full =~ "[ok]   Workspace root writability"
+    assert full =~ "will be created under writable ancestor #{tmp_ancestor}"
   end
 
   test "restores Logger level after the run (regression: silence_logger was permanent)" do
@@ -293,17 +341,15 @@ defmodule SymphonyElixir.CLI.PreflightTest do
         server_port: 65_001
       )
 
-    parent = self()
-
     deps =
       build_deps(%{
         graphql: graphql_responses(project_slug, 0),
         find_executable: %{"git" => "/usr/bin/git"},
         tcp_listen: {:error, :eaddrinuse},
-        mkdir_p: fn path ->
-          send(parent, {:mkdir_attempt, path})
-          {:error, :eacces}
-        end
+        # Existing root, but the probe write fails — same surface as a
+        # permission-denied workspace.
+        file_exists?: fn _path -> true end,
+        touch_temp: fn _path -> {:error, :eacces} end
       })
 
     assert {:error, :silent_failure} = Preflight.run([workflow_file], deps)
