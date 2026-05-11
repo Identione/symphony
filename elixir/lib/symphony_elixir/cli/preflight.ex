@@ -133,7 +133,12 @@ defmodule SymphonyElixir.CLI.Preflight do
     "Usage: symphony preflight [path/to/WORKFLOW.md]"
   end
 
-  @spec run([String.t()], deps()) :: :ok | {:error, String.t()}
+  # Check-level failures are reported via the `:silent_failure` sentinel —
+  # preflight has already rendered the failure rows inline (`render/3`), so
+  # `CLI.main/1` translates the sentinel into a non-zero exit without
+  # re-printing. String errors are reserved for callsite-level problems like
+  # a malformed argv.
+  @spec run([String.t()], deps()) :: :ok | {:error, String.t() | :silent_failure}
   def run(args, deps \\ runtime_deps()) do
     case args do
       [] -> with_priming(deps, fn -> do_run(Path.expand("WORKFLOW.md"), deps) end)
