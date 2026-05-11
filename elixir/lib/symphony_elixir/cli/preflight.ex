@@ -72,9 +72,16 @@ defmodule SymphonyElixir.CLI.Preflight do
   }
   """
 
+  # Linear is Relay-spec compliant, so the connection has no `totalCount`
+  # field — counting nodes is the only way to surface a real number here.
+  # `first: 250` is Linear's per-page maximum; when more issues exist than fit
+  # in one page we display the count with a `+` suffix derived from
+  # `pageInfo.hasNextPage`. The earlier `first: 0` form returned an empty
+  # `nodes` list and so always rendered "0" / "0+".
+  @candidate_page_size 250
   @candidate_count_query """
   query SymphonyPreflightCandidates($slugId: String!, $stateNames: [String!]!) {
-    issues(filter: {project: {slugId: {eq: $slugId}}, state: {name: {in: $stateNames}}}, first: 0) {
+    issues(filter: {project: {slugId: {eq: $slugId}}, state: {name: {in: $stateNames}}}, first: #{@candidate_page_size}) {
       pageInfo {
         hasNextPage
       }

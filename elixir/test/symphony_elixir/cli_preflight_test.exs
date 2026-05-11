@@ -142,6 +142,35 @@ defmodule SymphonyElixir.CLI.PreflightTest do
     assert {:error, :silent_failure} = Preflight.run([bogus], deps)
   end
 
+  test "candidate count query asks Linear for a real page size (regression: was first: 0)" do
+    project_slug = "symphony-2e32f5d86d8c"
+
+    workflow_file =
+      tmp_workflow!("count-page-size",
+        tracker_api_token: "secret",
+        tracker_project_slug: project_slug,
+        server_port: nil
+      )
+
+    deps = build_deps(%{graphql: graphql_responses(project_slug, 0)})
+
+    assert :ok = Preflight.run([workflow_file], deps)
+
+    # The candidate-count query previously asked Linear for `first: 0`. Linear is
+    # Relay-spec compliant, so `first: 0` returns an empty `nodes` list — the
+    # rendered count was therefore always "0" or "0+" regardless of how many
+    # issues actually matched. Unit-test mocks here returned nodes anyway, so the
+    # bug was invisible without an integration test; pin the page-size in the
+    # query string directly instead.
+    candidate_query =
+      collect_graphql_queries()
+      |> Enum.find(&String.contains?(&1, "issues(filter:"))
+
+    assert is_binary(candidate_query), "preflight never issued the candidate-count query"
+    refute candidate_query =~ "first: 0"
+    assert candidate_query =~ ~r/first:\s*[1-9]\d+/
+  end
+
   test "happy path: all checks pass and prints candidate count" do
     project_slug = "symphony-2e32f5d86d8c"
     repo_url = "git@github.com:org/repo.git"
@@ -337,6 +366,14 @@ defmodule SymphonyElixir.CLI.PreflightTest do
     fails = collect_puts_err()
     assert Enum.any?(fails, &String.contains?(&1, "Linear state coverage"))
     assert Enum.any?(fails, &String.contains?(&1, "Frobnicate"))
+  end
+
+  defp collect_graphql_queries do
+    receive do
+      {:graphql, query, _vars} -> [query | collect_graphql_queries()]
+    after
+      0 -> []
+    end
   end
 
   defp collect_puts do
