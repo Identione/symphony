@@ -16,6 +16,7 @@ defmodule SymphonyElixir.CLI.Preflight do
   alias SymphonyElixir.Workflow
 
   @type check_result :: :ok | {:warn, String.t()} | {:error, String.t()}
+  @type restore_fun :: (-> :ok)
   @type deps :: %{
           set_workflow_file_path: (Path.t() -> :ok),
           system_cmd: (String.t(), [String.t()], keyword() -> {Collectable.t(), non_neg_integer()}),
@@ -25,7 +26,7 @@ defmodule SymphonyElixir.CLI.Preflight do
           tcp_listen: (non_neg_integer() -> :ok | {:error, term()}),
           graphql: (String.t(), map() -> {:ok, map()} | {:error, term()}),
           ensure_http_app: (-> :ok),
-          silence_logger: (-> :ok),
+          silence_logger: (-> restore_fun()),
           puts: (IO.chardata() -> :ok),
           puts_err: (IO.chardata() -> :ok)
         }
@@ -111,10 +112,17 @@ defmodule SymphonyElixir.CLI.Preflight do
         :ok
       end,
       # Linear.Client logs every non-200 response at :error. Preflight already
-      # surfaces those failures inline, so silence the duplicate Logger output.
-      # Tests inject a no-op so the global Logger level is not mutated for the
-      # rest of the suite.
-      silence_logger: fn -> Logger.configure(level: :critical) end,
+      # surfaces those failures inline, so silence the duplicate Logger output
+      # for the duration of the run and return a 0-arity restore fn so the
+      # global level is reverted before we return — otherwise a preflight that
+      # runs in-process with anything else (e.g. tests, or a future `start`
+      # subcommand falling through to here) would leave the system at
+      # `:critical` forever.
+      silence_logger: fn ->
+        prev = Logger.level()
+        Logger.configure(level: :critical)
+        fn -> Logger.configure(level: prev) end
+      end,
       puts: fn output -> IO.puts(output) end,
       puts_err: fn output -> IO.puts(:stderr, output) end
     }
@@ -128,23 +136,21 @@ defmodule SymphonyElixir.CLI.Preflight do
   @spec run([String.t()], deps()) :: :ok | {:error, String.t()}
   def run(args, deps \\ runtime_deps()) do
     case args do
-      [] ->
-        prime_http(deps)
-        do_run(Path.expand("WORKFLOW.md"), deps)
-
-      [path] ->
-        prime_http(deps)
-        do_run(Path.expand(path), deps)
-
-      _ ->
-        {:error, usage_message()}
+      [] -> with_priming(deps, fn -> do_run(Path.expand("WORKFLOW.md"), deps) end)
+      [path] -> with_priming(deps, fn -> do_run(Path.expand(path), deps) end)
+      _ -> {:error, usage_message()}
     end
   end
 
-  defp prime_http(deps) do
+  defp with_priming(deps, work) do
     deps.ensure_http_app.()
-    deps.silence_logger.()
-    :ok
+    restore = deps.silence_logger.()
+
+    try do
+      work.()
+    after
+      if is_function(restore, 0), do: restore.()
+    end
   end
 
   defp do_run(path, deps) do

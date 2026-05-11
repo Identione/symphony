@@ -1,6 +1,8 @@
 defmodule SymphonyElixir.CLI.PreflightTest do
   use SymphonyElixir.TestSupport
 
+  require Logger
+
   alias SymphonyElixir.CLI.Preflight
 
   defp build_deps(overrides) do
@@ -31,8 +33,10 @@ defmodule SymphonyElixir.CLI.PreflightTest do
       end,
       # No-ops in tests: graphql is mocked, so we don't need the Req app, and
       # mutating the global Logger level here would leak into other suites.
+      # silence_logger returns a 0-arity restore fn (see Preflight.deps) — the
+      # no-op restores nothing.
       ensure_http_app: fn -> :ok end,
-      silence_logger: fn -> :ok end,
+      silence_logger: fn -> fn -> :ok end end,
       puts: fn output ->
         send(parent, {:puts, IO.iodata_to_binary(output)})
         :ok
@@ -140,6 +144,34 @@ defmodule SymphonyElixir.CLI.PreflightTest do
     bogus = Path.join(System.tmp_dir!(), "no-such-workflow-#{System.unique_integer([:positive])}.md")
 
     assert {:error, :silent_failure} = Preflight.run([bogus], deps)
+  end
+
+  test "restores Logger level after the run (regression: silence_logger was permanent)" do
+    project_slug = "symphony-2e32f5d86d8c"
+
+    workflow_file =
+      tmp_workflow!("logger-restore",
+        tracker_api_token: "secret",
+        tracker_project_slug: project_slug,
+        server_port: nil
+      )
+
+    original_level = Logger.level()
+    on_exit(fn -> Logger.configure(level: original_level) end)
+    Logger.configure(level: :warning)
+
+    # Use the real silence_logger from runtime_deps so we exercise the actual
+    # save/restore path. Other I/O remains mocked.
+    real_silence = Preflight.runtime_deps().silence_logger
+
+    deps =
+      build_deps(%{graphql: graphql_responses(project_slug, 0)})
+      |> Map.put(:silence_logger, real_silence)
+
+    assert :ok = Preflight.run([workflow_file], deps)
+
+    assert Logger.level() == :warning,
+           "Logger level leaked past preflight: expected :warning, got #{inspect(Logger.level())}"
   end
 
   test "candidate count query asks Linear for a real page size (regression: was first: 0)" do
