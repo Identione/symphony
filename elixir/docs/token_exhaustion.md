@@ -26,14 +26,29 @@ which should ideally be handled differently:
 
 ## TL;DR
 
-Neither adapter currently distinguishes any of these four modes from a
-generic "agent crashed" failure. Everything but a clean `ResultMessage` /
-`turn/completed` lands in the orchestrator as a non-`:normal` task exit,
-which triggers a uniform exponential-backoff retry that ignores the
-underlying cause. Linear state is not changed; the issue stays in
-`In Progress` and gets re-attempted up to once every
-`agent.max_retry_backoff_ms` (default 5 min) until either the issue moves
-out of `active_states` or the agent eventually succeeds.
+For the *error* failure modes — context-window exhaustion, account/quota
+exhaustion, and rate-limit throttling — neither adapter distinguishes them
+from a generic "agent crashed" failure. They collapse into a single opaque
+error tuple (`{:error, {:claude_sdk_error, msg}}` for Claude,
+`{:error, {:turn_failed, params}}` / `{:error, {:codex_error_notification,
+params}}` for Codex) and land in the orchestrator as a non-`:normal` task
+exit. The orchestrator then runs a uniform exponential-backoff retry that
+ignores the underlying cause, never changes Linear state, and has no
+max-attempts ceiling.
+
+Per-turn output cap is a partial exception: Claude's sidecar surfaces it as
+a clean `turn_end` (`ResultMessage`) and the adapter preserves `stop_reason`
+(e.g. `"max_tokens"`) and `num_turns` in the success result
+(`app_server.ex:387-389,503-511`). So the *signal* is carried through the
+adapter — but Symphony does not act on it at the orchestration level
+(only echoed to the verbose info log at `agent_runner.ex:106-114`); the
+issue continues as if the turn ended normally. Codex's per-turn output cap
+isn't even surfaced — it arrives as a normal `turn/completed`.
+
+Net effect: the issue stays in `In Progress` and gets re-attempted up to
+once every `agent.max_retry_backoff_ms` (default 5 min, `config/schema.ex:281`)
+until either the issue moves out of `active_states` or the agent eventually
+succeeds.
 
 ## Adapter Traces
 
