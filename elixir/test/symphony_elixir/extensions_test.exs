@@ -342,6 +342,7 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert state_payload == %{
              "generated_at" => state_payload["generated_at"],
+             "agent_kind" => "codex",
              "counts" => %{"running" => 1, "retrying" => 1},
              "running" => [
                %{
@@ -351,6 +352,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "worker_host" => nil,
                  "workspace_path" => nil,
                  "session_id" => "thread-http",
+                 "agent_kind" => "codex",
                  "turn_count" => 7,
                  "last_event" => "notification",
                  "last_message" => "rendered",
@@ -376,6 +378,14 @@ defmodule SymphonyElixir.ExtensionsTest do
                "total_tokens" => 12,
                "seconds_running" => 42.5
              },
+             "claude_totals" => %{
+               "input_tokens" => 0,
+               "output_tokens" => 0,
+               "total_tokens" => 0,
+               "cache_creation_input_tokens" => 0,
+               "cache_read_input_tokens" => 0,
+               "seconds_running" => 0
+             },
              "rate_limits" => %{"primary" => %{"remaining" => 11}}
            }
 
@@ -395,6 +405,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                "worker_host" => nil,
                "workspace_path" => nil,
                "session_id" => "thread-http",
+               "agent_kind" => "codex",
                "turn_count" => 7,
                "state" => "In Progress",
                "started_at" => issue_payload["running"]["started_at"],
@@ -425,6 +436,101 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert %{"queued" => true, "coalesced" => false, "operations" => ["poll", "reconcile"]} =
              json_response(conn, 202)
+  end
+
+  test "phoenix observability api exposes claude tokens with cache fields and claude_totals" do
+    snapshot = static_claude_snapshot()
+    orchestrator_name = Module.concat(__MODULE__, :ClaudeObservabilityApiOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{
+          queued: true,
+          coalesced: false,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll", "reconcile"]
+        }
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+    [running_entry | _] = state_payload["running"]
+
+    assert running_entry["agent_kind"] == "claude"
+
+    assert running_entry["tokens"] == %{
+             "input_tokens" => 100,
+             "output_tokens" => 50,
+             "total_tokens" => 150,
+             "cache_creation_input_tokens" => 10,
+             "cache_read_input_tokens" => 200
+           }
+
+    assert state_payload["claude_totals"] == %{
+             "input_tokens" => 100,
+             "output_tokens" => 50,
+             "total_tokens" => 150,
+             "cache_creation_input_tokens" => 10,
+             "cache_read_input_tokens" => 200,
+             "seconds_running" => 0
+           }
+
+    issue_payload = json_response(get(build_conn(), "/api/v1/MT-CLAUDE"), 200)
+    assert issue_payload["running"]["agent_kind"] == "claude"
+
+    assert issue_payload["running"]["tokens"] == %{
+             "input_tokens" => 100,
+             "output_tokens" => 50,
+             "total_tokens" => 150,
+             "cache_creation_input_tokens" => 10,
+             "cache_read_input_tokens" => 200
+           }
+  end
+
+  test "dashboard liveview branches Total tokens panel on agent.kind for claude with cache sublabel" do
+    previous_kind = Application.get_env(:symphony_elixir, :agent_kind_override)
+
+    on_exit(fn ->
+      if is_nil(previous_kind) do
+        Application.delete_env(:symphony_elixir, :agent_kind_override)
+      else
+        Application.put_env(:symphony_elixir, :agent_kind_override, previous_kind)
+      end
+    end)
+
+    write_workflow_file!(Workflow.workflow_file_path(), agent_kind: "claude")
+    if Process.whereis(WorkflowStore), do: WorkflowStore.force_reload()
+
+    snapshot = static_claude_snapshot()
+    orchestrator_name = Module.concat(__MODULE__, :ClaudeDashboardOrchestrator)
+
+    {:ok, _pid} =
+      StaticOrchestrator.start_link(
+        name: orchestrator_name,
+        snapshot: snapshot,
+        refresh: %{
+          queued: true,
+          coalesced: false,
+          requested_at: DateTime.utc_now(),
+          operations: ["poll"]
+        }
+      )
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+    ensure_workflow_store_running()
+
+    {:ok, _view, html} = live(build_conn(), "/")
+    assert html =~ "Total tokens"
+    # Total = input + output (codex parity), excludes cache fields.
+    assert html =~ "150"
+    # Cache sublabel uses created N · read N.
+    assert html =~ "Cache: created 10"
+    assert html =~ "read 200"
+    # Per-issue token row also exposes cache fields.
+    assert html =~ "MT-CLAUDE"
   end
 
   test "phoenix observability api preserves 405, 404, and unavailable behavior" do
@@ -713,6 +819,41 @@ defmodule SymphonyElixir.ExtensionsTest do
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},
       rate_limits: %{"primary" => %{"remaining" => 11}}
+    }
+  end
+
+  defp static_claude_snapshot do
+    %{
+      running: [
+        %{
+          issue_id: "issue-claude-http",
+          identifier: "MT-CLAUDE",
+          state: "In Progress",
+          session_id: "claude-http",
+          turn_count: 1,
+          agent_kind: :claude,
+          last_codex_message: "rendered",
+          last_codex_timestamp: nil,
+          last_codex_event: :turn_completed,
+          claude_input_tokens: 100,
+          claude_output_tokens: 50,
+          claude_total_tokens: 150,
+          claude_cache_creation_input_tokens: 10,
+          claude_cache_read_input_tokens: 200,
+          started_at: DateTime.utc_now()
+        }
+      ],
+      retrying: [],
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      claude_totals: %{
+        input_tokens: 100,
+        output_tokens: 50,
+        total_tokens: 150,
+        cache_creation_input_tokens: 10,
+        cache_read_input_tokens: 200,
+        seconds_running: 0
+      },
+      rate_limits: nil
     }
   end
 

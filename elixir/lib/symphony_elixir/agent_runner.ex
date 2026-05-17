@@ -49,20 +49,28 @@ defmodule SymphonyElixir.AgentRunner do
 
   # `@doc false` so the handler-shape test can drive it without going through
   # `adapter.run_turn/4` (which would also need a real session).
+  #
+  # `:verbose_logging` (default `false`) gates the high-volume per-envelope
+  # Claude log lines (`tool_call`/`assistant_message`/`turn_completed`/
+  # `permission_request`/`system_init`/forwarded `claude_cli` stderr). When
+  # `false`, the handler still forwards events to the dashboard recipient but
+  # emits no log lines — keeping `make start` quiet under
+  # `agent.claude.verbose_logging=false`. Per-issue/per-session lifecycle
+  # logging in `AgentRunner` and `Claude.AppServer` stays at info either way.
   @doc false
-  @spec compose_message_handler(module(), pid() | nil, Issue.t()) :: (map() -> :ok)
-  def compose_message_handler(adapter, recipient, issue) do
+  @spec compose_message_handler(module(), pid() | nil, Issue.t(), keyword()) :: (map() -> :ok)
+  def compose_message_handler(adapter, recipient, issue, opts \\ []) do
     base = fn message -> send_codex_update(recipient, issue, message) end
+    verbose? = Keyword.get(opts, :verbose_logging, false)
 
-    case adapter do
-      SymphonyElixir.Claude.AppServer ->
-        fn message ->
-          log_claude_event(issue, message)
-          base.(message)
-        end
+    claude_verbose_handler = fn message ->
+      log_claude_event(issue, message)
+      base.(message)
+    end
 
-      _ ->
-        base
+    case {adapter, verbose?} do
+      {SymphonyElixir.Claude.AppServer, true} -> claude_verbose_handler
+      _ -> base
     end
   end
 
@@ -209,14 +217,17 @@ defmodule SymphonyElixir.AgentRunner do
       context
 
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+    settings = Config.settings!()
+
+    handler_opts = [verbose_logging: settings.agent.claude.verbose_logging]
 
     with {:ok, turn_session} <-
            adapter.run_turn(
              app_session,
              prompt,
              issue,
-             on_message: compose_message_handler(adapter, recipient, issue),
-             turn_timeout_ms: Config.active_turn_timeout_ms(Config.settings!())
+             on_message: compose_message_handler(adapter, recipient, issue, handler_opts),
+             turn_timeout_ms: Config.active_turn_timeout_ms(settings)
            ) do
       Logger.info(
         "Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} " <>

@@ -124,20 +124,34 @@ def test_usage_to_envelope_handles_none() -> None:
     }
 
 
-def test_build_options_payload_verbose_enables_partial_and_hook_streams() -> None:
-    """`init.verbose=true` flips on the SDK's noisier event streams."""
+def test_build_options_payload_verbose_logging_enables_partial_and_hook_streams() -> None:
+    """`init.verbose_logging=true` flips on the SDK's noisier event streams."""
 
     payload = build_options_payload(
-        {"type": "init", "cwd": "/tmp/ws", "verbose": True}
+        {"type": "init", "cwd": "/tmp/ws", "verbose_logging": True}
     )
     assert payload["include_partial_messages"] is True
     assert payload["include_hook_events"] is True
 
 
 def test_build_options_payload_default_omits_verbose_streams() -> None:
-    """Without `verbose`, the noisy streams stay off."""
+    """Without `verbose_logging`, the noisy streams stay off."""
 
     payload = build_options_payload({"type": "init", "cwd": "/tmp/ws"})
+    assert "include_partial_messages" not in payload
+    assert "include_hook_events" not in payload
+
+
+def test_build_options_payload_legacy_verbose_key_does_not_enable_streams() -> None:
+    """The pre-IDE-62 `verbose` field is no longer honored — only `verbose_logging` flips streams.
+
+    Guards against silently regressing back to the narrow SDK-only knob if a
+    stale Symphony build keeps sending the old key.
+    """
+
+    payload = build_options_payload(
+        {"type": "init", "cwd": "/tmp/ws", "verbose": True}
+    )
     assert "include_partial_messages" not in payload
     assert "include_hook_events" not in payload
 

@@ -15,4 +15,10 @@ config :symphony_elixir, SymphonyElixirWeb.Endpoint,
   check_origin: false,
   server: false
 
-if config_env() == :test, do: import_config("test.exs")
+# Bind the default observability HttpServer to a random free port during the
+# test suite so it doesn't collide with a daemon already on port 3453. Tests
+# that need their own endpoint terminate this one first via
+# `SymphonyElixir.TestSupport.stop_default_http_server/0`.
+if config_env() == :test do
+  config :symphony_elixir, :server_port_override, 0
+end

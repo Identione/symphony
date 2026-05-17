@@ -74,6 +74,12 @@ agent:
     # Do not inherit ~/.claude/settings.json or other host-level Claude Code
     # settings — keep the sidecar's posture deterministic.
     setting_sources: []
+    # Quiet by default so Claude's debug feed doesn't drown out per-issue
+    # orchestration output. Flip to `true` to restore the noisy debugging view:
+    # SDK partial-message + hook-event streams, the underlying `claude` CLI's
+    # stderr forwarded as `log` envelopes, and Symphony's per-envelope
+    # `claude tool_call` / `assistant_message` / `turn_completed` log lines.
+    verbose_logging: false
   codex:
     # ── command: pick ONE of (A) or (B) ──
     # Both variants run with `use_configured_permissions: true`, which makes
@@ -271,6 +277,9 @@ Use this only when completion is blocked by missing required tools or missing au
     - Update the workpad immediately after each meaningful milestone (for example: reproduction complete, code change landed, validation run, review feedback addressed).
     - Never leave completed work unchecked in the plan.
     - For tickets that started as `Todo` with an attached PR, run the full PR feedback sweep protocol immediately after kickoff and before new feature work.
+    {%- if agent.kind == "claude" %}
+    - Once implementation feels complete and before running the Step 5 validation gate, invoke `/simplify` once for the turn so the changed code gets a reuse/quality/efficiency review and any resulting edits flow through the same Step 5 validation.
+    {%- endif %}
 5.  Run validation/tests required for the scope.
     - Mandatory gate: execute all ticket-provided `Validation`/`Test Plan`/ `Testing` requirements when present; treat unmet items as incomplete work.
     - Prefer a targeted proof that directly demonstrates the behavior you changed.

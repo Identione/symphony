@@ -17,12 +17,22 @@ defmodule SymphonyElixir.PromptBuilder do
     template
     |> Solid.render!(
       %{
+        "agent" => %{"kind" => active_agent_kind()},
         "attempt" => Keyword.get(opts, :attempt),
         "issue" => issue |> Map.from_struct() |> to_solid_map()
       },
       @render_opts
     )
     |> IO.iodata_to_binary()
+  end
+
+  # Mirror SymphonyElixirWeb.Presenter.active_agent_kind/0 so both renderers
+  # agree on the canonical "claude" | "codex" string for `agent.kind`.
+  defp active_agent_kind do
+    case Config.adapter_module() do
+      SymphonyElixir.Claude.AppServer -> "claude"
+      _ -> "codex"
+    end
   end
 
   defp prompt_template!({:ok, %{prompt_template: prompt}}), do: default_prompt(prompt)

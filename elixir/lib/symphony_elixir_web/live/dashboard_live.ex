@@ -93,10 +93,15 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
           <article class="metric-card">
             <p class="metric-label">Total tokens</p>
-            <p class="metric-value numeric"><%= format_int(@payload.codex_totals.total_tokens) %></p>
+            <p class="metric-value numeric"><%= format_int(active_totals(@payload).total_tokens) %></p>
             <p class="metric-detail numeric">
-              In <%= format_int(@payload.codex_totals.input_tokens) %> / Out <%= format_int(@payload.codex_totals.output_tokens) %>
+              In <%= format_int(active_totals(@payload).input_tokens) %> / Out <%= format_int(active_totals(@payload).output_tokens) %>
             </p>
+            <%= if @payload[:agent_kind] == "claude" do %>
+              <p class="metric-detail numeric">
+                Cache: created <%= format_int(@payload.claude_totals.cache_creation_input_tokens) %> · read <%= format_int(@payload.claude_totals.cache_read_input_tokens) %>
+              </p>
+            <% end %>
           </article>
 
           <article class="metric-card">
@@ -197,6 +202,9 @@ defmodule SymphonyElixirWeb.DashboardLive do
                       <div class="token-stack numeric">
                         <span>Total: <%= format_int(entry.tokens.total_tokens) %></span>
                         <span class="muted">In <%= format_int(entry.tokens.input_tokens) %> / Out <%= format_int(entry.tokens.output_tokens) %></span>
+                        <%= if entry[:agent_kind] == "claude" do %>
+                          <span class="muted">Cache: created <%= format_int(entry.tokens.cache_creation_input_tokens) %> · read <%= format_int(entry.tokens.cache_read_input_tokens) %></span>
+                        <% end %>
                       </div>
                     </td>
                   </tr>
@@ -262,7 +270,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   end
 
   defp completed_runtime_seconds(payload) do
-    payload.codex_totals.seconds_running || 0
+    active_totals(payload).seconds_running || 0
   end
 
   defp total_runtime_seconds(payload, now) do
@@ -271,6 +279,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
         total + runtime_seconds_from_started_at(entry.started_at, now)
       end)
   end
+
+  # The Total tokens / Runtime metrics show the active adapter's totals so
+  # that switching `agent.kind` doesn't strand counters from the other path.
+  defp active_totals(%{agent_kind: "claude"} = payload), do: payload.claude_totals
+  defp active_totals(payload), do: payload.codex_totals
 
   defp format_runtime_and_turns(started_at, turn_count, now) when is_integer(turn_count) and turn_count > 0 do
     "#{format_runtime_seconds(runtime_seconds_from_started_at(started_at, now))} / #{turn_count}"
