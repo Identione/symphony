@@ -107,12 +107,27 @@ defmodule SymphonyElixir.Claude.Wire do
     usage
     error
     category
+    error_code
+    subtype
+    http_status
     permission_request_id
     request
     payload
     level
     message
     source
+  )
+
+  # Stable taxonomy emitted by the sidecar's `classify_error_code` (IDE-71).
+  # Atomising on a whitelist keeps the wire input safe — unknown strings
+  # stay as binaries so a sidecar drift cannot leak unbounded atoms.
+  @error_code_atoms ~w(
+    context_window_exhausted
+    rate_limited
+    overloaded
+    quota_exceeded
+    invalid_request
+    unknown
   )
 
   defp atomize_known_key(key) when is_binary(key) do
@@ -126,6 +141,10 @@ defmodule SymphonyElixir.Claude.Wire do
       key = if k in @usage_keys, do: String.to_atom(k), else: k
       Map.put(acc, key, v)
     end)
+  end
+
+  defp atomize_known_value("error_code", value) when is_binary(value) do
+    if value in @error_code_atoms, do: String.to_atom(value), else: value
   end
 
   defp atomize_known_value(_key, value), do: value

@@ -283,7 +283,7 @@ defmodule SymphonyElixir.Claude.AppServer do
 
     case Wire.encode(payload) do
       {:ok, line} -> port_command(port, line)
-      {:error, reason} -> {:error, {:claude_sdk_error, reason}}
+      {:error, reason} -> {:error, {:claude_sdk_error, :invalid_request, reason}}
     end
   end
 
@@ -305,8 +305,8 @@ defmodule SymphonyElixir.Claude.AppServer do
         Process.delete(:claude_temp_port)
         {:ok, leftover}
 
-      {:ok, %{type: :error, error: msg}, _leftover} ->
-        {:error, {:claude_sdk_error, msg}}
+      {:ok, %{type: :error} = env, _leftover} ->
+        {:error, {:claude_sdk_error, error_code_from_envelope(env), Map.get(env, :error, "")}}
 
       {:ok, %{type: :log}, leftover} ->
         await_ready(port, leftover, timeout_ms)
@@ -389,8 +389,8 @@ defmodule SymphonyElixir.Claude.AppServer do
     {:ok, build_turn_result(session, env)}
   end
 
-  defp handle_envelope({:ok, %{type: :error, error: msg}, _leftover}, _session, _context, _buffer) do
-    {:error, {:claude_sdk_error, msg}}
+  defp handle_envelope({:ok, %{type: :error} = env, _leftover}, _session, _context, _buffer) do
+    {:error, {:claude_sdk_error, error_code_from_envelope(env), Map.get(env, :error, "")}}
   end
 
   defp handle_envelope({:ok, %{type: :tool_call} = env, leftover}, session, context, _buffer) do
@@ -442,6 +442,14 @@ defmodule SymphonyElixir.Claude.AppServer do
     {:error, reason}
   end
 
+  # Sidecar's structured taxonomy (IDE-71). `Wire` atomises known codes from
+  # the closed whitelist (`context_window_exhausted` / `rate_limited` /
+  # `overloaded` / `quota_exceeded` / `invalid_request` / `unknown`); any
+  # missing or out-of-taxonomy value collapses to `:unknown` so downstream
+  # consumers always see an atom.
+  defp error_code_from_envelope(%{error_code: code}) when is_atom(code), do: code
+  defp error_code_from_envelope(_env), do: :unknown
+
   defp dispatch_tool_call(session, env, tool_executor) do
     name = Map.get(env, :name)
     tool_use_id = Map.get(env, :tool_use_id)
@@ -457,7 +465,7 @@ defmodule SymphonyElixir.Claude.AppServer do
 
     case Wire.encode(payload) do
       {:ok, line} -> port_command(session.port, line)
-      {:error, reason} -> {:error, {:claude_sdk_error, reason}}
+      {:error, reason} -> {:error, {:claude_sdk_error, :invalid_request, reason}}
     end
   end
 
@@ -473,7 +481,7 @@ defmodule SymphonyElixir.Claude.AppServer do
 
     case Wire.encode(payload) do
       {:ok, line} -> port_command(session.port, line)
-      {:error, reason} -> {:error, {:claude_sdk_error, reason}}
+      {:error, reason} -> {:error, {:claude_sdk_error, :invalid_request, reason}}
     end
   end
 

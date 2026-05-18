@@ -384,16 +384,18 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:ok, :turn_completed}
 
       {:ok, %{"method" => "turn/failed", "params" => _} = payload} ->
+        params = Map.get(payload, "params")
+
         emit_turn_event(
           on_message,
           :turn_failed,
           payload,
           payload_string,
           port,
-          Map.get(payload, "params")
+          params
         )
 
-        {:error, {:turn_failed, Map.get(payload, "params")}}
+        {:error, {:turn_failed, classify_codex_error_payload(params), params}}
 
       {:ok, %{"method" => "turn/cancelled", "params" => _} = payload} ->
         emit_turn_event(
@@ -525,7 +527,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
             error_payload = codex_error_payload(payload)
             Logger.warning("Codex error notification: #{inspect(error_payload)}")
-            {:error, {:codex_error_notification, error_payload}}
+            {:error, {:codex_error_notification, classify_codex_error_payload(error_payload), error_payload}}
 
           needs_input?(method, payload) ->
             emit_message(
@@ -582,6 +584,139 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp codex_error_payload(%{"params" => params}), do: params
   defp codex_error_payload(payload), do: payload
+
+  # Structured taxonomy mapper for Codex error payloads (IDE-71). Codex
+  # surfaces upstream API failures with widely varying shapes; we inspect
+  # the three signals that ever appear in practice:
+  #
+  #   * `error.code` / `error.type` — JSON-RPC error code string from the
+  #     upstream model provider.
+  #   * `error.status` / `status` — HTTP status echoed by Codex.
+  #   * `message` / `error.message` / `reason` — human-readable body.
+  #
+  # The taxonomy mirrors `classify_error_code` in the Claude sidecar so
+  # downstream orchestrator logic can treat both adapters uniformly.
+  @doc false
+  @spec classify_codex_error_payload(term()) :: atom()
+  def classify_codex_error_payload(nil), do: :unknown
+
+  def classify_codex_error_payload(payload) when is_map(payload) do
+    nested_error = nested_error_object(payload)
+    code = first_present(payload, nested_error, ["code", "error_code"])
+    type = first_present(payload, nested_error, ["type", "error_type"])
+    status = first_present(payload, nested_error, ["status", "statusCode", "http_status"])
+    message = codex_error_message(payload, nested_error)
+
+    classify_by_message(message) ||
+      classify_by_http_status(status) ||
+      classify_by_code_or_type(code, type) ||
+      :unknown
+  end
+
+  def classify_codex_error_payload(_payload), do: :unknown
+
+  defp nested_error_object(payload) do
+    case Map.get(payload, "error") || Map.get(payload, :error) do
+      %{} = nested -> nested
+      _ -> %{}
+    end
+  end
+
+  defp first_present(payload, nested, keys) do
+    Enum.find_value(keys, fn key ->
+      Map.get(payload, key) || Map.get(payload, String.to_atom(key)) ||
+        Map.get(nested, key) || Map.get(nested, String.to_atom(key))
+    end)
+  end
+
+  defp codex_error_message(payload, nested) do
+    candidates = [
+      Map.get(payload, "message"),
+      Map.get(payload, :message),
+      Map.get(payload, "reason"),
+      Map.get(payload, :reason),
+      Map.get(nested, "message"),
+      Map.get(nested, :message),
+      Map.get(nested, "reason"),
+      Map.get(nested, :reason)
+    ]
+
+    candidates
+    |> Enum.find(&is_binary/1)
+    |> case do
+      nil -> ""
+      text -> String.downcase(text)
+    end
+  end
+
+  defp classify_by_message(""), do: nil
+
+  defp classify_by_message(message) when is_binary(message) do
+    cond do
+      String.contains?(message, "credit balance") or String.contains?(message, "credit_balance") ->
+        :quota_exceeded
+
+      String.contains?(message, "prompt is too long") or
+        String.contains?(message, "context length") or
+        String.contains?(message, "context_length_exceeded") or
+          String.contains?(message, "maximum context length") ->
+        :context_window_exhausted
+
+      true ->
+        nil
+    end
+  end
+
+  defp classify_by_http_status(status) when is_integer(status) do
+    cond do
+      status == 429 -> :rate_limited
+      status in [503, 529] -> :overloaded
+      status == 413 -> :context_window_exhausted
+      status >= 400 and status < 500 -> :invalid_request
+      status >= 500 -> :overloaded
+      true -> nil
+    end
+  end
+
+  defp classify_by_http_status(status) when is_binary(status) do
+    case Integer.parse(status) do
+      {n, _} -> classify_by_http_status(n)
+      :error -> nil
+    end
+  end
+
+  defp classify_by_http_status(_), do: nil
+
+  defp classify_by_code_or_type(code, type) do
+    normalized =
+      [code, type]
+      |> Enum.filter(&is_binary/1)
+      |> Enum.map(&String.downcase/1)
+      |> Enum.join(" ")
+
+    cond do
+      normalized == "" ->
+        nil
+
+      String.contains?(normalized, "rate_limit") or String.contains?(normalized, "rate-limit") ->
+        :rate_limited
+
+      String.contains?(normalized, "overload") ->
+        :overloaded
+
+      String.contains?(normalized, "context_length") or String.contains?(normalized, "context-length") ->
+        :context_window_exhausted
+
+      String.contains?(normalized, "credit") or String.contains?(normalized, "quota") or String.contains?(normalized, "billing") ->
+        :quota_exceeded
+
+      String.contains?(normalized, "invalid_request") or String.contains?(normalized, "permission") or String.contains?(normalized, "authentication") or String.contains?(normalized, "not_found") ->
+        :invalid_request
+
+      true ->
+        nil
+    end
+  end
 
   defp maybe_handle_approval_request(
          port,

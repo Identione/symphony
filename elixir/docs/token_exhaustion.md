@@ -27,14 +27,17 @@ which should ideally be handled differently:
 ## TL;DR
 
 For the *error* failure modes — context-window exhaustion, account/quota
-exhaustion, and rate-limit throttling — neither adapter distinguishes them
-from a generic "agent crashed" failure. They collapse into a single opaque
-error tuple (`{:error, {:claude_sdk_error, msg}}` for Claude,
-`{:error, {:turn_failed, params}}` / `{:error, {:codex_error_notification,
-params}}` for Codex) and land in the orchestrator as a non-`:normal` task
-exit. The orchestrator then runs a uniform exponential-backoff retry that
-ignores the underlying cause, never changes Linear state, and has no
-max-attempts ceiling.
+exhaustion, and rate-limit throttling — both adapters now carry a
+structured taxonomy code (IDE-71). The error tuples are
+`{:error, {:claude_sdk_error, code, msg}}` for Claude and
+`{:error, {:turn_failed, code, params}}` /
+`{:error, {:codex_error_notification, code, params}}` for Codex, where
+`code` is one of `:context_window_exhausted`, `:rate_limited`,
+`:overloaded`, `:quota_exceeded`, `:invalid_request`, `:unknown`. The
+orchestrator does **not yet** branch on this code — that lands in IDE-72,
+which depends on the classification this ticket adds. Today's behavior
+is still a uniform exponential-backoff retry that ignores the underlying
+cause, never changes Linear state, and has no max-attempts ceiling.
 
 Per-turn output cap is a partial exception: Claude's sidecar surfaces it as
 a clean `turn_end` (`ResultMessage`) and the adapter preserves `stop_reason`
@@ -57,37 +60,41 @@ succeeds.
 **Wire surface.** The Python sidecar at `elixir/priv/claude_agent/symphony_claude_agent/sidecar.py`
 emits one of two terminal envelopes per turn:
 
-- `turn_end` — built from a `ResultMessage`, carrying
-  `stop_reason`, `num_turns`, `usage`, `session_id`
-  (`sidecar.py:465-475`).
-- `error` — emitted on any sidecar exception with a single
-  `category` field (`sidecar.py:444-452`, `594-597`, `608-611`,
-  `641-649`).
+- `turn_end` — built from a clean `ResultMessage`, carrying
+  `stop_reason`, `num_turns`, `usage`, `session_id`.
+- `error` — emitted on any sidecar exception **and** on a
+  `ResultMessage(is_error=True)` returned by the CLI. Every `error`
+  envelope carries both `category` (legacy two-value discriminator) and
+  `error_code` (IDE-71 taxonomy: one of `context_window_exhausted`,
+  `rate_limited`, `overloaded`, `quota_exceeded`, `invalid_request`,
+  `unknown`) computed by `classify_error_code` from the exception class
+  name, HTTP status, and message body (`sidecar.py`, `classify_error_code`).
 
-The sidecar only ever sets `category` to one of two values:
+`category` still distinguishes the two failure-domain buckets:
 
-- `"claude_sidecar_not_found"` — SDK import failed (`sidecar.py:397`).
+- `"claude_sidecar_not_found"` — SDK import failed.
 - `"claude_sdk_error"` — everything else, including every Anthropic SDK
   exception, malformed JSON, "turn before init", and the catch-all in
-  `_drive_safe` (`sidecar.py:360,431,436,449,594,597,610,646`).
+  `_drive_safe`.
 
-The exception class name is interpolated into the human-readable `error`
-string but never structured. So `RateLimitError`, `OverloadedError`,
-`InvalidRequestError` (context length), and a NameError in the sidecar all
-arrive as `category="claude_sdk_error"` with the class name only readable by
-substring-matching the message text.
-
-**Elixir classification.** `Claude.Wire` whitelists envelope types and
-atomizes the `category` field as a known key (`wire.ex:14-25,99-116`), but
-`Claude.AppServer` does not pattern-match on it:
+**Elixir classification.** `Claude.Wire` whitelists envelope types,
+atomises the `category` field, and atomises `error_code` only when its
+value is in the closed IDE-71 taxonomy (`wire.ex`). `Claude.AppServer`
+pattern-matches on the structured code and surfaces it as the 2nd
+element of a 3-tuple:
 
 ```elixir
-defp handle_envelope({:ok, %{type: :error, error: msg}, _leftover},
+defp handle_envelope({:ok, %{type: :error} = env, _leftover},
                     _session, _context, _buffer) do
-  {:error, {:claude_sdk_error, msg}}
+  {:error, {:claude_sdk_error, error_code_from_envelope(env),
+            Map.get(env, :error, "")}}
 end
 ```
-(`app_server.ex:392-394`)
+(`app_server.ex` `handle_envelope/4`)
+
+`error_code_from_envelope/1` defaults to `:unknown` whenever the
+envelope omits `error_code` or carries an out-of-whitelist value, so
+the orchestrator always receives an atom in the structured position.
 
 Sidecar process death surfaces as a separate tuple but is also undifferentiated:
 
@@ -105,11 +112,14 @@ There is no cap on input length, no compaction step, and no inspection of
 
 | Failure mode | Upstream signal | Sidecar envelope | Elixir tuple | Distinguishable? |
 |---|---|---|---|---|
-| Context-window exhaustion | `anthropic.BadRequestError` ("prompt is too long") | `error`, `category="claude_sdk_error"`, message includes class name | `{:error, {:claude_sdk_error, "BadRequestError: …"}}` | Only by substring match on the message |
+| Context-window exhaustion | `anthropic.BadRequestError` ("prompt is too long") or HTTP 413 | `error`, `error_code="context_window_exhausted"` | `{:error, {:claude_sdk_error, :context_window_exhausted, msg}}` | Yes — structured code |
 | Per-turn output cap | `ResultMessage(stop_reason="max_tokens")` | `turn_end` (success path) | `{:ok, %{stop_reason: "max_tokens", …}}` | Yes — `stop_reason` carried in result and logged when `verbose_logging=true` (`agent_runner.ex:106-114`) |
-| `max_turns` (SDK-level cap from `init.max_turns`) | `ResultMessage(stop_reason="end_turn")` after N iterations | `turn_end` | `{:ok, %{stop_reason: "end_turn", num_turns: N, …}}` | Same as a normal completion — only distinguishable via `num_turns` |
-| Account/quota | `RateLimitError` or `BadRequestError` w/ `credit_balance_too_low` | `error`, `category="claude_sdk_error"` | `{:error, {:claude_sdk_error, …}}` | Only by substring match |
-| Rate limit (transient) | `RateLimitError` | same as quota | same as quota | **Indistinguishable from quota exhaustion** |
+| `max_turns` (SDK-level cap from `init.max_turns`) | `ResultMessage(subtype="error_max_turns")` | `error`, `error_code="invalid_request"` (max_turns is deterministic) | `{:error, {:claude_sdk_error, :invalid_request, msg}}` | Yes |
+| Account/quota | `RateLimitError`/`BadRequestError` w/ `credit_balance_too_low` body | `error`, `error_code="quota_exceeded"` (message heuristic wins over 429 status) | `{:error, {:claude_sdk_error, :quota_exceeded, msg}}` | Yes |
+| Rate limit (transient) | `RateLimitError` or HTTP 429 without a quota body | `error`, `error_code="rate_limited"` | `{:error, {:claude_sdk_error, :rate_limited, msg}}` | Yes |
+| Overloaded | `OverloadedError`, HTTP 503/529 | `error`, `error_code="overloaded"` | `{:error, {:claude_sdk_error, :overloaded, msg}}` | Yes |
+| Other 4xx | `BadRequestError` / `AuthenticationError` / `PermissionDeniedError` | `error`, `error_code="invalid_request"` | `{:error, {:claude_sdk_error, :invalid_request, msg}}` | Yes |
+| Unrecognised | Anything else (sidecar `NameError`, unknown class, ResultMessage with no body) | `error`, `error_code="unknown"` | `{:error, {:claude_sdk_error, :unknown, msg}}` | Falls back to `:unknown` — orchestrator should treat as retryable-generic |
 
 ### Codex (`SymphonyElixir.Codex.AppServer`)
 
@@ -120,31 +130,38 @@ classifies a turn into one of these terminal tuples
 | Source | Tuple |
 |---|---|
 | `turn/completed` notification | `{:ok, :turn_completed}` |
-| `turn/failed` notification | `{:error, {:turn_failed, params}}` (`:386-396`) |
-| `turn/cancelled` notification | `{:error, {:turn_cancelled, params}}` (`:398-408`) |
-| `codex/event/error` or `error` notification | `{:error, {:codex_error_notification, params}}` (`:514-528`) |
-| Approval needed without auto-approve | `{:error, {:approval_required, payload}}` (`:503-511`) |
-| Tool/turn input required | `{:error, {:turn_input_required, payload}}` (`:490-498`, `:530-538`) |
-| JSON-RPC `error` reply to a request | `{:error, {:response_error, error}}` (`:1006-1014`) |
-| Read-loop timeout (turn) | `{:error, :turn_timeout}` (`:373-374`) |
-| Read-loop timeout (response init) | `{:error, :response_timeout}` (`:998-999`) |
-| Port `:exit_status` in either loop | `{:error, {:port_exit, status}}` (`:370-371`, `:995-996`) |
+| `turn/failed` notification | `{:error, {:turn_failed, code, params}}` (IDE-71) |
+| `turn/cancelled` notification | `{:error, {:turn_cancelled, params}}` |
+| `codex/event/error` or `error` notification | `{:error, {:codex_error_notification, code, params}}` (IDE-71) |
+| Approval needed without auto-approve | `{:error, {:approval_required, payload}}` |
+| Tool/turn input required | `{:error, {:turn_input_required, payload}}` |
+| JSON-RPC `error` reply to a request | `{:error, {:response_error, error}}` |
+| Read-loop timeout (turn) | `{:error, :turn_timeout}` |
+| Read-loop timeout (response init) | `{:error, :response_timeout}` |
+| Port `:exit_status` in either loop | `{:error, {:port_exit, status}}` |
 
-The `params` payload for a `turn/failed` or `codex_error_notification` may
-contain an upstream HTTP code or quota token, but Symphony does not parse
-it: the entire `params` map is wrapped opaquely. Port exit is treated as
-opaque too — the OS exit code is forwarded but never inspected.
+For `turn/failed` and `codex/event/error`, the `params` payload is
+inspected by `classify_codex_error_payload/1` (priority: message-body
+heuristics → HTTP status → upstream `error.code`/`error.type`) and the
+resulting taxonomy atom is the 2nd element of the error tuple. Codes are
+the same six values as the Claude side. The original `params` map is
+preserved as the 3rd element so downstream consumers can still read it.
+Port exit is still treated as opaque — the OS exit code is forwarded but
+never inspected.
 
 **Per failure mode (Codex):**
 
 | Failure mode | Likely upstream signal | Tuple | Distinguishable? |
 |---|---|---|---|
-| Context-window exhaustion | `turn/failed` with a `params.error` describing context length | `{:error, {:turn_failed, params}}` | Only by inspecting `params` content |
+| Context-window exhaustion | `turn/failed`/error notification with `status=413` or context-length message | `{:error, {:turn_failed, :context_window_exhausted, params}}` | Yes — structured code |
 | Per-turn output cap | `turn/completed` (Codex doesn't crash; the model just stops) | `{:ok, :turn_completed}` | No structured signal at the adapter — token-usage events (`elixir/docs/token_accounting.md`) are the only hint |
 | `agent.max_turns` (Symphony-level) | n/a — orchestrator-side cap | `:ok` from `AgentRunner` | Only by reading the `Reached agent.max_turns…` info log (`agent_runner.ex:254-257`) |
-| Account/quota | `turn/failed` or `codex/event/error` with HTTP 429/402 in `params` | `{:error, {:turn_failed, …}}` or `{:error, {:codex_error_notification, …}}` | Substring match on `inspect(params)` only |
-| Rate limit (transient) | Same as quota | Same as quota | **Indistinguishable from quota exhaustion** |
-| Codex CLI crash / `bash` exit | Port `:exit_status` (any code) | `{:error, {:port_exit, status}}` | Status forwarded but not interpreted; clean shutdown (`status=0`) and crash (`status!=0`) coalesce by the time orchestrator sees them |
+| Account/quota | error payload mentioning `credit`/`quota`/`billing` (or 429 with that body) | `{:error, {:turn_failed, :quota_exceeded, params}}` or `{:error, {:codex_error_notification, :quota_exceeded, params}}` | Yes |
+| Rate limit (transient) | HTTP 429 / `error.type=rate_limit_error` without a quota body | `{:error, {…, :rate_limited, params}}` | Yes |
+| Overloaded | HTTP 503/529 / `error.type=overloaded_error` | `{:error, {…, :overloaded, params}}` | Yes |
+| Other 4xx (auth, permission, etc.) | HTTP 4xx or `error.type` containing `invalid_request`/`permission`/`authentication` | `{:error, {…, :invalid_request, params}}` | Yes |
+| Unrecognised error payload | Anything else (free-form message, opaque structure) | `{:error, {…, :unknown, params}}` | Falls back to `:unknown` |
+| Codex CLI crash / `bash` exit | Port `:exit_status` (any code) | `{:error, {:port_exit, status}}` | Status forwarded but not classified — out of scope for IDE-71 (port exit is upstream-agnostic) |
 
 ## Orchestration Layer
 

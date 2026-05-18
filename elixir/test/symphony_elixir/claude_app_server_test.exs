@@ -378,7 +378,7 @@ defmodule SymphonyElixir.ClaudeAppServerTest do
 
       log =
         capture_log(fn ->
-          assert {:error, {:claude_sdk_error, "kaboom"}} =
+          assert {:error, {:claude_sdk_error, :unknown, "kaboom"}} =
                    AppServer.run_turn(session, "Go", issue(), turn_timeout_ms: 5_000)
         end)
 
@@ -418,10 +418,81 @@ defmodule SymphonyElixir.ClaudeAppServerTest do
     {:ok, session} =
       AppServer.start_session(workspace, config: %{default_claude_config() | command: cmd})
 
-    assert {:error, {:claude_sdk_error, "boom"}} =
+    # No `error_code` on the envelope — adapter must default to `:unknown` so
+    # downstream consumers always see an atom in the 2nd position.
+    assert {:error, {:claude_sdk_error, :unknown, "boom"}} =
              AppServer.run_turn(session, "Go", issue(), turn_timeout_ms: 5_000)
 
     AppServer.stop_session(session)
+  end
+
+  describe "run_turn propagates structured error_code from sidecar (IDE-71)" do
+    # One scripted error envelope per taxonomy code. The adapter must atomize
+    # the whitelisted code through `Claude.Wire` and surface it as the 2nd
+    # element of `{:claude_sdk_error, code, msg}`. Anything outside the
+    # whitelist must collapse to `:unknown`.
+    for {code_string, code_atom, message} <- [
+          {"context_window_exhausted", :context_window_exhausted, "prompt is too long: 250000 tokens > 200000 maximum"},
+          {"rate_limited", :rate_limited, "rate_limit_error: too many requests"},
+          {"overloaded", :overloaded, "OverloadedError: 529"},
+          {"quota_exceeded", :quota_exceeded, "credit balance is too low"},
+          {"invalid_request", :invalid_request, "BadRequestError: malformed input"}
+        ] do
+      test "code=#{code_string} maps to #{inspect(code_atom)}", %{workspace: workspace} do
+        cmd =
+          scripted_command_with_input(
+            [
+              envelope(%{type: "ready"}),
+              envelope(%{type: "system_init", session_id: "s-err-tax"})
+            ],
+            [
+              envelope(%{
+                type: "error",
+                error: unquote(message),
+                category: "claude_sdk_error",
+                error_code: unquote(code_string)
+              })
+            ]
+          )
+
+        {:ok, session} =
+          AppServer.start_session(workspace, config: %{default_claude_config() | command: cmd})
+
+        assert {:error, {:claude_sdk_error, unquote(code_atom), unquote(message)}} =
+                 AppServer.run_turn(session, "Go", issue(), turn_timeout_ms: 5_000)
+
+        AppServer.stop_session(session)
+      end
+    end
+
+    test "unknown error_code value collapses to :unknown", %{workspace: workspace} do
+      # `Claude.Wire` leaves out-of-whitelist values as binaries; the adapter
+      # falls back to `:unknown` so the orchestrator never sees a raw string
+      # in the structured position.
+      cmd =
+        scripted_command_with_input(
+          [
+            envelope(%{type: "ready"}),
+            envelope(%{type: "system_init", session_id: "s-err-unk"})
+          ],
+          [
+            envelope(%{
+              type: "error",
+              error: "mystery",
+              category: "claude_sdk_error",
+              error_code: "future_taxonomy_value"
+            })
+          ]
+        )
+
+      {:ok, session} =
+        AppServer.start_session(workspace, config: %{default_claude_config() | command: cmd})
+
+      assert {:error, {:claude_sdk_error, :unknown, "mystery"}} =
+               AppServer.run_turn(session, "Go", issue(), turn_timeout_ms: 5_000)
+
+      AppServer.stop_session(session)
+    end
   end
 
   test "run_turn fails with turn_timeout when no terminal envelope arrives", %{workspace: workspace} do

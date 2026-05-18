@@ -48,6 +48,138 @@ CLAUDE_CODE_SYSTEM_PROMPT_PRESET = {"type": "preset", "preset": "claude_code"}
 _RENDER_TEXT_LIMIT = 1024
 
 
+# Taxonomy of structured error codes surfaced on `error` envelopes
+# (IDE-71). Symphony's orchestrator branches retry/give-up policy on these
+# codes — they are the wire-stable contract between sidecar and Symphony.
+ERROR_CODE_CONTEXT_WINDOW_EXHAUSTED = "context_window_exhausted"
+ERROR_CODE_RATE_LIMITED = "rate_limited"
+ERROR_CODE_OVERLOADED = "overloaded"
+ERROR_CODE_QUOTA_EXCEEDED = "quota_exceeded"
+ERROR_CODE_INVALID_REQUEST = "invalid_request"
+ERROR_CODE_UNKNOWN = "unknown"
+
+
+def classify_error_code(
+    *,
+    exception_class: str | None = None,
+    message: str | None = None,
+    http_status: int | None = None,
+    api_error_type: str | None = None,
+    result_subtype: str | None = None,
+) -> str:
+    """Map an SDK failure into a structured taxonomy code.
+
+    Inputs are deliberately loose so this is callable from both paths that
+    surface errors in the sidecar:
+
+    1. The ``except Exception as exc`` arm in ``_handle_turn`` — provides the
+       exception class name and message string (Anthropic SDK raises
+       ``RateLimitError``, ``OverloadedError``, ``BadRequestError``, etc.).
+    2. The ``ResultMessage(is_error=True)`` arm in ``_forward_message`` —
+       provides the CLI's ``api_error_status`` (HTTP code) and ``subtype``
+       (``error_during_execution`` / ``error_max_turns``), plus any error
+       body text the CLI propagated.
+
+    Priority order: HTTP status > exception class > API error type field >
+    message-text heuristics. The most specific signal wins so a 429 carrying
+    a ``credit_balance_too_low`` body still classifies as ``quota_exceeded``.
+    """
+
+    haystack = (message or "").lower()
+
+    # Message-body heuristics for the two cases that 4xx-status codes alone
+    # cannot disambiguate (context-window overflow and quota exhaustion both
+    # arrive as 400/429 with class-only typing).
+    if "credit balance" in haystack or "credit_balance" in haystack:
+        return ERROR_CODE_QUOTA_EXCEEDED
+    if (
+        "prompt is too long" in haystack
+        or "context length" in haystack
+        or "context_length_exceeded" in haystack
+        or "maximum context length" in haystack
+        or "max_tokens" in haystack and "context" in haystack
+    ):
+        return ERROR_CODE_CONTEXT_WINDOW_EXHAUSTED
+
+    if http_status is not None:
+        if http_status == 429:
+            return ERROR_CODE_RATE_LIMITED
+        if http_status in (529, 503):
+            return ERROR_CODE_OVERLOADED
+        if http_status == 413:
+            # Anthropic's RequestTooLargeError — closest to context-window
+            # exhaustion from Symphony's perspective: deterministic, not
+            # transient, and resolved by shrinking the input.
+            return ERROR_CODE_CONTEXT_WINDOW_EXHAUSTED
+        if 400 <= http_status < 500:
+            return ERROR_CODE_INVALID_REQUEST
+        if http_status >= 500:
+            return ERROR_CODE_OVERLOADED
+
+    if exception_class:
+        klass = exception_class
+        if klass in ("RateLimitError",):
+            return ERROR_CODE_RATE_LIMITED
+        if klass in ("OverloadedError", "ServiceUnavailableError", "InternalServerError"):
+            return ERROR_CODE_OVERLOADED
+        if klass in ("RequestTooLargeError",):
+            return ERROR_CODE_CONTEXT_WINDOW_EXHAUSTED
+        if klass in (
+            "BadRequestError",
+            "AuthenticationError",
+            "PermissionDeniedError",
+            "NotFoundError",
+            "ConflictError",
+            "UnprocessableEntityError",
+        ):
+            return ERROR_CODE_INVALID_REQUEST
+
+    if api_error_type:
+        api_type = api_error_type.lower()
+        if "rate_limit" in api_type:
+            return ERROR_CODE_RATE_LIMITED
+        if "overload" in api_type:
+            return ERROR_CODE_OVERLOADED
+        if "invalid_request" in api_type or "permission" in api_type or "authentication" in api_type:
+            return ERROR_CODE_INVALID_REQUEST
+
+    if result_subtype == "error_max_turns":
+        # max_turns exhaustion is a deterministic agent-loop cap, not an API
+        # failure — surface it as invalid_request so the orchestrator does
+        # not retry indefinitely.
+        return ERROR_CODE_INVALID_REQUEST
+
+    return ERROR_CODE_UNKNOWN
+
+
+def build_error_envelope(
+    error: str,
+    *,
+    category: str = "claude_sdk_error",
+    error_code: str = ERROR_CODE_UNKNOWN,
+    trace: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Compose an ``error`` envelope with the taxonomy fields populated.
+
+    Keeping a single composer guarantees every error site emits the same
+    shape — `category` for the existing two-value discriminator (kept for
+    wire compatibility) plus `error_code` for the IDE-71 taxonomy.
+    """
+
+    envelope: dict[str, Any] = {
+        "type": "error",
+        "error": error,
+        "category": category,
+        "error_code": error_code,
+    }
+    if trace is not None:
+        envelope["trace"] = trace
+    if extra:
+        envelope.update(extra)
+    return envelope
+
+
 # Mirrors the canonical schema in
 # elixir/lib/symphony_elixir/codex/dynamic_tool.ex (`@linear_graphql_input_schema`).
 # Used only when the `init` envelope arrives without `tool_specs` (older
@@ -357,7 +489,12 @@ async def _drive(state: SessionState, env: dict[str, Any]) -> None:
         if isinstance(request_id, str):
             state.pending_tool_calls.resolve(request_id, env.get("response"))
     else:
-        emit({"type": "error", "error": f"unknown envelope type: {msg_type}", "category": "claude_sdk_error"})
+        emit(
+            build_error_envelope(
+                f"unknown envelope type: {msg_type}",
+                error_code=ERROR_CODE_INVALID_REQUEST,
+            )
+        )
 
 
 def _build_symphony_mcp_server(state: SessionState):  # pragma: no cover - SDK runtime
@@ -391,11 +528,11 @@ def _build_symphony_mcp_server(state: SessionState):  # pragma: no cover - SDK r
 async def _handle_init(state: SessionState, env: dict[str, Any]) -> None:
     if not _SDK_AVAILABLE:
         emit(
-            {
-                "type": "error",
-                "error": "claude-agent-sdk is not installed in the sidecar venv",
-                "category": "claude_sidecar_not_found",
-            }
+            build_error_envelope(
+                "claude-agent-sdk is not installed in the sidecar venv",
+                category="claude_sidecar_not_found",
+                error_code=ERROR_CODE_INVALID_REQUEST,
+            )
         )
         return
 
@@ -428,12 +565,22 @@ async def _handle_init(state: SessionState, env: dict[str, Any]) -> None:
 async def _handle_turn(state: SessionState, env: dict[str, Any]) -> None:
     client = state.client
     if client is None:
-        emit({"type": "error", "error": "turn before init", "category": "claude_sdk_error"})
+        emit(
+            build_error_envelope(
+                "turn before init",
+                error_code=ERROR_CODE_INVALID_REQUEST,
+            )
+        )
         return
 
     prompt = env.get("prompt", "")
     if not isinstance(prompt, str) or not prompt:
-        emit({"type": "error", "error": "turn.prompt missing", "category": "claude_sdk_error"})
+        emit(
+            build_error_envelope(
+                "turn.prompt missing",
+                error_code=ERROR_CODE_INVALID_REQUEST,
+            )
+        )
         return
 
     try:
@@ -443,12 +590,15 @@ async def _handle_turn(state: SessionState, env: dict[str, Any]) -> None:
             await _forward_message(state, message)
     except Exception as exc:  # pragma: no cover - SDK runtime path
         emit(
-            {
-                "type": "error",
-                "error": f"{type(exc).__name__}: {exc}",
-                "category": "claude_sdk_error",
-                "trace": traceback.format_exc(),
-            }
+            build_error_envelope(
+                f"{type(exc).__name__}: {exc}",
+                error_code=classify_error_code(
+                    exception_class=type(exc).__name__,
+                    message=str(exc),
+                    http_status=getattr(exc, "status_code", None),
+                ),
+                trace=traceback.format_exc(),
+            )
         )
 
 
@@ -463,6 +613,10 @@ async def _forward_message(state: SessionState, message: Any) -> None:
         return
 
     if _SDK_AVAILABLE and isinstance(message, ResultMessage):
+        if _result_message_is_error(message):
+            emit(_result_message_error_envelope(message, state.session_id))
+            return
+
         emit(
             {
                 "type": "turn_end",
@@ -498,6 +652,54 @@ async def _forward_message(state: SessionState, message: Any) -> None:
     text = render_message_text(message)
     if text is not None:
         emit({"type": "assistant_message", "text": text, "session_id": state.session_id})
+
+
+def _result_message_is_error(message: Any) -> bool:
+    """Detect a ``ResultMessage`` that the CLI flagged as an error.
+
+    The Claude Agent SDK's ``ResultMessage`` carries ``is_error: bool``
+    and ``subtype`` (e.g. ``"error_during_execution"``, ``"error_max_turns"``).
+    Prior to the IDE-71 fix the sidecar emitted these as ``turn_end`` and the
+    failure was invisible to Symphony. We treat any ``is_error=True`` or
+    ``subtype`` starting with ``error_`` as a real error.
+    """
+
+    if bool(getattr(message, "is_error", False)):
+        return True
+    subtype = getattr(message, "subtype", None)
+    return isinstance(subtype, str) and subtype.startswith("error_")
+
+
+def _result_message_error_envelope(message: Any, session_id: str | None) -> dict[str, Any]:
+    """Translate an error-flagged ``ResultMessage`` into an ``error`` envelope.
+
+    Pulls ``api_error_status`` (HTTP code) and ``subtype`` from the
+    ResultMessage and feeds them into :func:`classify_error_code`. The
+    user-facing message prefers the CLI's ``result`` string (which contains
+    the upstream error body) and falls back to a ``subtype``-based label
+    when no message text is available.
+    """
+
+    subtype = getattr(message, "subtype", None) or "error_during_execution"
+    api_status = getattr(message, "api_error_status", None)
+    body = getattr(message, "result", None)
+    errors = getattr(message, "errors", None)
+    body_text = body if isinstance(body, str) and body else None
+    if not body_text and isinstance(errors, list) and errors:
+        body_text = ", ".join(str(item) for item in errors if item)
+
+    error_code = classify_error_code(
+        message=body_text,
+        http_status=api_status if isinstance(api_status, int) else None,
+        result_subtype=subtype if isinstance(subtype, str) else None,
+    )
+
+    error_message = body_text or f"ResultMessage({subtype})"
+    extra: dict[str, Any] = {"subtype": subtype, "session_id": session_id}
+    if isinstance(api_status, int):
+        extra["http_status"] = api_status
+
+    return build_error_envelope(error_message, error_code=error_code, extra=extra)
 
 
 def render_message_text(message: Any) -> str | None:
@@ -591,10 +793,20 @@ async def _serve() -> None:
         try:
             envelope = parse_line(line)
         except ValueError as exc:
-            emit({"type": "error", "error": str(exc), "category": "claude_sdk_error"})
+            emit(
+                build_error_envelope(
+                    str(exc),
+                    error_code=ERROR_CODE_INVALID_REQUEST,
+                )
+            )
             continue
         except json.JSONDecodeError as exc:
-            emit({"type": "error", "error": f"malformed json: {exc}", "category": "claude_sdk_error"})
+            emit(
+                build_error_envelope(
+                    f"malformed json: {exc}",
+                    error_code=ERROR_CODE_INVALID_REQUEST,
+                )
+            )
             continue
 
         msg_type = envelope.get("type")
@@ -604,11 +816,10 @@ async def _serve() -> None:
                 # Symphony's protocol expects one turn at a time. If a
                 # second arrives, surface it rather than silently queuing.
                 emit(
-                    {
-                        "type": "error",
-                        "error": "turn already in progress; ignoring concurrent turn envelope",
-                        "category": "claude_sdk_error",
-                    }
+                    build_error_envelope(
+                        "turn already in progress; ignoring concurrent turn envelope",
+                        error_code=ERROR_CODE_INVALID_REQUEST,
+                    )
                 )
                 continue
 
@@ -640,12 +851,15 @@ async def _drive_safe(state: SessionState, envelope: dict[str, Any]) -> None:
         await _drive(state, envelope)
     except Exception as exc:  # pragma: no cover - defence in depth
         emit(
-            {
-                "type": "error",
-                "error": f"{type(exc).__name__}: {exc}",
-                "category": "claude_sdk_error",
-                "trace": traceback.format_exc(),
-            }
+            build_error_envelope(
+                f"{type(exc).__name__}: {exc}",
+                error_code=classify_error_code(
+                    exception_class=type(exc).__name__,
+                    message=str(exc),
+                    http_status=getattr(exc, "status_code", None),
+                ),
+                trace=traceback.format_exc(),
+            )
         )
 
 

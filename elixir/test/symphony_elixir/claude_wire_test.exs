@@ -96,6 +96,53 @@ defmodule SymphonyElixir.ClaudeWireTest do
                Wire.decode(raw)
     end
 
+    test "atomizes whitelisted `error_code` values from the IDE-71 taxonomy" do
+      # Each of the six taxonomy codes round-trips as an atom so consumers
+      # can pattern-match. Out-of-whitelist values stay as binaries (safety
+      # net against future sidecar drift leaking unbounded atoms).
+      for code <- ~w(
+            context_window_exhausted
+            rate_limited
+            overloaded
+            quota_exceeded
+            invalid_request
+            unknown
+          ) do
+        raw =
+          ~s({"type":"error","error":"x","category":"claude_sdk_error","error_code":") <>
+            code <> ~s("}\n)
+
+        atom = String.to_atom(code)
+        assert {:ok, %{type: :error, error_code: ^atom}} = Wire.decode(raw)
+      end
+    end
+
+    test "leaves an unknown `error_code` value as a binary" do
+      raw =
+        ~s({"type":"error","error":"x","category":"claude_sdk_error","error_code":"future_value"}\n)
+
+      assert {:ok, %{type: :error, error_code: "future_value"}} = Wire.decode(raw)
+    end
+
+    test "decodes an `error` envelope with `subtype` and `http_status` extras" do
+      # The sidecar's `ResultMessage(is_error=True)` arm carries `subtype`
+      # and `http_status` alongside `error_code`; both keys are on the
+      # atomised-key whitelist so consumers can pattern-match.
+      raw =
+        ~s({"type":"error","error":"boom","category":"claude_sdk_error",) <>
+          ~s("error_code":"rate_limited","subtype":"error_during_execution",) <>
+          ~s("http_status":429,"session_id":"s-1"}\n)
+
+      assert {:ok,
+              %{
+                type: :error,
+                error_code: :rate_limited,
+                subtype: "error_during_execution",
+                http_status: 429,
+                session_id: "s-1"
+              }} = Wire.decode(raw)
+    end
+
     test "rejects unknown type with structured error" do
       raw = ~s({"type":"mystery"}\n)
       assert {:error, {:unknown_envelope, "mystery"}} = Wire.decode(raw)

@@ -1,6 +1,74 @@
 defmodule SymphonyElixir.AppServerTest do
   use SymphonyElixir.TestSupport
 
+  describe "classify_codex_error_payload/1 (IDE-71)" do
+    # Pure-function classifier — exercise every taxonomy code with the
+    # shapes that real Codex payloads carry. The full-stack `turn/failed`
+    # test below proves the classified code reaches the error tuple.
+    test "rate_limited from HTTP 429" do
+      assert AppServer.classify_codex_error_payload(%{"status" => 429}) == :rate_limited
+    end
+
+    test "rate_limited from nested error.type" do
+      assert AppServer.classify_codex_error_payload(%{
+               "error" => %{"type" => "rate_limit_error"}
+             }) == :rate_limited
+    end
+
+    test "overloaded from HTTP 529 and 503" do
+      assert AppServer.classify_codex_error_payload(%{"status" => 529}) == :overloaded
+      assert AppServer.classify_codex_error_payload(%{"status" => 503}) == :overloaded
+    end
+
+    test "overloaded from error.code overloaded_error" do
+      assert AppServer.classify_codex_error_payload(%{
+               "error" => %{"code" => "overloaded_error"}
+             }) == :overloaded
+    end
+
+    test "context_window_exhausted from HTTP 413" do
+      assert AppServer.classify_codex_error_payload(%{"status" => 413}) ==
+               :context_window_exhausted
+    end
+
+    test "context_window_exhausted from a 'prompt is too long' message" do
+      assert AppServer.classify_codex_error_payload(%{
+               "message" => "Prompt is too long: 250000 tokens > 200000 maximum"
+             }) == :context_window_exhausted
+    end
+
+    test "quota_exceeded from a 'credit balance' message wins over a 429 status" do
+      # Quota exhaustion is deterministic; rate-limit is transient. The
+      # body-text heuristic must win so the orchestrator does not hammer
+      # the API with retries on a permanently broken account.
+      assert AppServer.classify_codex_error_payload(%{
+               "status" => 429,
+               "message" => "Your credit balance is too low to access the API"
+             }) == :quota_exceeded
+    end
+
+    test "invalid_request from generic 4xx (401)" do
+      assert AppServer.classify_codex_error_payload(%{"status" => 401}) == :invalid_request
+    end
+
+    test "invalid_request from error.type permission_error" do
+      assert AppServer.classify_codex_error_payload(%{
+               "error" => %{"type" => "permission_error"}
+             }) == :invalid_request
+    end
+
+    test "unknown for an empty or unrecognised payload" do
+      assert AppServer.classify_codex_error_payload(nil) == :unknown
+      assert AppServer.classify_codex_error_payload(%{}) == :unknown
+      assert AppServer.classify_codex_error_payload(%{"message" => "model rejected"}) == :unknown
+    end
+
+    test "stringified HTTP status is parsed" do
+      # JSON-RPC payloads occasionally carry statuses as strings.
+      assert AppServer.classify_codex_error_payload(%{"status" => "429"}) == :rate_limited
+    end
+  end
+
   test "app server rejects the workspace root and paths outside workspace root" do
     test_root =
       Path.join(
@@ -1465,7 +1533,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       log =
         capture_log(fn ->
-          assert {:error, {:codex_error_notification, %{"message" => "model rejected"}}} =
+          assert {:error, {:codex_error_notification, :unknown, %{"message" => "model rejected"}}} =
                    AppServer.run(workspace, "Trigger Codex error", issue, on_message: on_message)
         end)
 
@@ -1477,6 +1545,80 @@ defmodule SymphonyElixir.AppServerTest do
 
       assert log =~ "Codex error notification"
       assert log =~ "model rejected"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
+  test "turn/failed propagates classified error_code into the tuple (IDE-71)" do
+    # End-to-end proof for `turn/failed` (the other Codex error path —
+    # `codex/event/error` — is exercised by the test above). Codex emits a
+    # `turn/failed` with a rate-limit-shaped `params.error`; the adapter
+    # must classify it to `:rate_limited` and put the code in the 2nd
+    # position of `{:turn_failed, code, params}`.
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-app-server-turn-failed-#{System.unique_integer([:positive])}"
+      )
+
+    try do
+      workspace_root = Path.join(test_root, "workspaces")
+      workspace = Path.join(workspace_root, "MT-95")
+      codex_binary = Path.join(test_root, "fake-codex")
+      File.mkdir_p!(workspace)
+
+      File.write!(codex_binary, """
+      #!/bin/sh
+      count=0
+      while IFS= read -r _line; do
+        count=$((count + 1))
+
+        case "$count" in
+          1)
+            printf '%s\\n' '{"id":1,"result":{}}'
+            ;;
+          2)
+            # initialized notification — no response expected
+            ;;
+          3)
+            printf '%s\\n' '{"id":2,"result":{"thread":{"id":"thread-95"}}}'
+            ;;
+          4)
+            printf '%s\\n' '{"id":3,"result":{"turn":{"id":"turn-95"}}}'
+            printf '%s\\n' '{"method":"turn/failed","params":{"status":429,"error":{"type":"rate_limit_error","message":"too many requests"}}}'
+            exit 0
+            ;;
+          *)
+            exit 0
+            ;;
+        esac
+      done
+      """)
+
+      File.chmod!(codex_binary, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: workspace_root,
+        codex_command: "#{codex_binary} app-server"
+      )
+
+      issue = %Issue{
+        id: "issue-turn-failed",
+        identifier: "MT-95",
+        title: "turn/failed propagates classified error_code",
+        description: "Ensure turn/failed payloads are classified per IDE-71",
+        state: "In Progress",
+        url: "https://example.org/issues/MT-95",
+        labels: ["backend"]
+      }
+
+      assert {:error, {:turn_failed, :rate_limited, %{"status" => 429} = params}} =
+               AppServer.run(workspace, "Trigger turn failure", issue)
+
+      # Sanity: structured error sub-object survives passthrough so
+      # downstream consumers can still inspect the original message.
+      assert get_in(params, ["error", "type"]) == "rate_limit_error"
     after
       File.rm_rf(test_root)
     end
