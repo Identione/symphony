@@ -29,7 +29,7 @@ RESET  := $(shell tput sgr0)
 endif
 
 .DEFAULT_GOAL := help
-.PHONY: help start stop restart status logs foreground build clean check-key check-built check-workflow ensure-deps
+.PHONY: help start stop restart status logs foreground build clean check-key check-built check-workflow ensure-deps ensure-trust
 
 help: ## Show this help.
 	@printf '$(BOLD)Symphony$(RESET)  $(DIM)— Linear-driven Codex orchestrator$(RESET)\n'
@@ -138,7 +138,7 @@ clean: ## Remove run/ (PID + stdout log). Does not touch elixir/log/.
 	@rm -rf $(RUN_DIR)
 
 # --- Internal preflight ----------------------------------------------------
-check-key:
+check-key: ensure-trust
 	@cd $(ELIXIR_DIR) && \
 	if [ -z "$$(mise exec -- bash -c 'echo -n $$LINEAR_API_KEY')" ]; then \
 		echo "$(RED)error:$(RESET) LINEAR_API_KEY is not set in the mise env"; \
@@ -159,10 +159,16 @@ check-workflow:
 		exit 1; \
 	fi
 
+# mise refuses to load an untrusted config (per-machine trust state), which
+# silently breaks every `mise exec` downstream. Trust upfront so a fresh
+# clone doesn't have to know about the `mise trust` step.
+ensure-trust:
+	@mise trust --quiet $(ELIXIR_DIR)
+
 # Mix refuses to build with unfetched hex deps and dumps a wall of
 # "package … not available" errors. Detect the empty deps/ dir up front and
 # run `mix setup` so `make build` is self-healing on a fresh checkout.
-ensure-deps:
+ensure-deps: ensure-trust
 	@if [ ! -d $(ELIXIR_DIR)/deps ] || [ -z "$$(ls -A $(ELIXIR_DIR)/deps 2>/dev/null)" ]; then \
 		echo "$(YELLOW)deps not fetched$(RESET); running '$(CYAN)mix setup$(RESET)' first..."; \
 		cd $(ELIXIR_DIR) && mise exec -- mix setup; \
