@@ -18,6 +18,13 @@ polling:
   interval_ms: 5000
 workspace:
   root: ~/code/workspaces
+# Declarative repo metadata (SPEC.md §5.3.6). `repo.url` is consumed by
+# `hooks.after_create` for fresh per-issue workspaces and by `symphony
+# preflight` for an unauthenticated `git ls-remote` reachability probe.
+# `repo.path` is optional and operator-facing only; Symphony itself never
+# reads or writes through it.
+repo:
+  url: https://github.com/Identione/symphony.git
 hooks:
   after_create: |
     git clone --depth 1 https://github.com/Identione/symphony.git .

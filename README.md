@@ -39,6 +39,11 @@ help with the setup:
 > Set up Symphony for my repository based on
 > https://github.com/Identione/symphony/blob/main/elixir/README.md
 
+For project bootstrap, `./bin/symphony init --linear-project <URL> --repo-url <URL> --agent codex`
+generates a usable `WORKFLOW.md` and `./bin/symphony preflight ./WORKFLOW.md` validates Linear
+auth, repo reachability, agent availability, workspace writability, and dashboard port without
+spawning any agents — see [elixir/README.md](elixir/README.md#how-to-use-it) for the full flow.
+
 For operator setup that lives outside the repo — in particular the Codex permissions profile
 required when `WORKFLOW.md` sets `codex.use_configured_permissions: true` — see [SETUP.md](SETUP.md).
 
