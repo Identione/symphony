@@ -1,8 +1,16 @@
 defmodule SymphonyElixir.CLI do
   @moduledoc """
-  Escript entrypoint for running Symphony with an explicit WORKFLOW.md path.
+  Escript entrypoint for Symphony.
+
+  Subcommands:
+
+    * `symphony init …`        — generate a `WORKFLOW.md` from a Linear project URL and a repo URL.
+    * `symphony preflight …`   — validate a `WORKFLOW.md` against the live environment without spawning agents.
+    * `symphony start …`       — boot the orchestrator (alias for the legacy form `symphony [path]`).
+    * `symphony [path]`        — backward-compatible alias of `symphony start [path]`.
   """
 
+  alias SymphonyElixir.CLI
   alias SymphonyElixir.LogFile
 
   @acknowledgement_switch :i_understand_that_this_will_be_running_without_the_usual_guardrails
@@ -21,7 +29,15 @@ defmodule SymphonyElixir.CLI do
   def main(args) do
     case evaluate(args) do
       :ok ->
-        wait_for_shutdown()
+        if start_subcommand?(args) do
+          wait_for_shutdown()
+        else
+          System.halt(0)
+        end
+
+      {:error, :silent_failure} ->
+        # Subcommand printed its own diagnostics; just propagate exit code.
+        System.halt(1)
 
       {:error, message} ->
         IO.puts(:stderr, message)
@@ -29,8 +45,28 @@ defmodule SymphonyElixir.CLI do
     end
   end
 
-  @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t()}
+  # Subcommands carry their own runtime deps shaped for what they actually need
+  # (see `CLI.Init.deps` / `CLI.Preflight.deps`), so the legacy `deps` argument
+  # only applies to the start path. Failures from `init`/`preflight` use the
+  # `:silent_failure` sentinel because those subcommands have already rendered
+  # their own diagnostics; `main/1` translates the sentinel into a non-zero
+  # exit without re-printing.
+  @spec evaluate([String.t()], deps()) :: :ok | {:error, String.t() | :silent_failure}
   def evaluate(args, deps \\ runtime_deps()) do
+    case args do
+      ["init" | rest] -> CLI.Init.run(rest)
+      ["preflight" | rest] -> CLI.Preflight.run(rest)
+      ["start" | rest] -> evaluate_start(rest, deps)
+      _ -> evaluate_start(args, deps)
+    end
+  end
+
+  defp start_subcommand?(["start" | _]), do: true
+  defp start_subcommand?(["init" | _]), do: false
+  defp start_subcommand?(["preflight" | _]), do: false
+  defp start_subcommand?(_args), do: true
+
+  defp evaluate_start(args, deps) do
     case OptionParser.parse(args, strict: @switches) do
       {opts, [], []} ->
         with :ok <- require_guardrails_acknowledgement(opts),
@@ -72,8 +108,18 @@ defmodule SymphonyElixir.CLI do
 
   @spec usage_message() :: String.t()
   defp usage_message do
-    "Usage: symphony [--logs-root <path>] [--port <port>] [path-to-WORKFLOW.md]"
+    """
+    Usage:
+      symphony init --linear-project <URL_OR_SLUG> --repo-url <URL> [...]
+      symphony preflight [path/to/WORKFLOW.md]
+      symphony start #{ack_switch_for_usage()} [--logs-root <path>] [--port <port>] [path/to/WORKFLOW.md]
+      symphony [--logs-root <path>] [--port <port>] [path/to/WORKFLOW.md]   # alias of `symphony start`
+    """
+    |> String.trim_trailing("\n")
   end
+
+  defp ack_switch_for_usage,
+    do: "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
 
   @spec runtime_deps() :: deps()
   defp runtime_deps do

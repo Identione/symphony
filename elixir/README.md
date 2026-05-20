@@ -44,16 +44,28 @@ Symphony stops the active agent for that issue and cleans up matching workspaces
    [Harness engineering](https://openai.com/index/harness-engineering/).
 2. Get a new personal token in Linear via Settings → Security & access → Personal API keys, and
    set it as the `LINEAR_API_KEY` environment variable.
-3. Copy this directory's `WORKFLOW.md` to your repo.
-4. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
+3. Bootstrap a `WORKFLOW.md` for your project:
+   ```bash
+   ./bin/symphony init \
+     --linear-project https://linear.app/<org>/project/<slug> \
+     --repo-url git@github.com:<org>/<repo>.git \
+     --agent codex \
+     --output ./<repo>.WORKFLOW.md
+   ```
+   The default Linear states (`Todo`, `In Progress`, plus terminal `Done`/`Closed`/`Canceled`/
+   `Cancelled`/`Duplicate`) are sufficient — no custom states required. If you prefer the
+   richer flow used by this repo (`Human Review`, `Rework`, `Merging`), copy this directory's
+   `WORKFLOW.md` instead and adjust the slug, repo URL, and workspace root by hand.
+4. Validate the generated workflow before starting:
+   ```bash
+   ./bin/symphony preflight ./<repo>.WORKFLOW.md
+   ```
+   `preflight` checks `LINEAR_API_KEY`, project resolution, configured states, repo clone
+   access (`git ls-remote`), agent availability, workspace root writability, and dashboard
+   port availability — and prints the candidate-issue count without spawning agents.
+5. Optionally copy the `commit`, `push`, `pull`, `land`, and `linear` skills to your repo.
    - The `linear` skill expects Symphony's `linear_graphql` app-server tool for raw Linear GraphQL
      operations such as comment editing or upload flows.
-5. Customize the copied `WORKFLOW.md` file for your project.
-   - To get your project's slug, right-click the project and copy its URL. The slug is part of the
-     URL.
-   - When creating a workflow based on this repo, note that it depends on non-standard Linear
-     issue statuses: "Rework", "Human Review", and "Merging". You can customize them in
-     Team Settings → Workflow in Linear.
 6. Follow the instructions below to install the required runtime dependencies and start the service.
 
 ## Prerequisites
@@ -74,15 +86,37 @@ mise trust
 mise install
 mise exec -- mix setup
 mise exec -- mix build
-mise exec -- ./bin/symphony ./WORKFLOW.md
+mise exec -- ./bin/symphony start \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails \
+  ./WORKFLOW.md
 ```
+
+The legacy form `./bin/symphony [path]` is still accepted as an alias of `./bin/symphony start`.
+
+## Subcommands
+
+```bash
+./bin/symphony init [...]        # generate a WORKFLOW.md for a Linear project
+./bin/symphony preflight [path]  # validate WORKFLOW.md against the live environment
+./bin/symphony start [...] [path]  # boot the orchestrator
+./bin/symphony [...] [path]      # alias of `start`, kept for backwards compatibility
+```
+
+`init` accepts a Linear project URL or slug and a repo clone URL and writes a usable
+`WORKFLOW.md` with env-backed `LINEAR_API_KEY`, default Linear states, and a sensible default
+agent block. `preflight` runs the same configuration through a series of best-effort checks
+(Linear auth, project resolution, state coverage, repo clone access, agent on `PATH`,
+workspace root writability, dashboard port availability) and prints the candidate-issue count
+*without* spawning agents.
 
 ## Configuration
 
 Pass a custom workflow file path to `./bin/symphony` when starting the service:
 
 ```bash
-./bin/symphony /path/to/custom/WORKFLOW.md
+./bin/symphony start \
+  --i-understand-that-this-will-be-running-without-the-usual-guardrails \
+  /path/to/custom/WORKFLOW.md
 ```
 
 If no path is passed, Symphony defaults to `./WORKFLOW.md`.
@@ -91,6 +125,26 @@ Optional flags:
 
 - `--logs-root` tells Symphony to write logs under a different directory (default: `./log`)
 - `--port` also starts the Phoenix observability service (default: disabled)
+
+### `repo.url` vs `repo.path`
+
+`init` writes a top-level `repo:` block to make the bootstrap fully declarative:
+
+```yaml
+repo:
+  url: git@github.com:<org>/<repo>.git
+  path: ~/code/<repo>   # optional
+```
+
+- `repo.url` is the clone URL Symphony hands to `hooks.after_create` for fresh per-issue
+  workspaces. `preflight` uses it for an unauthenticated `git ls-remote` reachability check.
+  This is the only repo input the minimal flow needs.
+- `repo.path` is an optional pointer to a local copy of the repo. Symphony itself never reads
+  or writes through it; it exists so skills that need to inspect or modify project-local
+  files outside the per-issue workspace can find the repo on disk. Most users do not need it.
+- Legacy workflows that hardcode the URL inside `hooks.after_create` keep working — the
+  `repo:` block is optional, and `preflight` simply reports the clone-access check as
+  skipped when `repo.url` is absent.
 
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
 Codex session prompt.

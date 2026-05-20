@@ -20,6 +20,8 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.Orchestrator.State,
           SymphonyElixir.AgentRunner,
           SymphonyElixir.CLI,
+          SymphonyElixir.CLI.Init,
+          SymphonyElixir.CLI.Preflight,
           SymphonyElixir.Codex.AppServer,
           SymphonyElixir.Codex.DynamicTool,
           SymphonyElixir.Claude.AppServer,
