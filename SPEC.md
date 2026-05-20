@@ -555,6 +555,24 @@ Authentication note:
   run against an alternative provider without touching Symphony config. Provider credentials
   (e.g. AWS / GCP / Azure auth) are forwarded the same way.
 
+#### 5.3.6 `repo` (object, OPTIONAL)
+
+Declarative metadata about the source repository the workflow targets. Both fields are OPTIONAL
+so legacy workflows that hardcode the clone URL inside `hooks.after_create` keep parsing.
+
+Fields:
+
+- `url` (string, OPTIONAL)
+  - Canonical clone URL Symphony hands to `hooks.after_create` for fresh per-issue workspaces.
+  - Implementations MAY consult `url` from a project-bootstrap preflight that performs an
+    unauthenticated reachability probe (e.g. `git ls-remote`) without spawning the coding agent.
+  - When absent, preflight reachability checks SHOULD be reported as skipped, not failed.
+- `path` (path string or `$VAR`, OPTIONAL)
+  - Optional pointer to a local working copy of the repo.
+  - Symphony itself MUST NOT read or write through `repo.path`; it exists so repo-local skills
+    can find a stable on-disk copy outside the per-issue workspace.
+  - `~` and `$VAR` are expanded under the same rules as other path fields.
+
 ### 5.4 Prompt Template Contract
 
 The Markdown body of `WORKFLOW.md` is the per-issue prompt template.
@@ -686,6 +704,8 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
+- `repo.url`: string or null, default `null` (consumed by `hooks.after_create` and project-bootstrap preflight)
+- `repo.path`: path or null, default `null` (operator-facing only; Symphony never reads/writes through it)
 - `hooks.after_create`: shell script or null
 - `hooks.before_run`: shell script or null
 - `hooks.after_run`: shell script or null
