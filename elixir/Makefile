@@ -1,7 +1,15 @@
 .PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer e2e \
         start stop restart status logs foreground escript ensure-deps
 
-MIX ?= mix
+# mise refuses to activate an untrusted config (per-machine trust state),
+# which would silently strip mix/elixir from PATH. Trust at parse time so a
+# fresh clone self-heals without a manual `mise trust`; the call is
+# idempotent (~10ms) and the `|| true` keeps non-mise hosts from failing.
+# Trust alone isn't enough — make's parent shell already had PATH set before
+# parse-time, so we route mix through `mise exec` to pick up the now-trusted
+# config in every recipe.
+_ := $(shell mise trust --quiet . 2>/dev/null || true)
+MIX ?= mise exec -- mix
 
 WORKFLOW ?= $(CURDIR)/WORKFLOW.md
 SYMPHONY_BIN ?= $(CURDIR)/bin/symphony
