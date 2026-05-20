@@ -15,7 +15,11 @@ defmodule SymphonyElixir.CLI.Preflight do
   alias SymphonyElixir.Linear.Client
   alias SymphonyElixir.Workflow
 
-  @type check_result :: :ok | {:warn, String.t()} | {:error, String.t()}
+  # Every check actually returns `{:ok_with_detail, _}` (rendered as `[ok]   <label> — <detail>`),
+  # `{:warn, _}`, or `{:error, _}`. The bare `:ok` variant is reserved for a check
+  # that wants to render `[ok]   <label>` without a detail line; no current check uses it.
+  @type check_result ::
+          :ok | {:ok_with_detail, String.t()} | {:warn, String.t()} | {:error, String.t()}
   @type restore_fun :: (-> :ok)
   @type deps :: %{
           set_workflow_file_path: (Path.t() -> :ok),
@@ -27,6 +31,7 @@ defmodule SymphonyElixir.CLI.Preflight do
           graphql: (String.t(), map() -> {:ok, map()} | {:error, term()}),
           ensure_http_app: (-> :ok),
           silence_logger: (-> restore_fun()),
+          program_name: (-> String.t()),
           puts: (IO.chardata() -> :ok),
           puts_err: (IO.chardata() -> :ok)
         }
@@ -123,10 +128,27 @@ defmodule SymphonyElixir.CLI.Preflight do
         Logger.configure(level: :critical)
         fn -> Logger.configure(level: prev) end
       end,
+      program_name: &default_program_name/0,
       puts: fn output -> IO.puts(output) end,
       puts_err: fn output -> IO.puts(:stderr, output) end
     }
   end
+
+  # Returns whichever invocation form the operator used (`./bin/symphony`,
+  # `/usr/local/bin/symphony`, or the bare `symphony` if no escript context).
+  # Mirroring the invocation form keeps copy-pasted commands working in the
+  # exact directory the operator just ran preflight from.
+  defp default_program_name do
+    case :escript.script_name() do
+      [] -> "symphony"
+      name when is_list(name) -> to_string(name)
+    end
+  rescue
+    _ -> "symphony"
+  end
+
+  defp program_name(%{program_name: fun}) when is_function(fun, 0), do: fun.()
+  defp program_name(_deps), do: "symphony"
 
   @spec usage_message() :: String.t()
   def usage_message do
@@ -165,7 +187,7 @@ defmodule SymphonyElixir.CLI.Preflight do
       {:ok, settings} ->
         results = run_checks(settings, deps)
         Enum.each(results, fn {label, result} -> render(label, result, deps) end)
-        summary(results, settings, deps)
+        summary(results, settings, path, deps)
 
       {:error, reason} ->
         deps.puts_err.("workflow load failed: #{format_error(reason)}")
@@ -229,9 +251,7 @@ defmodule SymphonyElixir.CLI.Preflight do
         {:error, "tracker.project_slug not set"}
 
       true ->
-        slug_id = parse_slug_id(settings.tracker.project_slug)
-
-        case deps.graphql.(@project_query, %{slugId: slug_id || settings.tracker.project_slug}) do
+        case deps.graphql.(@project_query, %{slugId: slug_id_for_query(settings.tracker.project_slug)}) do
           {:ok, %{"data" => %{"projects" => %{"nodes" => [%{"name" => name} | _]}}}} ->
             {:ok_with_detail, "matched #{inspect(name)}"}
 
@@ -247,10 +267,15 @@ defmodule SymphonyElixir.CLI.Preflight do
     end
   end
 
-  defp parse_slug_id(slug) do
-    case LinearProject.parse(slug) do
+  # Prefer the 12-hex slug_id form when LinearProject.parse can extract it,
+  # falling back to whatever the operator supplied. Linear's slugId filter
+  # accepts both forms, but tunnelling everything through the hex form keeps
+  # check_project and check_states (and any future Linear query that filters
+  # on slugId) consistent.
+  defp slug_id_for_query(project_slug) do
+    case LinearProject.parse(project_slug) do
       {:ok, %{slug_id: hex}} when is_binary(hex) -> hex
-      _ -> nil
+      _ -> project_slug
     end
   end
 
@@ -267,9 +292,7 @@ defmodule SymphonyElixir.CLI.Preflight do
           (settings.tracker.active_states ++ settings.tracker.terminal_states)
           |> Enum.uniq()
 
-        slug = settings.tracker.project_slug
-
-        case deps.graphql.(@states_query, %{slugId: slug}) do
+        case deps.graphql.(@states_query, %{slugId: slug_id_for_query(settings.tracker.project_slug)}) do
           {:ok, %{"data" => %{"projects" => %{"nodes" => [project | _]}}}} ->
             available = collect_state_names(project)
             verify_state_coverage(configured, available)
@@ -436,7 +459,7 @@ defmodule SymphonyElixir.CLI.Preflight do
     end
   end
 
-  defp summary(results, settings, deps) do
+  defp summary(results, settings, path, deps) do
     failed = for {label, {:error, _}} <- results, do: label
 
     print_candidate_count(settings, deps)
@@ -444,7 +467,7 @@ defmodule SymphonyElixir.CLI.Preflight do
     case failed do
       [] ->
         deps.puts.("\nPreflight passed. Start Symphony with:")
-        deps.puts.("  symphony start #{@ack_flag} #{Workflow.workflow_file_path()}")
+        deps.puts.("  #{program_name(deps)} start #{@ack_flag} #{path}")
         :ok
 
       labels ->
@@ -472,7 +495,7 @@ defmodule SymphonyElixir.CLI.Preflight do
   defp fetch_and_print_candidate_count(settings, deps) do
     response =
       deps.graphql.(@candidate_count_query, %{
-        slugId: settings.tracker.project_slug,
+        slugId: slug_id_for_query(settings.tracker.project_slug),
         stateNames: settings.tracker.active_states
       })
 

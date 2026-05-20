@@ -4,7 +4,7 @@ defmodule SymphonyElixir.CLI.InitTest do
   alias SymphonyElixir.CLI.Init
   alias SymphonyElixir.Config.Schema
 
-  defp capture_deps do
+  defp capture_deps(overrides \\ %{}) do
     parent = self()
 
     %{
@@ -17,6 +17,7 @@ defmodule SymphonyElixir.CLI.InitTest do
         send(parent, {:mkdir, path})
         :ok
       end,
+      program_name: Map.get(overrides, :program_name, fn -> "symphony" end),
       puts: fn output ->
         send(parent, {:puts, IO.iodata_to_binary(output)})
         :ok
@@ -133,6 +134,36 @@ defmodule SymphonyElixir.CLI.InitTest do
              "symphony start --i-understand-that-this-will-be-running-without-the-usual-guardrails #{output}"
   end
 
+  test "prints next-step commands using whichever invocation form the operator used" do
+    # Regression: previously the printed lines always read `symphony preflight …`
+    # and `symphony start …` regardless of how the binary was invoked. A user
+    # who just ran `./bin/symphony init …` would copy-paste a command that does
+    # not work in their shell because `symphony` is not on PATH yet. Inject a
+    # program_name and assert the printed commands mirror it verbatim.
+    deps = capture_deps(%{program_name: fn -> "./bin/symphony" end})
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:puts, output_message}
+    assert output_message =~ "./bin/symphony preflight #{output}"
+
+    assert output_message =~
+             "./bin/symphony start --i-understand-that-this-will-be-running-without-the-usual-guardrails #{output}"
+  end
+
   test "writes a Claude workflow that drops jai (portable default)" do
     deps = capture_deps()
     output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
@@ -184,6 +215,35 @@ defmodule SymphonyElixir.CLI.InitTest do
     assert_received {:write, _path, contents}
 
     assert contents =~ "root: \"~/code/symphony-workspaces/symphony\""
+  end
+
+  test "default workspace root handles SCP-style URLs without a slash separator" do
+    # Regression: repo_basename used Path.basename, which only splits on `/`.
+    # For an SCP-form URL like `git@example.com:repo.git` (no `/`) the basename
+    # was the full string and the rendered workspace path leaked the host —
+    # `~/code/symphony-workspaces/git@example.com:repo`. The generator must
+    # also split on `:` so SCP-form URLs reduce to the bare repo name.
+    deps = capture_deps()
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@example.com:repo.git",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:write, _path, contents}
+
+    assert contents =~ "root: \"~/code/symphony-workspaces/repo\""
+    refute contents =~ "symphony-workspaces/git@"
   end
 
   test "honours --workspace-root and optional --repo-path" do
@@ -329,5 +389,10 @@ defmodule SymphonyElixir.CLI.InitTest do
     assert "Done" in settings.tracker.terminal_states
     assert settings.agent.kind == "codex"
     assert settings.repo.url == "git@github.com:org/repo.git"
+    # Schema default for agent.max_concurrent_agents is 10; the generator must
+    # not paper over it with a lower hard-coded number. Operators can override
+    # via the YAML; the generator's job is to surface the same default as
+    # everything else.
+    assert settings.agent.max_concurrent_agents == 10
   end
 end

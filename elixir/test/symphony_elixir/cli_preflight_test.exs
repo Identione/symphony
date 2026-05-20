@@ -37,6 +37,7 @@ defmodule SymphonyElixir.CLI.PreflightTest do
       # no-op restores nothing.
       ensure_http_app: fn -> :ok end,
       silence_logger: fn -> fn -> :ok end end,
+      program_name: Map.get(overrides, :program_name, fn -> "symphony" end),
       puts: fn output ->
         send(parent, {:puts, IO.iodata_to_binary(output)})
         :ok
@@ -222,6 +223,40 @@ defmodule SymphonyElixir.CLI.PreflightTest do
            "Logger level leaked past preflight: expected :warning, got #{inspect(Logger.level())}"
   end
 
+  test "check_states sends the 12-hex slug_id (not the full URL slug) like check_project" do
+    # Regression: check_project unwrapped `symphony-2e32f5d86d8c` to its trailing
+    # `2e32f5d86d8c` slug_id via LinearProject.parse, but check_states passed the
+    # raw `symphony-2e32f5d86d8c` straight into the @states_query variables.
+    # Linear's slugId filter accepts both forms, but the inconsistency reads
+    # like a bug. Both checks must agree on which form they send.
+    project_slug = "symphony-2e32f5d86d8c"
+
+    workflow_file =
+      tmp_workflow!("states-slug-id",
+        tracker_api_token: "secret",
+        tracker_project_slug: project_slug,
+        server_port: nil
+      )
+
+    deps = build_deps(%{graphql: graphql_responses(project_slug, 0)})
+
+    assert :ok = Preflight.run([workflow_file], deps)
+
+    # Collect every (query, vars) pair the test mock saw. Project + states must
+    # have used the unwrapped 12-hex slug_id form (not the URL slug).
+    pairs =
+      collect_graphql_pairs()
+      |> Enum.filter(fn {query, _vars} -> String.contains?(query, "projects(filter: {slugId") end)
+
+    assert length(pairs) >= 2,
+           "expected at least project + states queries; got #{length(pairs)}: #{inspect(pairs)}"
+
+    Enum.each(pairs, fn {_query, vars} ->
+      assert Map.get(vars, :slugId) == "2e32f5d86d8c",
+             "expected slugId=2e32f5d86d8c (12-hex form), got #{inspect(vars)}"
+    end)
+  end
+
   test "candidate count query asks Linear for a real page size (regression: was first: 0)" do
     project_slug = "symphony-2e32f5d86d8c"
 
@@ -263,7 +298,11 @@ defmodule SymphonyElixir.CLI.PreflightTest do
         server_port: 0
       )
 
-    deps = build_deps(%{graphql: graphql_responses(project_slug, 2)})
+    deps =
+      build_deps(%{
+        graphql: graphql_responses(project_slug, 2),
+        program_name: fn -> "./bin/symphony" end
+      })
 
     assert :ok = Preflight.run([workflow_file], deps)
 
@@ -279,8 +318,15 @@ defmodule SymphonyElixir.CLI.PreflightTest do
     assert full =~ "[ok]   Dashboard port"
     assert full =~ "Candidate issues in active states: 2"
 
+    # Regression: the success line used to read Workflow.workflow_file_path() from
+    # global state. do_run already knows the expanded path it just probed, so the
+    # message must include the same expanded path verbatim — no reach-around to
+    # globally-set state — to keep preflight testable in isolation. The program
+    # name is also pulled from deps so a locally-built escript can echo the
+    # invocation form the operator just used (./bin/symphony) instead of an
+    # un-installed `symphony`.
     assert full =~
-             "symphony start --i-understand-that-this-will-be-running-without-the-usual-guardrails"
+             "./bin/symphony start --i-understand-that-this-will-be-running-without-the-usual-guardrails #{Path.expand(workflow_file)}"
   end
 
   test "reports missing LINEAR_API_KEY as a hard failure" do
@@ -449,6 +495,14 @@ defmodule SymphonyElixir.CLI.PreflightTest do
   defp collect_graphql_queries do
     receive do
       {:graphql, query, _vars} -> [query | collect_graphql_queries()]
+    after
+      0 -> []
+    end
+  end
+
+  defp collect_graphql_pairs do
+    receive do
+      {:graphql, query, vars} -> [{query, vars} | collect_graphql_pairs()]
     after
       0 -> []
     end

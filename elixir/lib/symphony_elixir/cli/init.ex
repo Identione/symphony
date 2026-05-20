@@ -28,6 +28,7 @@ defmodule SymphonyElixir.CLI.Init do
           file_exists?: (Path.t() -> boolean()),
           write: (Path.t(), iodata() -> :ok | {:error, term()}),
           mkdir_p: (Path.t() -> :ok | {:error, term()}),
+          program_name: (-> String.t()),
           puts: (IO.chardata() -> :ok)
         }
 
@@ -37,9 +38,25 @@ defmodule SymphonyElixir.CLI.Init do
       file_exists?: &File.exists?/1,
       write: &File.write/2,
       mkdir_p: &File.mkdir_p/1,
+      program_name: &default_program_name/0,
       puts: fn output -> IO.puts(output) end
     }
   end
+
+  # Mirror whichever invocation form the operator used (`./bin/symphony`,
+  # absolute path, or bare `symphony` if not running as an escript) so the
+  # printed next-step commands can be copy-pasted from the same shell.
+  defp default_program_name do
+    case :escript.script_name() do
+      [] -> "symphony"
+      name when is_list(name) -> to_string(name)
+    end
+  rescue
+    _ -> "symphony"
+  end
+
+  defp program_name(%{program_name: fun}) when is_function(fun, 0), do: fun.()
+  defp program_name(_deps), do: "symphony"
 
   @spec usage_message() :: String.t()
   def usage_message do
@@ -164,11 +181,17 @@ defmodule SymphonyElixir.CLI.Init do
     Path.join("~/code/symphony-workspaces", repo_basename(repo_url))
   end
 
+  # SCP-form URLs (`git@host:org/repo.git`, `git@host:repo.git`) and HTTPS
+  # URLs (`https://host/org/repo.git`) both end in the repo name, but split on
+  # different separators. Path.basename only splits on `/`, so `git@host:repo`
+  # would surface the whole `git@host:repo` as the basename. Taking the last
+  # segment after either `/` or `:` reduces both forms to the bare repo name.
   defp repo_basename(repo_url) do
     repo_url
     |> String.trim()
-    |> strip_trailing_slash()
-    |> Path.basename()
+    |> strip_trailing_separators()
+    |> String.split(["/", ":"])
+    |> List.last()
     |> String.replace_suffix(".git", "")
     |> case do
       "" -> "repo"
@@ -176,7 +199,11 @@ defmodule SymphonyElixir.CLI.Init do
     end
   end
 
-  defp strip_trailing_slash(value), do: String.replace_trailing(value, "/", "")
+  defp strip_trailing_separators(value) do
+    value
+    |> String.replace_trailing("/", "")
+    |> String.replace_trailing(":", "")
+  end
 
   defp normalize_optional(opts, key) do
     case Keyword.get(opts, key) do
@@ -196,12 +223,14 @@ defmodule SymphonyElixir.CLI.Init do
   end
 
   defp print_success(deps, output_path) do
+    program = program_name(deps)
+
     deps.puts.("""
     Wrote #{output_path}
 
     Next steps:
-      symphony preflight #{output_path}
-      symphony start #{@ack_flag} #{output_path}
+      #{program} preflight #{output_path}
+      #{program} start #{@ack_flag} #{output_path}
     """)
   end
 
@@ -250,7 +279,9 @@ defmodule SymphonyElixir.CLI.Init do
       "    git clone --depth 1 #{shell_quote(repo_url)} .",
       "agent:",
       "  kind: #{agent}",
-      "  max_concurrent_agents: 4",
+      "  # Override max_concurrent_agents / max_turns here to deviate from the",
+      "  # schema defaults (10 and 20). Lower values keep the daemon cautious",
+      "  # on small repos; raise them once you trust the agent posture.",
       "  max_turns: 20",
       agent_block(agent),
       "# The Phoenix dashboard is disabled by default. Enable it by uncommenting",
