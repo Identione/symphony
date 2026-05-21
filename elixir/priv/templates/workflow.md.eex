@@ -1,0 +1,31 @@
+---
+tracker:
+  kind: linear
+  api_key: $LINEAR_API_KEY
+  project_slug: <%= @project_slug %>
+  active_states:
+    - Todo
+    - In Progress
+  terminal_states:
+    - Done
+    - Canceled
+    - Duplicate
+polling:
+  interval_ms: 30000
+workspace:
+  root: <%= @workspace_root %>
+repo:
+  url: <%= @repo_url %>
+<%= @repo_path_line %>hooks:
+  after_create: |
+    git clone --depth 1 <%= @repo_url_shell %> .
+agent:
+  kind: <%= @agent_kind %>
+  # Override max_concurrent_agents / max_turns here to deviate from the
+  # schema defaults (10 and 20). Lower values keep the daemon cautious
+  # on small repos; raise them once you trust the agent posture.
+  max_turns: 20
+<%= @agent_block %>
+<%= @server_block %>---
+
+<%= @prompt_body %>

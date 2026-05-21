@@ -11,7 +11,7 @@ Symphony is a Linear-driven coding-agent orchestrator: it polls Linear for work,
 
 Two layers live here:
 
-- **Top-level**: `SPEC.md` is the source-of-truth specification; the root `Makefile` launches the daemon against `elixir/WORKFLOW.md`.
+- **Top-level**: `SPEC.md` is the source-of-truth specification; the root `Makefile` builds the escript and generates per-operator instance folders under `instances/<name>/`. Daemon launches happen from each generated instance Makefile, never from the root.
 - **`elixir/`**: the reference Elixir/OTP implementation. The implementation may be a *superset* of `SPEC.md` but must not conflict with it — when behavior diverges meaningfully, update `SPEC.md` in the same change.
 
 There is no second implementation. All code work happens in `elixir/`.
@@ -49,21 +49,25 @@ export LINEAR_API_KEY=...
 make e2e        # sets SYMPHONY_RUN_LIVE_E2E=1
 ```
 
-## Running the daemon (root Makefile)
+## Running the daemon (per-instance Makefiles)
 
-The root `Makefile` is a thin launcher around `elixir/bin/symphony` that manages a PID file in `run/` and reads `elixir/WORKFLOW.md`:
+The root `Makefile` does **not** launch the daemon. It only builds the escript and generates per-instance folders. All daemon control (`start`, `foreground`, `stop`, `restart`, `status`, `logs`, `preflight`) lives in each generated `instances/<name>/Makefile`:
 
 ```bash
-make build              # builds elixir/bin/symphony (escript)
-make foreground         # attached, for first launch / debugging
-make start | stop | restart | status | logs
+make build                                                              # root: builds elixir/bin/symphony
+make init INSTANCE=<name> ARGS="--linear-project <URL> --repo-url <URL> [--port N] [--host ADDR]"
+cd instances/<name>
+make preflight                                                          # validate against the live env
+make start | stop | restart | status | logs | foreground                # instance daemon control
 ```
 
-The launcher passes the `--i-understand-that-this-will-be-running-without-the-usual-guardrails` flag because Symphony runs Codex with `approval_policy: never` and `workspace-write` sandbox. Don't strip that flag in scripts.
+`make init` renders `instances/<name>/WORKFLOW.md` plus a self-contained `instances/<name>/Makefile` from the EEx templates at `elixir/priv/templates/`. Re-running `make init INSTANCE=<name>` against an existing instance refuses to overwrite unless `--force` is in `ARGS`; with `--force`, both files are regenerated together (one toggle, two files).
 
-`LINEAR_API_KEY` is expected to come from `elixir/mise.local.toml` (gitignored) — `make` checks for it via `mise exec`.
+The instance Makefile's `start`/`foreground` pass the `--i-understand-that-this-will-be-running-without-the-usual-guardrails` flag because Symphony runs Codex with `approval_policy: never` and `workspace-write` sandbox. Don't strip that flag.
 
-> **Note for in-workspace daemon launches:** the host running this repo already has Symphony bound to the default dashboard port (`server.port: 3453` in `elixir/WORKFLOW.md`, also the `DASHBOARD_URL` in the root `Makefile`). When you launch a second instance from inside an issue workspace (`make foreground` / `make start`), set a different TCP port — pass `--port <free-port>` to `bin/symphony` or override `server.port` in your local `WORKFLOW.md` — otherwise Bandit will fail to bind because 3453 is already in use. (`mix test` / `make all` are unaffected: `config/config.exs` pins `:server_port_override` to `0` in `:test` so the test boot picks an OS-assigned ephemeral port.)
+`LINEAR_API_KEY` is expected to come from `elixir/mise.local.toml` (gitignored) — the instance `check-key` target queries the mise env. Each instance's `tracker.project_slug` should be unique; two instances polling the same project will race for the same issues.
+
+> **`--port` and `--host` semantics on `make init`:** omitting `--port` produces a workflow with no `server:` block at all (dashboard off). `--port <N>` enables the dashboard at port N; `--port 0` means OS-assigned. `--host <ADDR>` (only meaningful with `--port`) sets the bind address. Strict IP-literal validation: only `:inet.parse_strict_address/1`-parseable IPv4/IPv6 addresses are accepted (e.g. `0.0.0.0`, `127.0.0.1`, `::1`, `192.168.1.10`). DNS names like `dashboard.local` are rejected — operators with that genuine need can hand-edit `WORKFLOW.md` post-generation; the runtime path (`HttpServer.parse_host/1`) still resolves them.
 
 ## Architecture (big picture)
 
@@ -107,7 +111,7 @@ WORKFLOW.md is YAML front matter + a Markdown body used as the Codex prompt temp
 - `tracker.api_key` reads `LINEAR_API_KEY` when unset or set to `$LINEAR_API_KEY`.
 - Path values support `~` and `$VAR` expansion (except `codex.command`, which is a shell string and expands at exec time).
 
-`elixir/WORKFLOW.md` is the single workflow file: `make start` runs against it, tests use it as a fixture, and it doubles as the canonical example to copy when adopting Symphony in another repo.
+`elixir/WORKFLOW.md` is the maintainer's hand-tuned workflow file: it's used as a test fixture and as the canonical example of a complete daemon configuration. It is *not* launched by the root or `elixir/` Makefiles; copy it into an instance (or use `make init` to generate a simpler one) when actually running Symphony.
 
 ## Logging conventions
 
@@ -130,5 +134,5 @@ When behavior or config changes, update docs in the same PR: root `README.md` (c
 - Keep changes narrowly scoped; avoid unrelated refactors in a feature/bugfix PR.
 - Prefer adding config knobs through `SymphonyElixir.Config` over ad-hoc `System.get_env` reads.
 - `.codex/skills/` contains repo-local Codex skills (`commit`, `push`, `pull`, `land`, `linear`, `debug`) — these are referenced by WORKFLOW.md prompts, not Elixir code.
-- `run/symphony.pid` and `run/symphony.out` are daemon state; `elixir/log/` is structured per-issue logs. `make clean` only touches `run/`.
+- Per-instance state lives under `instances/<name>/run/` (PID + raw stdout `symphony.out`) and `instances/<name>/log/symphony.log` (structured rotating disk log via `LogFile.configure/0`, 10 MB × 5 files). Both directories are gitignored. The instance `make clean` removes only `run/`; `log/` is preserved for history. `make logs` from the instance tails the structured log.
 - Codex 0.115+ enforces a hard-coded `.git` deny rule under `workspace-write` regardless of `writableRoots`, breaking unattended commits — see [openai/codex#15505](https://github.com/openai/codex/issues/15505). The shipped `elixir/WORKFLOW.md` works around this via Approach B (a `~/.codex/config.toml` `default_permissions` profile that grants `:project_roots ".git" = "write"`); the `jai codex --config sandbox_mode=danger-full-access` form (Approach A) is preserved as a commented alternative. See [SETUP.md](SETUP.md) for both. Don't "downgrade" to a `npx -p @openai/codex@0.114.0` pin without first checking whether the host has either approach configured.
