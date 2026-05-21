@@ -15,37 +15,32 @@ Symphony's coding-agent runtime is pluggable (SPEC.md §10). Two adapters ship w
 > [!WARNING]
 > Symphony is a low-key engineering preview for testing in trusted environments.
 
-## Running Symphony
-
-### Requirements
+## Quick start
 
 Symphony works best in codebases that have adopted
-[harness engineering](https://openai.com/index/harness-engineering/). Symphony is the next step --
-moving from managing coding agents to managing work that needs to get done.
+[harness engineering](https://openai.com/index/harness-engineering/).
 
-### Option 1. Make your own
+```bash
+git clone https://github.com/Identione/symphony
+cd symphony
+mise trust elixir && mise install
+make build
+make init INSTANCE=my-repo ARGS="\
+  --linear-project https://linear.app/<org>/project/<slug> \
+  --repo-url git@github.com:<org>/<repo>.git \
+  --agent codex \
+  --port 3454"          # add --host 0.0.0.0 for a LAN-visible dashboard
+cd instances/my-repo
+make preflight
+make start              # `make logs`, `make stop`, `make help` from here
+```
 
-Tell your favorite coding agent to build Symphony in a programming language of your choice:
+Each `make init` creates an isolated `instances/<name>/`; multiple instances can run in parallel
+from the same checkout.
 
-> Implement Symphony according to the following spec:
-> https://github.com/Identione/symphony/blob/main/SPEC.md
-
-### Option 2. Use our experimental reference implementation
-
-Check out [elixir/README.md](elixir/README.md) for instructions on how to set up your environment
-and run the Elixir-based Symphony implementation. You can also ask your favorite coding agent to
-help with the setup:
-
-> Set up Symphony for my repository based on
-> https://github.com/Identione/symphony/blob/main/elixir/README.md
-
-For project bootstrap, `./bin/symphony init --linear-project <URL> --repo-url <URL> --agent codex`
-generates a usable `WORKFLOW.md` and `./bin/symphony preflight ./WORKFLOW.md` validates Linear
-auth, repo reachability, agent availability, workspace writability, and dashboard port without
-spawning any agents — see [elixir/README.md](elixir/README.md#how-to-use-it) for the full flow.
-
-For operator setup that lives outside the repo — in particular the Codex permissions profile
-required when `WORKFLOW.md` sets `codex.use_configured_permissions: true` — see [SETUP.md](SETUP.md).
+- Full flag list and operator notes: [elixir/README.md](elixir/README.md)
+- Codex permissions profile setup: [SETUP.md](SETUP.md)
+- Building your own from scratch: [SPEC.md](SPEC.md)
 
 ---
 

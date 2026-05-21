@@ -7,7 +7,7 @@ defmodule SymphonyElixir.CLI.InitTest do
   defp capture_deps(overrides \\ %{}) do
     parent = self()
 
-    %{
+    base = %{
       file_exists?: fn _path -> false end,
       write: fn path, contents ->
         send(parent, {:write, path, IO.iodata_to_binary(contents)})
@@ -21,8 +21,21 @@ defmodule SymphonyElixir.CLI.InitTest do
       puts: fn output ->
         send(parent, {:puts, IO.iodata_to_binary(output)})
         :ok
-      end
+      end,
+      read_template: &read_template_from_disk/1
     }
+
+    Map.merge(base, Map.drop(overrides, [:program_name]))
+  end
+
+  defp read_template_from_disk(name) do
+    relative =
+      case name do
+        :workflow -> "priv/templates/workflow.md.eex"
+        :instance_makefile -> "priv/templates/instance.Makefile.eex"
+      end
+
+    File.read(Application.app_dir(:symphony_elixir, relative))
   end
 
   test "rejects a missing --linear-project flag" do
@@ -113,9 +126,10 @@ defmodule SymphonyElixir.CLI.InitTest do
     assert contents =~ "Todo"
     assert contents =~ "In Progress"
     assert contents =~ "Done"
-    assert contents =~ "Cancelled"
     assert contents =~ "Canceled"
     assert contents =~ "Duplicate"
+    refute contents =~ "Cancelled"
+    refute contents =~ "Closed"
     refute contents =~ "Human Review"
     refute contents =~ "Rework"
     refute contents =~ "Merging"
@@ -188,10 +202,26 @@ defmodule SymphonyElixir.CLI.InitTest do
 
     assert contents =~ "kind: claude"
     assert contents =~ "uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent"
-    refute contents =~ "jai uv run"
     assert contents =~ "permission_mode: dontAsk"
     assert contents =~ "mcp__symphony__linear_graphql"
     assert contents =~ "setting_sources: []"
+
+    # The jai-wrapped form is shipped as a commented swap-ready alternative
+    # (`#command: jai uv run …`), so the bare substring "jai uv run" appears
+    # in the rendered file. The generator also renders BOTH agent.claude and
+    # agent.codex blocks now, so there are multiple active `command:` lines
+    # in the file. What we actually care about: the claude-specific active
+    # command line (the one containing `uv run --project`) is the non-jai
+    # variant. Catch both regressions: claude active line accidentally
+    # jai-wrapped, and no claude active line at all.
+    active_claude_command =
+      contents
+      |> String.split(~r/\R/)
+      |> Enum.find(&Regex.match?(~r/^\s*command:.*uv run/, &1))
+
+    assert active_claude_command
+    refute active_claude_command =~ "jai"
+    assert active_claude_command =~ "uv run --project $SYMPHONY_CLAUDE_PRIV_DIR"
   end
 
   test "default workspace root derives from repo URL" do
@@ -394,5 +424,500 @@ defmodule SymphonyElixir.CLI.InitTest do
     # via the YAML; the generator's job is to surface the same default as
     # everything else.
     assert settings.agent.max_concurrent_agents == 10
+  end
+
+  # --- template loaded from disk -------------------------------------------
+
+  test "renders the workflow from the read_template dep (not a baked-in iolist)" do
+    sentinel = "SENTINEL_TEMPLATE_BODY_<%= @project_slug %>\n"
+
+    deps =
+      capture_deps(%{
+        read_template: fn
+          :workflow -> {:ok, sentinel}
+          :instance_makefile -> {:error, :should_not_be_called}
+        end
+      })
+
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:write, ^output, contents}
+    assert contents =~ "SENTINEL_TEMPLATE_BODY_\"symphony-2e32f5d86d8c\""
+  end
+
+  # --- --port flag ---------------------------------------------------------
+
+  test "--port N renders an active server block and drops the commented hint" do
+    deps = capture_deps()
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--port",
+                 "4000",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:write, ^output, contents}
+    assert contents =~ ~r/^server:\n  port: 4000$/m
+    refute contents =~ "# server:"
+    refute contents =~ "port: 3453"
+  end
+
+  test "no --port produces no server block at all" do
+    deps = capture_deps()
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:write, ^output, contents}
+    refute contents =~ "server:"
+    refute contents =~ "port:"
+    refute contents =~ "3453"
+  end
+
+  test "--port 0 is accepted and produces server.port: 0" do
+    deps = capture_deps()
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--port",
+                 "0",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:write, ^output, contents}
+    assert contents =~ ~r/^server:\n  port: 0$/m
+  end
+
+  test "--port -1 is rejected" do
+    assert {:error, message} =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--port",
+                 "-1"
+               ],
+               capture_deps()
+             )
+
+    assert message =~ ~r/--port/
+    refute_received {:write, _path, _contents}
+  end
+
+  test "--port abc is rejected by OptionParser type coercion" do
+    assert {:error, message} =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--port",
+                 "abc"
+               ],
+               capture_deps()
+             )
+
+    assert message =~ "invalid flags"
+    refute_received {:write, _path, _contents}
+  end
+
+  # --- --host flag ---------------------------------------------------------
+
+  test "--port N --host 0.0.0.0 renders host line in the server block" do
+    deps = capture_deps()
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--port",
+                 "3454",
+                 "--host",
+                 "0.0.0.0",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:write, ^output, contents}
+    assert contents =~ ~r/^server:\n  port: 3454\n  host: "0\.0\.0\.0"$/m
+  end
+
+  test "--host accepts IPv6 literals" do
+    deps = capture_deps()
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--port",
+                 "3454",
+                 "--host",
+                 "::1",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:write, ^output, contents}
+    assert contents =~ ~s|host: "::1"|
+  end
+
+  test "--host rejects DNS hostnames (strict IP-literal validation)" do
+    assert {:error, message} =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--port",
+                 "3454",
+                 "--host",
+                 "dashboard.local"
+               ],
+               capture_deps()
+             )
+
+    assert message =~ ~r/--host must be a literal IPv4 or IPv6 address/
+    refute_received {:write, _path, _contents}
+  end
+
+  test "--host rejects partial IPv4 typos like 0.0.0" do
+    assert {:error, message} =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--port",
+                 "3454",
+                 "--host",
+                 "0.0.0"
+               ],
+               capture_deps()
+             )
+
+    assert message =~ ~r/--host must be a literal IPv4 or IPv6 address/
+    refute_received {:write, _path, _contents}
+  end
+
+  test "--host rejects empty string" do
+    assert {:error, message} =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--port",
+                 "3454",
+                 "--host",
+                 ""
+               ],
+               capture_deps()
+             )
+
+    assert message =~ ~r/--host/
+    refute_received {:write, _path, _contents}
+  end
+
+  test "--host without --port is rejected" do
+    assert {:error, message} =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--host",
+                 "0.0.0.0"
+               ],
+               capture_deps()
+             )
+
+    assert message =~ ~r/--host requires --port/
+    refute_received {:write, _path, _contents}
+  end
+
+  test "generated workflow with --port and --host still parses against the schema" do
+    deps = capture_deps()
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--port",
+                 "4000",
+                 "--host",
+                 "0.0.0.0",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:write, ^output, contents}
+
+    [_first | rest] = String.split(contents, ~r/\R/, trim: false)
+    {front, _} = Enum.split_while(rest, &(&1 != "---"))
+    yaml = Enum.join(front, "\n")
+    {:ok, decoded} = YamlElixir.read_from_string(yaml)
+
+    assert {:ok, %Schema{} = settings} = Schema.parse(decoded)
+    assert settings.server.port == 4000
+    assert settings.server.host == "0.0.0.0"
+  end
+
+  # --- --instance-makefile / --instance-name -------------------------------
+
+  test "--instance-makefile renders a second template through the same EEx pipeline" do
+    deps = capture_deps()
+    workflow_out = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+
+    makefile_out =
+      Path.join(System.tmp_dir!(), "Makefile-init-#{System.unique_integer([:positive])}")
+
+    on_exit(fn ->
+      File.rm(workflow_out)
+      File.rm(makefile_out)
+    end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--output",
+                 workflow_out,
+                 "--instance-makefile",
+                 makefile_out,
+                 "--instance-name",
+                 "repo-a"
+               ],
+               deps
+             )
+
+    assert_received {:write, ^workflow_out, _workflow_contents}
+    assert_received {:write, ^makefile_out, makefile_contents}
+
+    expected_instance_dir = Path.dirname(makefile_out)
+
+    assert makefile_contents =~ "INSTANCE_DIR  := #{expected_instance_dir}"
+    assert makefile_contents =~ "ROOT          := "
+    assert makefile_contents =~ "INSTANCE=repo-a"
+    refute makefile_contents =~ "3453"
+    refute makefile_contents =~ "DASHBOARD_URL"
+  end
+
+  test "--instance-makefile without --instance-name is rejected" do
+    workflow_out = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+
+    makefile_out =
+      Path.join(System.tmp_dir!(), "Makefile-init-#{System.unique_integer([:positive])}")
+
+    assert {:error, message} =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--output",
+                 workflow_out,
+                 "--instance-makefile",
+                 makefile_out
+               ],
+               capture_deps()
+             )
+
+    assert message =~ ~r/--instance-makefile requires --instance-name/
+    refute_received {:write, _path, _contents}
+  end
+
+  test "--instance-name with path-unsafe characters is rejected" do
+    for bad <- ["foo/bar", "foo bar", ".hidden", "..", "../escape", "name;with;semi"] do
+      assert {:error, message} =
+               Init.run(
+                 [
+                   "--linear-project",
+                   "symphony-2e32f5d86d8c",
+                   "--repo-url",
+                   "git@github.com:org/repo.git",
+                   "--instance-makefile",
+                   "/tmp/dummy",
+                   "--instance-name",
+                   bad
+                 ],
+                 capture_deps()
+               ),
+             "expected #{inspect(bad)} to be rejected"
+
+      assert message =~ ~r/--instance-name/, "for input #{inspect(bad)}"
+    end
+
+    refute_received {:write, _path, _contents}
+  end
+
+  test "force gate refuses both files when either output exists, without --force" do
+    parent = self()
+    workflow_out = "/tmp/init-force-test-WORKFLOW.md"
+    makefile_out = "/tmp/init-force-test-Makefile"
+
+    deps = %{
+      capture_deps()
+      | file_exists?: fn
+          ^workflow_out -> true
+          _other -> false
+        end
+    }
+
+    assert {:error, message} =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--output",
+                 workflow_out,
+                 "--instance-makefile",
+                 makefile_out,
+                 "--instance-name",
+                 "repo-a"
+               ],
+               deps
+             )
+
+    assert message =~ "refusing to overwrite"
+    refute_received {:write, _path, _contents}
+
+    deps_makefile_exists = %{
+      capture_deps()
+      | file_exists?: fn
+          ^makefile_out -> true
+          _other -> false
+        end
+    }
+
+    assert {:error, message_makefile} =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--output",
+                 workflow_out,
+                 "--instance-makefile",
+                 makefile_out,
+                 "--instance-name",
+                 "repo-a"
+               ],
+               deps_makefile_exists
+             )
+
+    assert message_makefile =~ "refusing to overwrite"
+    refute_received {:write, _path, _contents}
+
+    forced_deps = %{
+      capture_deps()
+      | file_exists?: fn _ -> true end,
+        write: fn path, contents ->
+          send(parent, {:write_forced, path, IO.iodata_to_binary(contents)})
+          :ok
+        end
+    }
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--output",
+                 workflow_out,
+                 "--instance-makefile",
+                 makefile_out,
+                 "--instance-name",
+                 "repo-a",
+                 "--force"
+               ],
+               forced_deps
+             )
+
+    assert_received {:write_forced, ^workflow_out, _}
+    assert_received {:write_forced, ^makefile_out, _}
   end
 end

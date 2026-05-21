@@ -492,6 +492,87 @@ defmodule SymphonyElixir.CLI.PreflightTest do
     assert Enum.any?(fails, &String.contains?(&1, "Frobnicate"))
   end
 
+  # --- agent command checking (first-token of agent.<kind>.command) -------
+
+  test "jai-wrapped codex command checks jai on PATH, not codex" do
+    project_slug = "symphony-2e32f5d86d8c"
+
+    workflow_file =
+      tmp_workflow!("jai-codex",
+        tracker_api_token: "secret",
+        tracker_project_slug: project_slug,
+        codex_command: "jai codex --config sandbox_mode=danger-full-access app-server",
+        server_port: nil
+      )
+
+    deps =
+      build_deps(%{
+        graphql: graphql_responses(project_slug, 0),
+        find_executable: %{"git" => "/usr/bin/git", "jai" => "/usr/local/bin/jai"}
+      })
+
+    assert :ok = Preflight.run([workflow_file], deps)
+
+    msgs = collect_puts()
+    full = Enum.join(msgs, "\n")
+
+    assert full =~ "Agent availability"
+    assert full =~ "codex agent: found jai at /usr/local/bin/jai"
+  end
+
+  test "jai-wrapped codex fails when jai is missing even if codex is on PATH" do
+    project_slug = "symphony-2e32f5d86d8c"
+
+    workflow_file =
+      tmp_workflow!("jai-missing",
+        tracker_api_token: "secret",
+        tracker_project_slug: project_slug,
+        codex_command: "jai codex --config sandbox_mode=danger-full-access app-server",
+        server_port: nil
+      )
+
+    deps =
+      build_deps(%{
+        graphql: graphql_responses(project_slug, 0),
+        # codex present, jai absent — old preflight would have falsely
+        # reported the agent as available.
+        find_executable: %{"git" => "/usr/bin/git", "codex" => "/usr/bin/codex"}
+      })
+
+    assert {:error, :silent_failure} = Preflight.run([workflow_file], deps)
+
+    fails = collect_puts_err()
+    assert Enum.any?(fails, &String.contains?(&1, "Agent availability"))
+    assert Enum.any?(fails, &String.contains?(&1, "jai not found on PATH"))
+  end
+
+  test "env-backed agent command warns instead of failing the check" do
+    project_slug = "symphony-2e32f5d86d8c"
+
+    workflow_file =
+      tmp_workflow!("env-backed",
+        tracker_api_token: "secret",
+        tracker_project_slug: project_slug,
+        codex_command: "$CODEX_BIN --config 'model=\"gpt-5.5\"' app-server",
+        server_port: nil
+      )
+
+    deps =
+      build_deps(%{
+        graphql: graphql_responses(project_slug, 0),
+        find_executable: %{"git" => "/usr/bin/git"}
+      })
+
+    assert :ok = Preflight.run([workflow_file], deps)
+
+    msgs = collect_puts()
+    full = Enum.join(msgs, "\n")
+
+    assert full =~ "[warn] Agent availability"
+    assert full =~ "env-backed value"
+    assert full =~ "$CODEX_BIN"
+  end
+
   defp collect_graphql_queries do
     receive do
       {:graphql, query, _vars} -> [query | collect_graphql_queries()]

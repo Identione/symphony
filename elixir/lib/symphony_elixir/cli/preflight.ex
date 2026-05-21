@@ -367,11 +367,40 @@ defmodule SymphonyElixir.CLI.Preflight do
 
   defp check_agent(settings, deps) do
     case settings.agent.kind do
-      "codex" -> check_executable(deps, "codex", "codex agent")
-      "claude" -> check_executable(deps, "uv", "claude sidecar (`uv` for `uv run`)")
+      "codex" -> check_agent_command(settings.codex.command, "codex agent", deps)
+      "claude" -> check_agent_command(settings.claude.command, "claude sidecar", deps)
       other -> {:warn, "unknown agent.kind #{inspect(other)}; skipping agent check"}
     end
   end
+
+  # The configured `agent.<kind>.command` is what Symphony actually exec()s.
+  # Use its first whitespace-separated token as the executable name to verify,
+  # so `jai codex ...` checks `jai` (the outer wrapper) rather than `codex`.
+  # If the first token is env-backed (`$VAR …`), we can't statically resolve
+  # it — emit a warn rather than a false negative.
+  defp check_agent_command(command, label, deps) do
+    case parse_command_executable(command) do
+      {:ok, name} ->
+        check_executable(deps, name, label)
+
+      {:env_backed, raw} ->
+        {:warn, "#{label}: command starts with env-backed value #{inspect(raw)}; cannot verify availability statically"}
+
+      {:error, :empty} ->
+        {:error, "#{label}: agent command is empty"}
+    end
+  end
+
+  defp parse_command_executable(command) when is_binary(command) do
+    case command |> String.trim() |> String.split(~r/\s+/, parts: 2) |> List.first() do
+      nil -> {:error, :empty}
+      "" -> {:error, :empty}
+      "$" <> _ = raw -> {:env_backed, raw}
+      name -> {:ok, name}
+    end
+  end
+
+  defp parse_command_executable(_), do: {:error, :empty}
 
   defp check_executable(deps, name, label) do
     case deps.system_find_executable.(name) do
