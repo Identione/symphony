@@ -1,11 +1,11 @@
 .envrc
 
-# Per-instance runtime state created by `make init INSTANCE=<name>` and the
-# generated instance Makefile. `instances/<name>/Makefile` and
-# `instances/<name>/WORKFLOW.md` are intentionally trackable — operators may
-# want to version them. The transient state below should never be committed.
-instances/*/run/
-instances/*/log/
+# Per-instance config and state created by `make init INSTANCE=<name>` and
+# the generated instance Makefile. Each operator owns their own instances —
+# Linear project, repo URL, dashboard port, runtime state — so nothing under
+# instances/ should be shared via git. `make init` recreates the directory
+# from priv/templates/ on demand.
+instances/
 
 # Legacy root daemon state (PID / stdout capture) from before daemon control
 # moved into per-instance Makefiles. New checkouts do not create `/run/`;

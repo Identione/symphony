@@ -546,6 +546,64 @@ defmodule SymphonyElixir.CLI.PreflightTest do
     assert Enum.any?(fails, &String.contains?(&1, "jai not found on PATH"))
   end
 
+  test "claude agent.kind reads command from agent.claude.command (regression)" do
+    # Regression: preflight previously looked up `settings.claude.command`,
+    # which the schema never populates — only `settings.agent.claude` exists
+    # (the `codex` mirror at top-level is a legacy alias that has no claude
+    # counterpart). Result: every `agent.kind: claude` workflow crashed
+    # preflight with a `KeyError key :claude not found` from check_agent/2.
+    project_slug = "symphony-claude-2e32f5d86d8c"
+
+    workflow_root = Path.join(System.tmp_dir!(), "preflight-claude-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(workflow_root)
+    workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+    on_exit(fn -> File.rm_rf(workflow_root) end)
+
+    File.write!(workflow_file, """
+    ---
+    tracker:
+      kind: linear
+      api_key: secret
+      project_slug: #{project_slug}
+      active_states:
+        - Todo
+        - In Progress
+      terminal_states:
+        - Done
+        - Canceled
+        - Duplicate
+    workspace:
+      root: #{Path.join(System.tmp_dir!(), "ws-claude-#{System.unique_integer([:positive])}")}
+    agent:
+      kind: claude
+      claude:
+        command: uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
+        permission_mode: dontAsk
+        allowed_tools:
+          - Read
+          - Bash
+    hooks:
+      timeout_ms: 60000
+    ---
+
+    prompt
+    """)
+
+    deps =
+      build_deps(%{
+        graphql: graphql_responses(project_slug, 0),
+        find_executable: %{"git" => "/usr/bin/git", "uv" => "/usr/local/bin/uv"}
+      })
+
+    assert :ok = Preflight.run([workflow_file], deps)
+
+    msgs = collect_puts()
+    full = Enum.join(msgs, "\n")
+
+    assert full =~ "Agent availability"
+    assert full =~ "claude sidecar: found uv at /usr/local/bin/uv"
+  end
+
   test "env-backed agent command warns instead of failing the check" do
     project_slug = "symphony-2e32f5d86d8c"
 
