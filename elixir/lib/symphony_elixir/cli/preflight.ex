@@ -368,7 +368,7 @@ defmodule SymphonyElixir.CLI.Preflight do
   defp check_agent(settings, deps) do
     case settings.agent.kind do
       "codex" -> check_agent_command(settings.codex.command, "codex agent", deps)
-      "claude" -> check_agent_command(settings.claude.command, "claude sidecar", deps)
+      "claude" -> check_agent_command(settings.agent.claude.command, "claude sidecar", deps)
       other -> {:warn, "unknown agent.kind #{inspect(other)}; skipping agent check"}
     end
   end
