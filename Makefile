@@ -29,7 +29,7 @@ RESET  := $(shell tput sgr0)
 endif
 
 .DEFAULT_GOAL := help
-.PHONY: help init build clean check-built ensure-deps ensure-trust
+.PHONY: help init build clean upgrade upgrade-all check-built ensure-deps ensure-trust validate-instance
 
 help: ## Show this help.
 	@printf '$(BOLD)Symphony$(RESET)  $(DIM)— Linear-driven Codex orchestrator$(RESET)\n'
@@ -56,6 +56,7 @@ help: ## Show this help.
 	@printf '  1. $(CYAN)make build$(RESET)\n'
 	@printf '  2. $(CYAN)make init INSTANCE=<name> ARGS="--linear-project <URL> --repo-url <URL> [--port N] [--host ADDR]"$(RESET)\n'
 	@printf '  3. $(CYAN)cd instances/<name>$(RESET) and use that folder'\''s Makefile (run, stop, logs, …)\n'
+	@printf '  4. after $(CYAN)git pull$(RESET): $(CYAN)make upgrade-all$(RESET) (or $(CYAN)make upgrade INSTANCE=<name>$(RESET)) to rebuild + restart running daemons\n'
 	@printf '\n'
 	@printf '$(BOLD)State:$(RESET)\n'
 	@printf '  escript       %s\n' "$$([ -x $(BIN) ] && echo '$(GREEN)✓$(RESET) $(BIN)' || echo '$(RED)✗$(RESET) not built — run make build')"
@@ -63,17 +64,7 @@ help: ## Show this help.
 
 # --- Bootstrap -------------------------------------------------------------
 ##@ Bootstrap
-init: ensure-trust check-built ## Generate instances/<INSTANCE>/WORKFLOW.md + Makefile. Pass INSTANCE=name ARGS="--linear-project <URL> --repo-url <URL> [--port N] [--host ADDR] [--force] ...".
-	@if [ -z "$(INSTANCE)" ]; then \
-		echo "$(RED)error:$(RESET) INSTANCE is required, e.g. '$(CYAN)make init INSTANCE=repo-a ARGS=...$(RESET)'"; \
-		exit 1; \
-	fi
-	@case "$(INSTANCE)" in \
-		*[!A-Za-z0-9_.-]*|.*|*..*) \
-			echo "$(RED)error:$(RESET) invalid INSTANCE: $(INSTANCE) (allowed: A-Za-z0-9_.-, no leading '.', no '..')"; \
-			exit 1; \
-		;; \
-	esac
+init: ensure-trust check-built validate-instance ## Generate instances/<INSTANCE>/WORKFLOW.md + Makefile. Pass INSTANCE=name ARGS="--linear-project <URL> --repo-url <URL> [--port N] [--host ADDR] [--force] ...".
 	@# The directory is created by symphony init's write_output (mkdir_p on
 	@# dirname) so a validation failure does not leave an empty instances/<name>/
 	@# behind.
@@ -82,6 +73,48 @@ init: ensure-trust check-built ## Generate instances/<INSTANCE>/WORKFLOW.md + Ma
 		--instance-makefile "$(INSTANCE_MK)" \
 		--instance-name "$(INSTANCE)" \
 		$(ARGS)
+
+# --- Upgrade ---------------------------------------------------------------
+##@ Upgrade
+upgrade: ensure-trust validate-instance ## Rebuild escript + restart instance daemon if it's running. INSTANCE=<name>.
+	@if [ ! -f $(INSTANCE_MK) ]; then \
+		echo "$(RED)error:$(RESET) instance $(INSTANCE) not found at $(INSTANCE_DIR)"; \
+		exit 1; \
+	fi
+	@$(MAKE) --no-print-directory build
+	@$(MAKE) -C $(INSTANCE_DIR) --no-print-directory _upgrade-restart-if-running
+
+upgrade-all: ensure-trust ## Rebuild escript + restart every running instance daemon (serial, fail-fast).
+	@# Single shell recipe: an early exit-0 in a separate @line would not
+	@# prevent later @lines from running, so the build must be gated inside
+	@# the same shell as the empty-instances check.
+	@if [ ! -d $(INSTANCES_DIR) ] || [ -z "$$(ls -A $(INSTANCES_DIR) 2>/dev/null)" ]; then \
+		echo "$(DIM)no instances to upgrade$(RESET)"; \
+	else \
+		set -e; \
+		$(MAKE) --no-print-directory build; \
+		for dir in $(INSTANCES_DIR)/*/; do \
+			[ -f $$dir/Makefile ] || continue; \
+			name=$$(basename $$dir); \
+			printf '$(BOLD)==> %s$(RESET)\n' "$$name"; \
+			$(MAKE) -C $$dir --no-print-directory _upgrade-restart-if-running; \
+		done; \
+	fi
+
+# Shared between `init` and `upgrade`: bail early on a missing/unsafe INSTANCE.
+# The error message stays target-agnostic — the calling target's name appears
+# in make's own diagnostics if needed.
+validate-instance:
+	@if [ -z "$(INSTANCE)" ]; then \
+		echo "$(RED)error:$(RESET) INSTANCE is required, e.g. '$(CYAN)INSTANCE=repo-a$(RESET)'"; \
+		exit 1; \
+	fi
+	@case "$(INSTANCE)" in \
+		*[!A-Za-z0-9_.-]*|.*|*..*) \
+			echo "$(RED)error:$(RESET) invalid INSTANCE: $(INSTANCE) (allowed: A-Za-z0-9_.-, no leading '.', no '..')"; \
+			exit 1; \
+		;; \
+	esac
 
 # --- Build / clean ---------------------------------------------------------
 ##@ Build

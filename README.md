@@ -38,6 +38,22 @@ make start              # `make logs`, `make stop`, `make help` from here
 Each `make init` creates an isolated `instances/<name>/`; multiple instances can run in parallel
 from the same checkout.
 
+## Upgrading after a `git pull`
+
+```bash
+git pull
+make upgrade-all                       # rebuild escript + restart every running instance (serial)
+make upgrade INSTANCE=my-repo          # …or one at a time
+cd instances/my-repo && make upgrade   # …or from inside the instance
+```
+
+`upgrade` always rebuilds `elixir/bin/symphony` and only restarts daemons that are currently
+running — stopped instances are left alone and pick up the new escript on their next `make start`.
+
+It does **not** regenerate `WORKFLOW.md` or the instance `Makefile`. To pull in template changes,
+re-run `make init INSTANCE=<name> ARGS="--force ..."` — that clobbers both files, so back up any
+hand-edits first.
+
 - Full flag list and operator notes: [elixir/README.md](elixir/README.md)
 - Codex permissions profile setup: [SETUP.md](SETUP.md)
 - Building your own from scratch: [SPEC.md](SPEC.md)

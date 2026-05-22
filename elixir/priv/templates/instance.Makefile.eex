@@ -26,6 +26,7 @@ endif
 
 .DEFAULT_GOAL := help
 .PHONY: help start foreground stop restart status logs clean preflight \
+        upgrade _upgrade-restart-if-running \
         dashboard-url ensure-trust check-built check-workflow check-key
 
 help: ## Show this help.
@@ -86,6 +87,22 @@ stop: ## Stop the daemon (graceful, then SIGKILL after 10s).
 	@rm -f $(PID_FILE)
 
 restart: stop start ## Stop, then start.
+
+upgrade: ## Rebuild escript at $(ROOT) and restart this daemon (only if running).
+	@$(MAKE) --no-print-directory -C $(ROOT) build
+	@$(MAKE) --no-print-directory _upgrade-restart-if-running
+
+# Internal helper: called by both `upgrade` above and by the root Makefile's
+# `upgrade-all` (which builds the escript once, then loops over instances).
+# Keeping the restart-if-running gate here avoids the surprise of waking up
+# daemons the operator had intentionally stopped.
+_upgrade-restart-if-running:
+	@if [ -f $(PID_FILE) ] && kill -0 $$(cat $(PID_FILE)) 2>/dev/null; then \
+	  echo "restarting symphony to pick up new code"; \
+	  $(MAKE) --no-print-directory restart; \
+	else \
+	  echo "$(DIM)daemon not running; new escript will be used on next 'make start'$(RESET)"; \
+	fi
 
 status: ## Show whether the daemon is running.
 	@if [ -f $(PID_FILE) ] && kill -0 $$(cat $(PID_FILE)) 2>/dev/null; then \

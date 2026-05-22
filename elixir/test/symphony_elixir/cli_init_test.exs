@@ -778,6 +778,24 @@ defmodule SymphonyElixir.CLI.InitTest do
     assert makefile_contents =~ "INSTANCE=repo-a"
     refute makefile_contents =~ "3453"
     refute makefile_contents =~ "DASHBOARD_URL"
+
+    # The instance Makefile must expose `make upgrade` so an operator who
+    # just pulled new code can rebuild the escript + restart this daemon
+    # (only if it's running) in one step. It also exports a private
+    # `_upgrade-restart-if-running` helper that the root Makefile's
+    # `upgrade-all` invokes via `$(MAKE) -C <instance> …` so the build
+    # happens once, not once per instance.
+    assert makefile_contents =~ ~r/^upgrade:.*## /m
+
+    phony_line =
+      makefile_contents
+      |> String.replace(~r/\\\n\s*/, " ")
+      |> String.split("\n")
+      |> Enum.find(&String.starts_with?(&1, ".PHONY:"))
+
+    assert phony_line, "expected a .PHONY: declaration in the rendered Makefile"
+    assert phony_line =~ ~r/\bupgrade\b/
+    assert phony_line =~ ~r/\b_upgrade-restart-if-running\b/
   end
 
   test "--instance-makefile without --instance-name is rejected" do
