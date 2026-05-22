@@ -779,23 +779,17 @@ defmodule SymphonyElixir.CLI.InitTest do
     refute makefile_contents =~ "3453"
     refute makefile_contents =~ "DASHBOARD_URL"
 
-    # The instance Makefile must expose `make upgrade` so an operator who
-    # just pulled new code can rebuild the escript + restart this daemon
-    # (only if it's running) in one step. It also exports a private
-    # `_upgrade-restart-if-running` helper that the root Makefile's
-    # `upgrade-all` invokes via `$(MAKE) -C <instance> …` so the build
-    # happens once, not once per instance.
+    # The instance Makefile must expose `make upgrade` (with a help-line `## `
+    # description) plus the private `_upgrade-restart-if-running` helper that
+    # the root Makefile's `upgrade-all` invokes per-instance via
+    # `$(MAKE) -C <instance> …` so the build happens once, not once per instance.
     assert makefile_contents =~ ~r/^upgrade:.*## /m
 
-    phony_line =
-      makefile_contents
-      |> String.replace(~r/\\\n\s*/, " ")
-      |> String.split("\n")
-      |> Enum.find(&String.starts_with?(&1, ".PHONY:"))
-
-    assert phony_line, "expected a .PHONY: declaration in the rendered Makefile"
-    assert phony_line =~ ~r/\bupgrade\b/
-    assert phony_line =~ ~r/\b_upgrade-restart-if-running\b/
+    # Collapse `\\\n` line-continuations so the .PHONY declaration lands on
+    # a single logical line regardless of how it's wrapped in the template.
+    flattened = String.replace(makefile_contents, ~r/\\\n\s*/, " ")
+    assert flattened =~ ~r/^\.PHONY:.*\bupgrade\b/m
+    assert flattened =~ ~r/^\.PHONY:.*\b_upgrade-restart-if-running\b/m
   end
 
   test "--instance-makefile without --instance-name is rejected" do

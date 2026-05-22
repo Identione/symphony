@@ -85,25 +85,23 @@ upgrade: ensure-trust validate-instance ## Rebuild escript + restart instance da
 	@$(MAKE) -C $(INSTANCE_DIR) --no-print-directory _upgrade-restart-if-running
 
 upgrade-all: ensure-trust ## Rebuild escript + restart every running instance daemon (serial, fail-fast).
-	@# Single shell recipe: an early exit-0 in a separate @line would not
+	@# Single shell recipe: an early `exit 0` in a separate @line would not
 	@# prevent later @lines from running, so the build must be gated inside
 	@# the same shell as the empty-instances check.
-	@if [ ! -d $(INSTANCES_DIR) ] || [ -z "$$(ls -A $(INSTANCES_DIR) 2>/dev/null)" ]; then \
+	@dirs=$$(find $(INSTANCES_DIR) -mindepth 1 -maxdepth 1 -type d 2>/dev/null); \
+	if [ -z "$$dirs" ]; then \
 		echo "$(DIM)no instances to upgrade$(RESET)"; \
-	else \
-		set -e; \
-		$(MAKE) --no-print-directory build; \
-		for dir in $(INSTANCES_DIR)/*/; do \
-			[ -f $$dir/Makefile ] || continue; \
-			name=$$(basename $$dir); \
-			printf '$(BOLD)==> %s$(RESET)\n' "$$name"; \
-			$(MAKE) -C $$dir --no-print-directory _upgrade-restart-if-running; \
-		done; \
-	fi
+		exit 0; \
+	fi; \
+	set -e; \
+	$(MAKE) --no-print-directory build; \
+	for dir in $$dirs; do \
+		[ -f $$dir/Makefile ] || continue; \
+		printf '$(BOLD)==> %s$(RESET)\n' "$$(basename $$dir)"; \
+		$(MAKE) -C $$dir --no-print-directory _upgrade-restart-if-running; \
+	done
 
 # Shared between `init` and `upgrade`: bail early on a missing/unsafe INSTANCE.
-# The error message stays target-agnostic — the calling target's name appears
-# in make's own diagnostics if needed.
 validate-instance:
 	@if [ -z "$(INSTANCE)" ]; then \
 		echo "$(RED)error:$(RESET) INSTANCE is required, e.g. '$(CYAN)INSTANCE=repo-a$(RESET)'"; \
@@ -115,7 +113,6 @@ validate-instance:
 			exit 1; \
 		;; \
 	esac
-
 # --- Build / clean ---------------------------------------------------------
 ##@ Build
 build: ensure-deps ## Rebuild elixir/bin/symphony (mix build).
