@@ -7,6 +7,11 @@
 # from priv/templates/ on demand.
 instances/
 
+# Local batch-init manifest read by `make init-all` (per-operator instance
+# list of Linear projects / repos / ports). The committed template is
+# instances.local.example.
+/instances.local
+
 # Legacy root daemon state (PID / stdout capture) from before daemon control
 # moved into per-instance Makefiles. New checkouts do not create `/run/`;
 # kept here so a pre-refactor checkout's residual files don't pollute

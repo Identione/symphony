@@ -17,6 +17,9 @@ INSTANCE_DIR  := $(INSTANCES_DIR)/$(INSTANCE)
 INSTANCE_WF   := $(INSTANCE_DIR)/WORKFLOW.md
 INSTANCE_MK   := $(INSTANCE_DIR)/Makefile
 
+# Per-operator batch-init manifest read by `make init-all` (gitignored).
+INSTANCES_FILE ?= $(ROOT)/instances.local
+
 # tput-driven ANSI: empty when not a terminal, so `make help | cat` stays clean.
 ifneq ($(shell tput colors 2>/dev/null),)
 BOLD   := $(shell tput bold)
@@ -29,7 +32,7 @@ RESET  := $(shell tput sgr0)
 endif
 
 .DEFAULT_GOAL := help
-.PHONY: help init build clean upgrade upgrade-all check-built ensure-deps ensure-trust validate-instance
+.PHONY: help init init-all build clean upgrade upgrade-all check-built ensure-deps ensure-trust validate-instance
 
 help: ## Show this help.
 	@printf '$(BOLD)Symphony$(RESET)  $(DIM)— Linear-driven Codex orchestrator$(RESET)\n'
@@ -55,6 +58,7 @@ help: ## Show this help.
 	@printf '$(BOLD)Instance workflow:$(RESET)\n'
 	@printf '  1. $(CYAN)make build$(RESET)\n'
 	@printf '  2. $(CYAN)make init INSTANCE=<name> ARGS="--linear-project <URL> --repo-url <URL> [--port N] [--host ADDR]"$(RESET)\n'
+	@printf '     $(DIM)or bulk: list instances in $(CYAN)instances.local$(RESET)$(DIM) then $(CYAN)make init-all$(RESET) $(DIM)(see instances.local.example)$(RESET)\n'
 	@printf '  3. $(CYAN)cd instances/<name>$(RESET) and use that folder'\''s Makefile (run, stop, logs, …)\n'
 	@printf '  4. after $(CYAN)git pull$(RESET): $(CYAN)make upgrade-all$(RESET) (or $(CYAN)make upgrade INSTANCE=<name>$(RESET)) to rebuild + restart running daemons\n'
 	@printf '\n'
@@ -73,6 +77,26 @@ init: ensure-trust check-built validate-instance ## Generate instances/<INSTANCE
 		--instance-makefile "$(INSTANCE_MK)" \
 		--instance-name "$(INSTANCE)" \
 		$(ARGS)
+
+init-all: ensure-trust check-built ## Generate every instance in instances.local (one per line: <name> <init-args>). FORCE=1 regenerates existing.
+	@if [ ! -f "$(INSTANCES_FILE)" ]; then \
+		echo "$(RED)error:$(RESET) $(INSTANCES_FILE) not found."; \
+		echo "$(DIM)One instance per line: <name> --linear-project <URL> --repo-url <URL> [--port N] ...$(RESET)"; \
+		echo "$(DIM)Copy the template: cp instances.local.example instances.local$(RESET)"; \
+		exit 1; \
+	fi
+	@# Outer loop reads the manifest on fd 0; redirect each recursive make from
+	@# /dev/null so it can't swallow the rest of the manifest stream.
+	@set -e; \
+	while read -r name args || [ -n "$$name" ]; do \
+		case "$$name" in ''|\#*) continue;; esac; \
+		if [ -f "$(INSTANCES_DIR)/$$name/Makefile" ] && [ -z "$(FORCE)" ]; then \
+			printf '$(DIM)==  %s (exists — skipping; FORCE=1 to regenerate)$(RESET)\n' "$$name"; \
+			continue; \
+		fi; \
+		printf '$(BOLD)==> %s$(RESET)\n' "$$name"; \
+		$(MAKE) --no-print-directory init INSTANCE="$$name" ARGS="$$args $(if $(FORCE),--force,)" </dev/null; \
+	done < "$(INSTANCES_FILE)"
 
 # --- Upgrade ---------------------------------------------------------------
 ##@ Upgrade

@@ -63,6 +63,8 @@ make start | stop | restart | status | logs | foreground                # instan
 
 `make init` renders `instances/<name>/WORKFLOW.md` plus a self-contained `instances/<name>/Makefile` from the EEx templates at `elixir/priv/templates/`. Re-running `make init INSTANCE=<name>` against an existing instance refuses to overwrite unless `--force` is in `ARGS`; with `--force`, both files are regenerated together (one toggle, two files).
 
+`make init-all` is the bulk form: it reads a gitignored `instances.local` manifest (template: `instances.local.example`) with one `<name> <init-args>` per line and runs `make init` for each — skipping instances that already exist, or `FORCE=1` to regenerate all.
+
 The instance Makefile's `start`/`foreground` pass the `--i-understand-that-this-will-be-running-without-the-usual-guardrails` flag because Symphony runs Codex with `approval_policy: never` and `workspace-write` sandbox. Don't strip that flag.
 
 `LINEAR_API_KEY` is expected to come from `elixir/mise.local.toml` (gitignored) — the instance `check-key` target queries the mise env. Each instance's `tracker.project_slug` should be unique; two instances polling the same project will race for the same issues.

@@ -38,6 +38,25 @@ make start              # `make logs`, `make stop`, `make help` from here
 Each `make init` creates an isolated `instances/<name>/`; multiple instances can run in parallel
 from the same checkout.
 
+Running several instances? Keep them in a local manifest instead of re-typing `make init`. Copy
+`instances.local.example` to `instances.local` (gitignored), list one instance per line as
+`<name> <init-args>` — the first token is the instance name, the rest is forwarded verbatim to
+`make init` (blank lines and `#` comments are ignored):
+
+```
+# instances.local
+symphony --linear-project https://linear.app/<org>/project/<slug> --repo-url git@github.com:<org>/symphony.git --agent claude --port 3454
+entry    --linear-project https://linear.app/<org>/project/<slug> --repo-url git@github.com:<org>/entry.git    --agent codex  --port 3455
+```
+
+Then generate them all at once:
+
+```bash
+cp instances.local.example instances.local   # then edit: one instance per line
+make init-all                                 # creates missing instances, skips existing
+make init-all FORCE=1                          # regenerate all (passes --force)
+```
+
 ## Upgrading after a `git pull`
 
 ```bash
