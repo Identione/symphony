@@ -1,0 +1,13 @@
+# instances.local — one Symphony instance per line, read by `make init-all`.
+#
+# Format:  <instance-name>  <args forwarded verbatim to `symphony init`>
+#   - First whitespace-delimited token = instance name (A-Za-z0-9_.-).
+#   - Everything after it = ARGS (same flags as `make init ARGS="..."`).
+#   - Blank lines and lines starting with '#' are ignored.
+#
+# This file is the committed template. Copy it (the copy is gitignored):
+#   cp instances.local.example instances.local
+#
+# `make init-all` skips instances that already exist; FORCE=1 regenerates all.
+
+symphony --linear-project https://linear.app/identione/project/symphony-implementation-2e32f5d86d8c --repo-url https://github.com/Identione/symphony.git --agent claude --port 3454
