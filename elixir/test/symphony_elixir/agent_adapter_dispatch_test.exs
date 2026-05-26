@@ -218,11 +218,28 @@ defmodule SymphonyElixir.AgentAdapterDispatchTest do
     end
 
     test "validate!/0 expands `~` in agent.claude.config_dir" do
-      claude_dir = Path.join(System.get_env("HOME"), ".claude")
+      # `Path.expand("~")` resolves to the VM-start home and ignores any
+      # runtime `HOME` override (the describe setup repoints HOME at a tmpdir),
+      # so to exercise `~` expansion end-to-end the credentials must live at the
+      # real expanded location. Back up and restore whatever is already there.
+      claude_dir = Path.expand("~/.claude")
+      creds_path = Path.join(claude_dir, ".credentials.json")
+      dir_existed? = File.dir?(claude_dir)
+      previous_creds = File.read(creds_path)
+
+      on_exit(fn ->
+        case previous_creds do
+          {:ok, body} -> File.write!(creds_path, body)
+          _ -> File.rm_rf!(creds_path)
+        end
+
+        unless dir_existed?, do: File.rm_rf!(claude_dir)
+      end)
+
       File.mkdir_p!(claude_dir)
 
       File.write!(
-        Path.join(claude_dir, ".credentials.json"),
+        creds_path,
         ~s({"claudeAiOauth": {"accessToken": "fake"}})
       )
 

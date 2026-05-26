@@ -15,6 +15,9 @@ defmodule SymphonyElixir.ClaudeAppServerTest do
       Path.join(System.tmp_dir!(), "claude-app-server-test-#{System.unique_integer([:positive])}")
 
     File.mkdir_p!(workspace)
+    # Canonicalize so assertions match the symlink-resolved path the adapter
+    # returns (e.g. macOS /tmp -> /private/tmp).
+    {:ok, workspace} = SymphonyElixir.PathSafety.canonicalize(workspace)
     on_exit(fn -> File.rm_rf(workspace) end)
     {:ok, workspace: workspace}
   end

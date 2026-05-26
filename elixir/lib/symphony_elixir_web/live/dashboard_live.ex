@@ -53,6 +53,11 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="hero-copy">
               Current state, retry pressure, token usage, and orchestration health for the active Symphony runtime.
             </p>
+            <%= if @payload[:linear_project] do %>
+              <p class="hero-meta">
+                Linear project: <span class="hero-meta-value"><%= @payload.linear_project %></span>
+              </p>
+            <% end %>
           </div>
 
           <div class="status-stack">
