@@ -17,6 +17,16 @@ The agent keeps running until the issue reaches a terminal state. During the
 session, agents get a client-side `linear_graphql` tool for raw Linear API
 access.
 
+When the agent reports that it needs operator input — a `turn/*` input
+request, an approval prompt, or an MCP elicitation — Symphony stops retrying
+that issue, keeps it *claimed*, and marks it **blocked**, surfacing it in the
+runtime state, JSON API (`status: "blocked"`), and dashboard. Blocked entries
+are in memory only: restarting the orchestrator clears them, so a still-active
+issue can become a dispatch candidate again. This input-blocked surfacing
+applies to the **Codex adapter only** — the Claude SDK sidecar runs unattended
+(`permission_mode: dontAsk`) and resolves permission decisions itself rather
+than reporting an input-required blocker.
+
 ## Quick start
 
 ```bash

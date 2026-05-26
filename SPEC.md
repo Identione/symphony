@@ -276,8 +276,13 @@ Fields:
 - `poll_interval_ms` (current effective poll interval)
 - `max_concurrent_agents` (current effective global concurrency limit)
 - `running` (map `issue_id -> running entry`)
-- `claimed` (set of issue IDs reserved/running/retrying)
+- `claimed` (set of issue IDs reserved/running/retrying/blocked)
 - `retry_attempts` (map `issue_id -> RetryEntry`)
+- `blocked` (map `issue_id -> blocked entry`; issues paused because the agent reported it needs
+  operator input/approval/MCP elicitation. Blocked issues stay `claimed` and are excluded from
+  dispatch until reconciliation observes a Linear state change. In-memory only; cleared on restart.
+  Surfaced by the Codex adapter only — the Claude sidecar runs unattended and does not report
+  input-required blockers.)
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
 - `agent_totals` (aggregate tokens + runtime seconds; tracked per active adapter — codex totals
   and claude totals are stored separately so adapter-specific cache fields stay typed correctly)
