@@ -168,6 +168,37 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
     assert claude.verbose_logging == true
   end
 
+  test "agent.claude.effort defaults to nil (SDK default)" do
+    assert {:ok, settings} = parse(~s|tracker: {kind: linear, project_slug: p, api_key: t}\n|)
+    assert settings.agent.claude.effort == nil
+  end
+
+  test "agent.claude.effort parses a valid level" do
+    yaml = """
+    tracker: {kind: linear, project_slug: p, api_key: t}
+    agent:
+      kind: claude
+      claude:
+        effort: xhigh
+    """
+
+    assert {:ok, settings} = parse(yaml)
+    assert settings.agent.claude.effort == "xhigh"
+  end
+
+  test "agent.claude rejects an unsupported effort level" do
+    yaml = """
+    tracker: {kind: linear, project_slug: p, api_key: t}
+    agent:
+      kind: claude
+      claude:
+        effort: ultra
+    """
+
+    assert {:error, {:invalid_workflow_config, message}} = parse(yaml)
+    assert message =~ "agent.claude.effort"
+  end
+
   test "agent.claude.config_dir defaults to nil" do
     assert {:ok, settings} = parse(~s|tracker: {kind: linear, project_slug: p, api_key: t}\n|)
     assert settings.agent.claude.config_dir == nil
@@ -308,6 +339,10 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
 
     test "Claude.system_prompt_presets/0 lists supported presets" do
       assert Claude.system_prompt_presets() == ["claude_code", "minimal"]
+    end
+
+    test "Claude.efforts/0 lists supported reasoning effort levels" do
+      assert Claude.efforts() == ["low", "medium", "high", "xhigh", "max"]
     end
   end
 

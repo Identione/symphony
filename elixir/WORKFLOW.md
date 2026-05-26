@@ -55,6 +55,9 @@ agent:
     # session end — accepted tradeoff (auth reads still pass through).
     config_dir: ~/.claude-identione
     model: claude-opus-4-7
+    # Reasoning effort: low|medium|high|xhigh|max. Unset → SDK default (high).
+    # `xhigh` is Opus 4.7-only (the parallel to Codex's model_reasoning_effort).
+    # effort: xhigh
     # `dontAsk` denies anything not in `allowed_tools` without prompting,
     # which is what we want for unattended runs. The whitelist below mirrors
     # what Codex's `approval_policy: never` + workspace-write sandbox grants:

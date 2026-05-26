@@ -205,6 +205,10 @@ defmodule SymphonyElixir.Config.Schema do
 
     @permission_modes ~w(default acceptEdits plan dontAsk bypassPermissions)
     @system_prompt_presets ~w(claude_code minimal)
+    # Claude Agent SDK reasoning-effort levels (ClaudeAgentOptions.effort). The
+    # parallel to Codex's `model_reasoning_effort`. `xhigh` is Opus 4.7-only and
+    # falls back to `high` on other models. Unset → the SDK default (`high`).
+    @efforts ~w(low medium high xhigh max)
 
     # The sidecar Port spawns with `cd: workspace`, so a workspace-relative
     # path here would not resolve to the priv dir. `$SYMPHONY_CLAUDE_PRIV_DIR`
@@ -226,6 +230,10 @@ defmodule SymphonyElixir.Config.Schema do
       field(:setting_sources, {:array, :string}, default: [])
       field(:max_turns, :integer)
       field(:max_budget_usd, :float)
+      # Reasoning effort forwarded to the sidecar's ClaudeAgentOptions. No
+      # default — when unset Symphony sends nothing and the SDK picks its own
+      # default (`high`).
+      field(:effort, :string)
       field(:extra_env, :map, default: %{})
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       # Cold sidecar startup (uv → Python interpreter → claude_agent_sdk
@@ -257,6 +265,9 @@ defmodule SymphonyElixir.Config.Schema do
     @spec system_prompt_presets() :: [String.t()]
     def system_prompt_presets, do: @system_prompt_presets
 
+    @spec efforts() :: [String.t()]
+    def efforts, do: @efforts
+
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
@@ -272,6 +283,7 @@ defmodule SymphonyElixir.Config.Schema do
           :setting_sources,
           :max_turns,
           :max_budget_usd,
+          :effort,
           :extra_env,
           :turn_timeout_ms,
           :read_timeout_ms,
@@ -284,6 +296,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_required([:command])
       |> validate_inclusion(:permission_mode, @permission_modes)
       |> validate_inclusion(:system_prompt_preset, @system_prompt_presets)
+      |> validate_inclusion(:effort, @efforts)
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
