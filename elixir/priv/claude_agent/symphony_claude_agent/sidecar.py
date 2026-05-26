@@ -273,6 +273,9 @@ def build_options_payload(init_envelope: dict[str, Any]) -> dict[str, Any]:
     if init_envelope.get("max_budget_usd") is not None:
         payload["max_budget_usd"] = init_envelope["max_budget_usd"]
 
+    if init_envelope.get("effort"):
+        payload["effort"] = init_envelope["effort"]
+
     if init_envelope.get("verbose_logging"):
         # Surface partial-stream events and hook lifecycle messages so a
         # reader can see Claude's per-token output and PreToolUse/PostToolUse

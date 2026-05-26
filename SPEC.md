@@ -740,6 +740,9 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.claude.setting_sources`: list of strings, default `[]`
 - `agent.claude.max_turns`: positive integer or null, default implementation-defined
 - `agent.claude.max_budget_usd`: number or null, default `null`
+- `agent.claude.effort`: enum (`low` | `medium` | `high` | `xhigh` | `max`) or null,
+  default `null` (SDK default, `high`). Reasoning-effort level forwarded to the Claude Agent
+  SDK; `xhigh` requires Opus 4.7 and falls back to `high` on other models.
 - `agent.claude.extra_env`: map, default `{}`
 - `agent.claude.turn_timeout_ms`: integer, default `3600000`
 - `agent.claude.read_timeout_ms`: integer, default `5000`
@@ -1380,6 +1383,7 @@ Session startup:
   - `setting_sources` from `agent.claude.setting_sources` (default `[]` — do NOT inherit
     `.claude/settings.json` or other host-level configuration).
   - `max_turns` from `agent.claude.max_turns` when set.
+  - `effort` from `agent.claude.effort` when set.
   - `mcp_servers` containing an in-process MCP server constructed via
     `create_sdk_mcp_server(name, version, tools=[...])` that registers Symphony's advertised
     tools (notably `linear_graphql`, when implemented) using the SDK's `@tool` decorator. Tools

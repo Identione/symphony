@@ -78,6 +78,18 @@ def test_build_options_payload_minimal_preset() -> None:
     assert payload["max_turns"] == 7
 
 
+def test_build_options_payload_forwards_effort_when_set() -> None:
+    payload = build_options_payload(
+        {"type": "init", "cwd": "/tmp/ws", "effort": "xhigh"}
+    )
+    assert payload["effort"] == "xhigh"
+
+
+def test_build_options_payload_omits_effort_when_unset() -> None:
+    payload = build_options_payload({"type": "init", "cwd": "/tmp/ws"})
+    assert "effort" not in payload
+
+
 def test_build_options_payload_requires_cwd() -> None:
     with pytest.raises(ValueError):
         build_options_payload({"type": "init"})

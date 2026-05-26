@@ -272,6 +272,7 @@ defmodule SymphonyElixir.Claude.AppServer do
         setting_sources: Map.get(config, :setting_sources, []),
         max_turns: Map.get(config, :max_turns),
         max_budget_usd: Map.get(config, :max_budget_usd),
+        effort: Map.get(config, :effort),
         verbose_logging: Map.get(config, :verbose_logging, false),
         # Push the canonical Codex `linear_graphql` schema (and any future
         # client-side tools) into the sidecar so it can register MCP tools

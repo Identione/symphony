@@ -158,6 +158,11 @@ repo:
   `instances/<name>/WORKFLOW.md`. The jai-wrapped form requires Linux with
   kernel ≥ 6.13.
 
+Reasoning effort: Codex is tuned via `--config model_reasoning_effort=…` in its
+`command:`; the Claude adapter takes `agent.claude.effort`
+(`low|medium|high|xhigh|max`). Both default to the agent's own default
+(`high` for the Claude SDK) when unset; `xhigh` requires Opus 4.7.
+
 Detailed codex/claude policy knobs (`approval_policy`, `thread_sandbox`,
 `turn_sandbox_policy`, `claude.config_dir`, `permission_mode`, the
 Codex 0.115+ `.git` deny-rule workaround with `jai`/`default_permissions`
