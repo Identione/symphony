@@ -103,13 +103,18 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       stale_workspace = Path.join(workspace_root, "MT-EMPTY")
       File.mkdir_p!(stale_workspace)
 
+      # Workspace.create_for_issue returns a symlink-resolved path, so compare
+      # against the canonicalized root (e.g. macOS /tmp -> /private/tmp).
+      {:ok, canonical_root} = SymphonyElixir.PathSafety.canonicalize(workspace_root)
+      canonical_stale = Path.join(canonical_root, "MT-EMPTY")
+
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
         hook_after_create: "echo bootstrapped > README.md"
       )
 
       assert {:ok, workspace} = Workspace.create_for_issue("MT-EMPTY")
-      assert workspace == stale_workspace
+      assert workspace == canonical_stale
       assert File.read!(Path.join(workspace, "README.md")) == "bootstrapped\n"
     after
       File.rm_rf(workspace_root)

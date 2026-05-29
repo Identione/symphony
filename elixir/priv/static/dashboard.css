@@ -184,6 +184,21 @@ pre,
   font-size: 1rem;
 }
 
+.hero-meta {
+  margin: 0.75rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.hero-meta-value {
+  color: var(--ink);
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
 .status-stack {
   display: grid;
   justify-items: end;

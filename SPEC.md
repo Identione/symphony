@@ -1757,11 +1757,15 @@ Minimum endpoints:
 - `GET /api/v1/state`
   - Returns a summary view of the current system state (running sessions, retry queue/delays,
     aggregate token/runtime totals, latest rate limits, and any additional tracked summary fields).
+  - Top-level `linear_project` mirrors `tracker.project_slug` — the tracker project the runtime is
+    attached to — so dashboards and API consumers can label which project the runtime serves
+    (`null` for non-Linear trackers without a configured slug).
   - Suggested response shape:
 
     ```json
     {
       "generated_at": "2026-02-24T20:15:30Z",
+      "linear_project": "my-project",
       "counts": {
         "running": 2,
         "retrying": 1

@@ -23,6 +23,7 @@ defmodule SymphonyElixirWeb.Presenter do
         %{
           generated_at: generated_at,
           agent_kind: active_agent_kind(),
+          linear_project: linear_project(),
           counts: %{
             running: length(snapshot.running),
             retrying: length(snapshot.retrying),
@@ -207,6 +208,10 @@ defmodule SymphonyElixirWeb.Presenter do
       SymphonyElixir.Claude.AppServer -> "claude"
       _ -> "codex"
     end
+  end
+
+  defp linear_project do
+    Config.settings!().tracker.project_slug
   end
 
   defp retry_issue_payload(retry) do
