@@ -506,8 +506,7 @@ defmodule SymphonyElixir.CLI.Init do
       repo_url_shell: shell_quote(repo_url),
       agent_kind: agent,
       agent_block: both_agent_blocks(),
-      server_block: render_server_block(port, host),
-      prompt_body: prompt_body()
+      server_block: render_server_block(port, host)
     ]
   end
 
@@ -591,28 +590,6 @@ defmodule SymphonyElixir.CLI.Init do
           - NotebookEdit
           - mcp__symphony__linear_graphql
         setting_sources: []
-    """
-    |> String.trim_trailing("\n")
-  end
-
-  defp prompt_body do
-    """
-    You are working on a Linear ticket `{{ issue.identifier }}`.
-
-    Title: {{ issue.title }}
-    URL: {{ issue.url }}
-    Status: {{ issue.state }}
-
-    {% if issue.description %}
-    Description:
-    {{ issue.description }}
-    {% else %}
-    No description provided.
-    {% endif %}
-
-    Operate autonomously end-to-end. Use the `linear_graphql` tool to update the
-    issue and post comments. Stop only when blocked by missing required
-    permissions or secrets.
     """
     |> String.trim_trailing("\n")
   end
