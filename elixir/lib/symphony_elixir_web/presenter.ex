@@ -4,6 +4,7 @@ defmodule SymphonyElixirWeb.Presenter do
   """
 
   alias SymphonyElixir.{Config, Orchestrator, StatusDashboard}
+  alias SymphonyElixirWeb.HeroTint
 
   @empty_claude_totals %{
     input_tokens: 0,
@@ -20,10 +21,13 @@ defmodule SymphonyElixirWeb.Presenter do
 
     case Orchestrator.snapshot(orchestrator, snapshot_timeout_ms) do
       %{} = snapshot ->
+        project = linear_project()
+
         %{
           generated_at: generated_at,
           agent_kind: active_agent_kind(),
-          linear_project: linear_project(),
+          linear_project: project,
+          hero_tint: HeroTint.inline_style(project),
           counts: %{
             running: length(snapshot.running),
             retrying: length(snapshot.retrying),

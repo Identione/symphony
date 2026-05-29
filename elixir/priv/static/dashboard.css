@@ -152,6 +152,8 @@ pre,
   border-radius: 28px;
   padding: clamp(1.25rem, 3vw, 2rem);
   box-shadow: var(--shadow-lg);
+  background: var(--hero-tint-bg, var(--card));
+  border-color: var(--hero-tint-border, rgba(217, 217, 227, 0.82));
 }
 
 .hero-grid {
