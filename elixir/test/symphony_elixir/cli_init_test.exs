@@ -130,9 +130,14 @@ defmodule SymphonyElixir.CLI.InitTest do
     assert contents =~ "Duplicate"
     refute contents =~ "Cancelled"
     refute contents =~ "Closed"
-    refute contents =~ "Human Review"
-    refute contents =~ "Rework"
-    refute contents =~ "Merging"
+    # The generated workflow now embeds the full canonical state machine and
+    # prompt body, so instances drive Human Review / Merging / Rework exactly
+    # like the maintainer's elixir/WORKFLOW.md.
+    assert contents =~ "Human Review"
+    assert contents =~ "Rework"
+    assert contents =~ "Merging"
+    assert contents =~ "## Symphony Workpad"
+    assert contents =~ "PR feedback sweep protocol"
     assert contents =~ "kind: codex"
     assert contents =~ "command: codex app-server"
     assert contents =~ "git clone --depth 1"
@@ -146,6 +151,25 @@ defmodule SymphonyElixir.CLI.InitTest do
 
     assert output_message =~
              "symphony start --i-understand-that-this-will-be-running-without-the-usual-guardrails #{output}"
+  end
+
+  test "template prompt body stays byte-identical to the canonical elixir/WORKFLOW.md body" do
+    # Single-source guard: the init template inlines the canonical prompt body so
+    # generated instances behave exactly like elixir/WORKFLOW.md. If either file's
+    # body drifts from the other, this fails loudly and both must be updated together.
+    {:ok, template} =
+      File.read(Application.app_dir(:symphony_elixir, "priv/templates/workflow.md.eex"))
+
+    {:ok, canonical} = File.read(Path.join(File.cwd!(), "WORKFLOW.md"))
+
+    marker = "You are working on a Linear ticket"
+
+    body_of = fn contents ->
+      [_front, body] = String.split(contents, marker, parts: 2)
+      String.trim(marker <> body)
+    end
+
+    assert body_of.(template) == body_of.(canonical)
   end
 
   test "prints next-step commands using whichever invocation form the operator used" do
