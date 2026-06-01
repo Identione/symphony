@@ -22,10 +22,82 @@ defmodule SymphonyElixir.AgentRunner do
         :ok
 
       {:error, reason} ->
+        classification = classify_failure(reason)
+        send_failure_classification(codex_update_recipient, issue, reason, classification)
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
         raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
     end
   end
+
+  # IDE-71 adapter contract: a classified error arrives as `{tag, code, body}`
+  # with `code` already atomized. Anything else maps to `:unknown`.
+  @classified_tags [:claude_sdk_error, :turn_failed, :codex_error_notification]
+
+  @doc false
+  @spec classify_failure(term()) :: %{error_code: atom(), retry_after_ms: pos_integer() | nil}
+  def classify_failure({tag, code, body}) when tag in @classified_tags and is_atom(code),
+    do: %{error_code: code, retry_after_ms: parse_retry_after(body)}
+
+  def classify_failure(_other), do: %{error_code: :unknown, retry_after_ms: nil}
+
+  # Codex puts upstream HTTP headers in `params.error.headers`; Claude only
+  # carries rendered exception text. The map clauses cover the structured case;
+  # the inspect-fallback catches odd nestings without walking the whole tree.
+  defp parse_retry_after(payload) when is_map(payload) do
+    parse_retry_after_from_map(payload) ||
+      parse_retry_after(inspect(payload, limit: 50, printable_limit: 512))
+  end
+
+  defp parse_retry_after(text) when is_binary(text) do
+    case Regex.run(~r/retry[\s_-]?after[^\d]{0,8}(\d+)/i, text) do
+      [_match, seconds] ->
+        case Integer.parse(seconds) do
+          {n, _} when n > 0 -> n * 1_000
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp parse_retry_after(_other), do: nil
+
+  defp parse_retry_after_from_map(%{"error" => %{"headers" => headers}}) when is_map(headers) do
+    headers
+    |> Enum.find_value(fn {k, v} ->
+      if is_binary(k) and String.downcase(k) == "retry-after", do: v
+    end)
+    |> retry_after_value_to_ms()
+  end
+
+  defp parse_retry_after_from_map(%{"retry_after" => value}), do: retry_after_value_to_ms(value)
+  defp parse_retry_after_from_map(%{"retryAfter" => value}), do: retry_after_value_to_ms(value)
+
+  defp parse_retry_after_from_map(%{"error" => %{"retry_after" => value}}),
+    do: retry_after_value_to_ms(value)
+
+  defp parse_retry_after_from_map(_payload), do: nil
+
+  defp retry_after_value_to_ms(value) when is_integer(value) and value > 0, do: value * 1_000
+
+  defp retry_after_value_to_ms(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {n, _} when n > 0 -> n * 1_000
+      _ -> nil
+    end
+  end
+
+  defp retry_after_value_to_ms(_value), do: nil
+
+  defp send_failure_classification(recipient, %Issue{id: issue_id}, reason, classification)
+       when is_binary(issue_id) and is_pid(recipient) do
+    summary = reason |> inspect(limit: 5, printable_limit: 256) |> cap(@log_value_limit)
+    send(recipient, {:agent_failure_classified, issue_id, Map.put(classification, :reason_summary, summary)})
+    :ok
+  end
+
+  defp send_failure_classification(_recipient, _issue, _reason, _classification), do: :ok
 
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")

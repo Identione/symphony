@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Orchestrator.RetryPolicy
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
@@ -169,6 +170,21 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  # Fired by AgentRunner before it raises so the `:DOWN` handler downstream
+  # has a structured error code to branch on. Missing classification
+  # (workspace crash, hook failure pre-classify) is treated as `:unknown`.
+  def handle_info({:agent_failure_classified, issue_id, classification}, %{running: running} = state)
+      when is_binary(issue_id) and is_map(classification) do
+    case Map.get(running, issue_id) do
+      nil ->
+        {:noreply, state}
+
+      running_entry ->
+        updated = Map.put(running_entry, :last_failure_classification, classification)
+        {:noreply, %{state | running: Map.put(running, issue_id, updated)}}
+    end
+  end
+
   def handle_info(
         {:codex_worker_update, issue_id, %{event: _, timestamp: _} = update},
         %{running: running} = state
@@ -239,16 +255,40 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_agent_down(state, issue_id, running_entry, session_id, reason) do
-    Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+    classification = Map.get(running_entry, :last_failure_classification) || %{}
+    error_code = Map.get(classification, :error_code, :unknown)
+    retry_after_ms = Map.get(classification, :retry_after_ms)
+    next_attempt = next_retry_attempt_from_running(running_entry) || 1
 
-    next_attempt = next_retry_attempt_from_running(running_entry)
+    case RetryPolicy.decide(error_code, next_attempt, retry_after_ms, Config.settings!()) do
+      :no_retry ->
+        block_for_no_retry(state, issue_id, running_entry, session_id, reason, error_code)
 
-    schedule_issue_retry(state, issue_id, next_attempt, %{
-      identifier: running_entry.identifier,
-      error: "agent exited: #{inspect(reason)}",
-      worker_host: Map.get(running_entry, :worker_host),
-      workspace_path: Map.get(running_entry, :workspace_path)
-    })
+      {:retry, delay_ms} ->
+        Logger.warning(
+          "Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)} " <>
+            "error_code=#{error_code}; scheduling retry in #{delay_ms}ms (attempt #{next_attempt})"
+        )
+
+        schedule_issue_retry(state, issue_id, next_attempt, %{
+          identifier: running_entry.identifier,
+          error: "agent exited: #{inspect(reason)} (#{error_code})",
+          worker_host: Map.get(running_entry, :worker_host),
+          workspace_path: Map.get(running_entry, :workspace_path),
+          delay_ms_override: delay_ms
+        })
+    end
+  end
+
+  defp block_for_no_retry(state, issue_id, running_entry, session_id, reason, error_code) do
+    error = "no retry for #{error_code}: #{inspect(reason)}"
+
+    Logger.warning(
+      "Agent task halted for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} " <>
+        "session_id=#{session_id} error_code=#{error_code}: #{error}"
+    )
+
+    block_issue_from_entry(state, issue_id, running_entry, error)
   end
 
   defp maybe_dispatch(%State{} = state) do
@@ -1202,10 +1242,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
-    if metadata[:delay_type] == :continuation and attempt == 1 do
-      @continuation_retry_delay_ms
-    else
-      failure_retry_delay(attempt)
+    cond do
+      metadata[:delay_type] == :continuation and attempt == 1 ->
+        @continuation_retry_delay_ms
+
+      is_integer(metadata[:delay_ms_override]) and metadata[:delay_ms_override] > 0 ->
+        metadata[:delay_ms_override]
+
+      true ->
+        failure_retry_delay(attempt)
     end
   end
 
