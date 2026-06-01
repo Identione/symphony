@@ -256,12 +256,25 @@ re-run from scratch with a fresh workspace state.
 
 A run that fails because of a deterministic cause (account out of credit,
 context window permanently overflowed for this prompt, sidecar binary
-missing) **gets stuck**. There is no max-attempts ceiling; the issue
-loops at `agent.max_retry_backoff_ms` cadence (5 min default) with the
-same outcome each time. There is no Linear-side signal — no comment, no
-state change, no label — only the warning log line on each retry. An
-operator looking only at Linear sees "this issue has been In Progress for
-two days, what's happening?"
+missing) **gets stuck on the retry side, but IDE-73 closes the
+visibility gap.**
+
+After `agent.deterministic_failure_alert_threshold` (default 3) consecutive
+failures carrying the same structured `error_code` (IDE-71 taxonomy —
+`quota_exceeded`, `context_window_exhausted`, `invalid_request`,
+`claude_sidecar_exit`, `port_exit`), `SymphonyElixir.DeterministicFailure`
+appends a summary section to the existing `## Symphony Workpad` comment —
+or, if no workpad is found, posts a standalone blocker comment in line
+with the workflow's blocked-access escape hatch. After
+`agent.deterministic_failure_escalation_threshold` (default 5), it moves
+the issue to `agent.deterministic_failure_escalation_state` (default
+`"Human Review"`) so the polling loop stops re-dispatching it.
+
+Transient codes (`rate_limited`, `overloaded`, `turn_timeout`,
+`response_timeout`, `unknown`) reset the counter so a brief upstream blip
+never trips the threshold. Switching to a *different* deterministic code
+also restarts the streak from one, since the new failure mode deserves a
+fresh alert.
 
 ## Desired Behavior
 

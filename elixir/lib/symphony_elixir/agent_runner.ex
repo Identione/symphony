@@ -23,9 +23,25 @@ defmodule SymphonyElixir.AgentRunner do
 
       {:error, reason} ->
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-        raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+        # Carry the classified `error_code` (IDE-71 taxonomy) through the
+        # process exit so the orchestrator's :DOWN handler can branch on it
+        # without re-parsing `inspect(reason)`. The previous `raise
+        # RuntimeError` collapsed every failure into an opaque
+        # `{%RuntimeError{}, stacktrace}` exit reason.
+        exit({:agent_run_failed, classify_error_code(reason), reason})
     end
   end
+
+  @doc false
+  @spec classify_error_code(term()) :: atom()
+  def classify_error_code({:turn_failed, code, _params}) when is_atom(code), do: code
+  def classify_error_code({:codex_error_notification, code, _payload}) when is_atom(code), do: code
+  def classify_error_code({:claude_sdk_error, code, _msg}) when is_atom(code), do: code
+  def classify_error_code(:turn_timeout), do: :turn_timeout
+  def classify_error_code(:response_timeout), do: :response_timeout
+  def classify_error_code({:port_exit, _status}), do: :port_exit
+  def classify_error_code({:claude_sidecar_exit, _status}), do: :claude_sidecar_exit
+  def classify_error_code(_reason), do: :unknown
 
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")

@@ -1355,9 +1355,13 @@ defmodule SymphonyElixir.CoreTest do
         state: "In Progress"
       }
 
-      assert_raise RuntimeError, ~r/workspace_prepare_failed/, fn ->
-        AgentRunner.run(issue, nil, worker_host: "worker-a")
-      end
+      # AgentRunner.run/3 exits with the structured `{:agent_run_failed, code,
+      # reason}` tuple (IDE-73) so the orchestrator's :DOWN handler can branch
+      # on the classified `error_code` without re-parsing strings.
+      assert {:agent_run_failed, _code, reason} =
+               catch_exit(AgentRunner.run(issue, nil, worker_host: "worker-a"))
+
+      assert inspect(reason) =~ "workspace_prepare_failed"
 
       trace = File.read!(trace_file)
       assert trace =~ "worker-a bash -lc"

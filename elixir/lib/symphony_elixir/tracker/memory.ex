@@ -47,6 +47,22 @@ defmodule SymphonyElixir.Tracker.Memory do
     :ok
   end
 
+  @spec fetch_comments(String.t()) :: {:ok, [SymphonyElixir.Tracker.comment()]} | {:error, term()}
+  def fetch_comments(issue_id) do
+    comments =
+      :symphony_elixir
+      |> Application.get_env(:memory_tracker_comments, %{})
+      |> Map.get(issue_id, [])
+
+    {:ok, comments}
+  end
+
+  @spec update_comment(String.t(), String.t()) :: :ok | {:error, term()}
+  def update_comment(comment_id, body) do
+    send_event({:memory_tracker_comment_update, comment_id, body})
+    :ok
+  end
+
   defp configured_issues do
     Application.get_env(:symphony_elixir, :memory_tracker_issues, [])
   end

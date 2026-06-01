@@ -320,6 +320,14 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_retry_backoff_ms, :integer, default: 300_000)
       field(:max_concurrent_agents_by_state, :map, default: %{})
       field(:kind, :string, default: "codex")
+      # Deterministic-failure escalation (IDE-73). Tracks consecutive failures
+      # carrying the same structured `error_code` (IDE-71 taxonomy) — quota
+      # exhaustion, context-window overflow, sidecar binary missing, etc.
+      # Transient codes (`rate_limited`, `overloaded`) reset the counter and
+      # never trip these thresholds.
+      field(:deterministic_failure_alert_threshold, :integer, default: 3)
+      field(:deterministic_failure_escalation_threshold, :integer, default: 5)
+      field(:deterministic_failure_escalation_state, :string, default: "Human Review")
       embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
       embeds_one(:claude, Claude, on_replace: :update, defaults_to_struct: true)
     end
@@ -337,7 +345,10 @@ defmodule SymphonyElixir.Config.Schema do
           :max_turns,
           :max_retry_backoff_ms,
           :max_concurrent_agents_by_state,
-          :kind
+          :kind,
+          :deterministic_failure_alert_threshold,
+          :deterministic_failure_escalation_threshold,
+          :deterministic_failure_escalation_state
         ],
         empty_values: []
       )
@@ -347,8 +358,26 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
+      |> validate_number(:deterministic_failure_alert_threshold, greater_than: 0)
+      |> validate_number(:deterministic_failure_escalation_threshold, greater_than: 0)
+      |> validate_thresholds_order()
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
+    end
+
+    defp validate_thresholds_order(changeset) do
+      alert = get_field(changeset, :deterministic_failure_alert_threshold)
+      escalate = get_field(changeset, :deterministic_failure_escalation_threshold)
+
+      if is_integer(alert) and is_integer(escalate) and escalate < alert do
+        add_error(
+          changeset,
+          :deterministic_failure_escalation_threshold,
+          "must be >= deterministic_failure_alert_threshold"
+        )
+      else
+        changeset
+      end
     end
   end
 

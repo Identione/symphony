@@ -42,6 +42,7 @@ defmodule SymphonyElixir.TestSupport do
           Application.delete_env(:symphony_elixir, :workflow_file_path)
           Application.delete_env(:symphony_elixir, :memory_tracker_issues)
           Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+          Application.delete_env(:symphony_elixir, :memory_tracker_comments)
           File.rm_rf(workflow_root)
         end)
 
