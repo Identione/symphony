@@ -383,17 +383,18 @@ defmodule SymphonyElixir.Codex.AppServer do
         emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
         {:ok, :turn_completed}
 
-      {:ok, %{"method" => "turn/failed", "params" => _} = payload} ->
+      {:ok, %{"method" => "turn/failed", "params" => params} = payload} ->
         emit_turn_event(
           on_message,
           :turn_failed,
           payload,
           payload_string,
           port,
-          Map.get(payload, "params")
+          params
         )
 
-        {:error, {:turn_failed, Map.get(payload, "params")}}
+        code = classify_codex_error_code(params)
+        {:error, {:turn_failed, code, params}}
 
       {:ok, %{"method" => "turn/cancelled", "params" => _} = payload} ->
         emit_turn_event(
@@ -524,8 +525,9 @@ defmodule SymphonyElixir.Codex.AppServer do
             )
 
             error_payload = codex_error_payload(payload)
+            code = classify_codex_error_code(error_payload)
             Logger.warning("Codex error notification: #{inspect(error_payload)}")
-            {:error, {:codex_error_notification, error_payload}}
+            {:error, {:codex_error_notification, code, error_payload}}
 
           needs_input?(method, payload) ->
             emit_message(
@@ -582,6 +584,37 @@ defmodule SymphonyElixir.Codex.AppServer do
 
   defp codex_error_payload(%{"params" => params}), do: params
   defp codex_error_payload(payload), do: payload
+
+  defp classify_codex_error_code(%{"error" => error}) when is_map(error) do
+    code = Map.get(error, "code", "") |> to_string()
+    type = Map.get(error, "type", "") |> to_string()
+    status = Map.get(error, "status")
+    combined = String.downcase("#{code} #{type}")
+
+    cond do
+      status == 429 or String.contains?(combined, "rate_limit") or String.contains?(combined, "rate limit") ->
+        :rate_limited
+
+      status == 413 or String.contains?(combined, "context_length") or
+        String.contains?(combined, "context window") or String.contains?(combined, "token_limit") ->
+        :context_window_exhausted
+
+      status == 503 or String.contains?(combined, "overload") ->
+        :overloaded
+
+      status == 402 or String.contains?(combined, "quota") or String.contains?(combined, "credit") ->
+        :quota_exceeded
+
+      status == 400 or String.contains?(combined, "invalid_request") or
+          String.contains?(combined, "invalid request") ->
+        :invalid_request
+
+      true ->
+        :unknown
+    end
+  end
+
+  defp classify_codex_error_code(_), do: :unknown
 
   defp maybe_handle_approval_request(
          port,

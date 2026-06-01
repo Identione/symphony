@@ -381,7 +381,7 @@ defmodule SymphonyElixir.ClaudeAppServerTest do
 
       log =
         capture_log(fn ->
-          assert {:error, {:claude_sdk_error, "kaboom"}} =
+          assert {:error, {:claude_sdk_error, :unknown, "kaboom"}} =
                    AppServer.run_turn(session, "Go", issue(), turn_timeout_ms: 5_000)
         end)
 
@@ -421,7 +421,7 @@ defmodule SymphonyElixir.ClaudeAppServerTest do
     {:ok, session} =
       AppServer.start_session(workspace, config: %{default_claude_config() | command: cmd})
 
-    assert {:error, {:claude_sdk_error, "boom"}} =
+    assert {:error, {:claude_sdk_error, :unknown, "boom"}} =
              AppServer.run_turn(session, "Go", issue(), turn_timeout_ms: 5_000)
 
     AppServer.stop_session(session)
@@ -720,5 +720,63 @@ defmodule SymphonyElixir.ClaudeAppServerTest do
              AppServer.run_turn(session, "Go", issue(), turn_timeout_ms: 5_000)
 
     AppServer.stop_session(session)
+  end
+
+  describe "error_code classification" do
+    for {error_code, atom} <- [
+          {"rate_limited", :rate_limited},
+          {"context_window_exhausted", :context_window_exhausted},
+          {"overloaded", :overloaded},
+          {"quota_exceeded", :quota_exceeded},
+          {"invalid_request", :invalid_request}
+        ] do
+      test "error envelope with error_code=#{error_code} yields :#{atom}", %{workspace: workspace} do
+        error_code = unquote(error_code)
+        atom = unquote(atom)
+
+        cmd =
+          scripted_command_with_input(
+            [
+              envelope(%{type: "ready"}),
+              envelope(%{type: "system_init", session_id: "s-ec-#{error_code}"})
+            ],
+            [
+              envelope(%{
+                type: "error",
+                error: "upstream error",
+                category: "claude_sdk_error",
+                error_code: error_code
+              })
+            ]
+          )
+
+        {:ok, session} =
+          AppServer.start_session(workspace, config: %{default_claude_config() | command: cmd})
+
+        assert {:error, {:claude_sdk_error, ^atom, "upstream error"}} =
+                 AppServer.run_turn(session, "Go", issue(), turn_timeout_ms: 5_000)
+
+        AppServer.stop_session(session)
+      end
+    end
+
+    test "error envelope without error_code defaults to :unknown", %{workspace: workspace} do
+      cmd =
+        scripted_command_with_input(
+          [
+            envelope(%{type: "ready"}),
+            envelope(%{type: "system_init", session_id: "s-ec-unk"})
+          ],
+          [envelope(%{type: "error", error: "mystery", category: "claude_sdk_error"})]
+        )
+
+      {:ok, session} =
+        AppServer.start_session(workspace, config: %{default_claude_config() | command: cmd})
+
+      assert {:error, {:claude_sdk_error, :unknown, "mystery"}} =
+               AppServer.run_turn(session, "Go", issue(), turn_timeout_ms: 5_000)
+
+      AppServer.stop_session(session)
+    end
   end
 end

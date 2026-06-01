@@ -47,6 +47,54 @@ CLAUDE_CODE_SYSTEM_PROMPT_PRESET = {"type": "preset", "preset": "claude_code"}
 # chars per value) per `elixir/docs/logging.md`.
 _RENDER_TEXT_LIMIT = 1024
 
+# Keywords for mapping exception messages to structured error codes.
+_CONTEXT_WINDOW_KEYWORDS = frozenset(
+    ["context window", "context_window", "context length", "context_length", "token limit"]
+)
+_RATE_LIMIT_KEYWORDS = frozenset(["rate limit", "rate_limit", "ratelimit", "ratelimited"])
+_OVERLOADED_KEYWORDS = frozenset(["overloaded", "overload"])
+_QUOTA_KEYWORDS = frozenset(["credit balance", "quota exceeded", "quota_exceeded", "billing"])
+_INVALID_REQUEST_KEYWORDS = frozenset(["invalid request", "invalid_request"])
+
+
+def _classify_from_message(msg: str) -> str:
+    """Return an error code by scanning the lowercased message for known keywords."""
+    lower = msg.lower()
+    if any(kw in lower for kw in _CONTEXT_WINDOW_KEYWORDS):
+        return "context_window_exhausted"
+    if any(kw in lower for kw in _RATE_LIMIT_KEYWORDS):
+        return "rate_limited"
+    if any(kw in lower for kw in _OVERLOADED_KEYWORDS):
+        return "overloaded"
+    if any(kw in lower for kw in _QUOTA_KEYWORDS):
+        return "quota_exceeded"
+    if any(kw in lower for kw in _INVALID_REQUEST_KEYWORDS):
+        return "invalid_request"
+    return "unknown"
+
+
+def _classify_sdk_error(exc: BaseException) -> str:
+    """Map an SDK exception to a structured error code.
+
+    Checks SDK-specific class hierarchy first, then falls back to keyword
+    scanning of the string representation for ProcessError cases where the
+    CLI embeds the upstream HTTP reason in its message.
+    """
+    if _SDK_AVAILABLE:
+        try:
+            from claude_agent_sdk._errors import (  # type: ignore[import-not-found]
+                CLINotFoundError,
+                ProcessError,
+            )
+
+            if isinstance(exc, CLINotFoundError):
+                return "unknown"
+            if isinstance(exc, ProcessError):
+                return _classify_from_message(str(exc))
+        except ImportError:
+            pass
+    return _classify_from_message(str(exc))
+
 
 # Mirrors the canonical schema in
 # elixir/lib/symphony_elixir/codex/dynamic_tool.ex (`@linear_graphql_input_schema`).
@@ -431,12 +479,12 @@ async def _handle_init(state: SessionState, env: dict[str, Any]) -> None:
 async def _handle_turn(state: SessionState, env: dict[str, Any]) -> None:
     client = state.client
     if client is None:
-        emit({"type": "error", "error": "turn before init", "category": "claude_sdk_error"})
+        emit({"type": "error", "error": "turn before init", "category": "claude_sdk_error", "error_code": "invalid_request"})
         return
 
     prompt = env.get("prompt", "")
     if not isinstance(prompt, str) or not prompt:
-        emit({"type": "error", "error": "turn.prompt missing", "category": "claude_sdk_error"})
+        emit({"type": "error", "error": "turn.prompt missing", "category": "claude_sdk_error", "error_code": "invalid_request"})
         return
 
     try:
@@ -450,6 +498,7 @@ async def _handle_turn(state: SessionState, env: dict[str, Any]) -> None:
                 "type": "error",
                 "error": f"{type(exc).__name__}: {exc}",
                 "category": "claude_sdk_error",
+                "error_code": _classify_sdk_error(exc),
                 "trace": traceback.format_exc(),
             }
         )
@@ -594,10 +643,10 @@ async def _serve() -> None:
         try:
             envelope = parse_line(line)
         except ValueError as exc:
-            emit({"type": "error", "error": str(exc), "category": "claude_sdk_error"})
+            emit({"type": "error", "error": str(exc), "category": "claude_sdk_error", "error_code": "invalid_request"})
             continue
         except json.JSONDecodeError as exc:
-            emit({"type": "error", "error": f"malformed json: {exc}", "category": "claude_sdk_error"})
+            emit({"type": "error", "error": f"malformed json: {exc}", "category": "claude_sdk_error", "error_code": "invalid_request"})
             continue
 
         msg_type = envelope.get("type")
@@ -611,6 +660,7 @@ async def _serve() -> None:
                         "type": "error",
                         "error": "turn already in progress; ignoring concurrent turn envelope",
                         "category": "claude_sdk_error",
+                        "error_code": "invalid_request",
                     }
                 )
                 continue
@@ -647,6 +697,7 @@ async def _drive_safe(state: SessionState, envelope: dict[str, Any]) -> None:
                 "type": "error",
                 "error": f"{type(exc).__name__}: {exc}",
                 "category": "claude_sdk_error",
+                "error_code": _classify_sdk_error(exc),
                 "trace": traceback.format_exc(),
             }
         )

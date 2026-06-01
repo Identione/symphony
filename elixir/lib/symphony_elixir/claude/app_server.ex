@@ -306,8 +306,9 @@ defmodule SymphonyElixir.Claude.AppServer do
         Process.delete(:claude_temp_port)
         {:ok, leftover}
 
-      {:ok, %{type: :error, error: msg}, _leftover} ->
-        {:error, {:claude_sdk_error, msg}}
+      {:ok, %{type: :error, error: msg} = env, _leftover} ->
+        code = to_error_code(Map.get(env, :error_code))
+        {:error, {:claude_sdk_error, code, msg}}
 
       {:ok, %{type: :log}, leftover} ->
         await_ready(port, leftover, timeout_ms)
@@ -390,8 +391,9 @@ defmodule SymphonyElixir.Claude.AppServer do
     {:ok, build_turn_result(session, env)}
   end
 
-  defp handle_envelope({:ok, %{type: :error, error: msg}, _leftover}, _session, _context, _buffer) do
-    {:error, {:claude_sdk_error, msg}}
+  defp handle_envelope({:ok, %{type: :error, error: msg} = env, _leftover}, _session, _context, _buffer) do
+    code = to_error_code(Map.get(env, :error_code))
+    {:error, {:claude_sdk_error, code, msg}}
   end
 
   defp handle_envelope({:ok, %{type: :tool_call} = env, leftover}, session, context, _buffer) do
@@ -442,6 +444,13 @@ defmodule SymphonyElixir.Claude.AppServer do
   defp handle_envelope({:error, reason}, _session, _context, _buffer) do
     {:error, reason}
   end
+
+  defp to_error_code("context_window_exhausted"), do: :context_window_exhausted
+  defp to_error_code("rate_limited"), do: :rate_limited
+  defp to_error_code("overloaded"), do: :overloaded
+  defp to_error_code("quota_exceeded"), do: :quota_exceeded
+  defp to_error_code("invalid_request"), do: :invalid_request
+  defp to_error_code(_), do: :unknown
 
   defp dispatch_tool_call(session, env, tool_executor) do
     name = Map.get(env, :name)
