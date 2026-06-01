@@ -1530,7 +1530,7 @@ defmodule SymphonyElixir.AppServerTest do
 
       log =
         capture_log(fn ->
-          assert {:error, {:codex_error_notification, %{"message" => "model rejected"}}} =
+          assert {:error, {:codex_error_notification, _code, %{"message" => "model rejected"}}} =
                    AppServer.run(workspace, "Trigger Codex error", issue, on_message: on_message)
         end)
 

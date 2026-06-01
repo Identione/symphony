@@ -106,6 +106,7 @@ defmodule SymphonyElixir.Claude.Wire do
     num_turns
     usage
     error
+    error_code
     category
     permission_request_id
     request

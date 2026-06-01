@@ -19,6 +19,8 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from symphony_claude_agent.sidecar import (  # noqa: E402
+    _classify_from_message,
+    _classify_sdk_error,
     build_options_payload,
     emit,
     fold_text,
@@ -266,3 +268,62 @@ def test_render_message_text_joins_multiple_blocks_with_newlines() -> None:
     assert rendered.startswith("here is a tool call:")
     assert "[tool_use Read(tu1)]" in rendered
     assert "\n" in rendered
+
+
+# ---- _classify_from_message ------------------------------------------------
+
+
+def test_classify_from_message_context_window() -> None:
+    assert _classify_from_message("context window exceeded") == "context_window_exhausted"
+    assert _classify_from_message("context length too long") == "context_window_exhausted"
+    assert _classify_from_message("token limit reached") == "context_window_exhausted"
+
+
+def test_classify_from_message_rate_limited() -> None:
+    assert _classify_from_message("rate limit exceeded (429)") == "rate_limited"
+    assert _classify_from_message("rate_limit error") == "rate_limited"
+    assert _classify_from_message("ratelimited by upstream") == "rate_limited"
+
+
+def test_classify_from_message_overloaded() -> None:
+    assert _classify_from_message("API is overloaded") == "overloaded"
+    assert _classify_from_message("overload detected") == "overloaded"
+
+
+def test_classify_from_message_quota_exceeded() -> None:
+    assert _classify_from_message("credit balance is too low") == "quota_exceeded"
+    assert _classify_from_message("quota exceeded for this period") == "quota_exceeded"
+    assert _classify_from_message("quota_exceeded: monthly cap hit") == "quota_exceeded"
+
+
+def test_classify_from_message_invalid_request() -> None:
+    assert _classify_from_message("invalid request: missing field") == "invalid_request"
+    assert _classify_from_message("invalid_request error") == "invalid_request"
+
+
+def test_classify_from_message_unknown() -> None:
+    assert _classify_from_message("something unexpected happened") == "unknown"
+    assert _classify_from_message("") == "unknown"
+
+
+# ---- _classify_sdk_error ---------------------------------------------------
+
+
+def test_classify_sdk_error_generic_exception_falls_back_to_message() -> None:
+    exc = RuntimeError("rate limit exceeded")
+    assert _classify_sdk_error(exc) == "rate_limited"
+
+
+def test_classify_sdk_error_unknown_for_unrecognised_message() -> None:
+    exc = ValueError("some unknown condition")
+    assert _classify_sdk_error(exc) == "unknown"
+
+
+def test_classify_sdk_error_context_window_via_message() -> None:
+    exc = Exception("context window exceeded, please shorten your prompt")
+    assert _classify_sdk_error(exc) == "context_window_exhausted"
+
+
+def test_classify_sdk_error_overloaded_via_message() -> None:
+    exc = Exception("The API is currently overloaded")
+    assert _classify_sdk_error(exc) == "overloaded"
