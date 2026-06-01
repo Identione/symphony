@@ -492,6 +492,75 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert log =~ "Variable \\\"$ids\\\" got invalid value"
   end
 
+  test "linear client records a RATELIMITED response and short-circuits subsequent requests" do
+    SymphonyElixir.Linear.RateLimit.clear()
+    on_exit(fn -> SymphonyElixir.Linear.RateLimit.clear() end)
+
+    rate_limited_body = %{
+      "errors" => [
+        %{
+          "message" => "Rate limit exceeded.",
+          "extensions" => %{"code" => "RATELIMITED"}
+        }
+      ],
+      "meta" => %{
+        "rateLimitResult" => %{
+          "remaining" => 0,
+          "duration" => 3_600_000,
+          "limit" => 2500
+        }
+      }
+    }
+
+    parent = self()
+
+    request_fun = fn _payload, _headers ->
+      send(parent, :linear_http_request)
+      {:ok, %{status: 400, body: rate_limited_body}}
+    end
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, :rate_limited} =
+                 Client.graphql("query Viewer { viewer { id } }", %{}, request_fun: request_fun)
+      end)
+
+    assert_received :linear_http_request
+    assert log =~ "Linear API RATELIMITED"
+
+    # Subsequent calls skip the HTTP request entirely until the window resets.
+    assert {:error, :rate_limited} =
+             Client.graphql(
+               "query Viewer { viewer { id } }",
+               %{},
+               request_fun: fn _payload, _headers ->
+                 flunk("HTTP request should not have been made while rate-limited")
+               end
+             )
+
+    refute_received :linear_http_request
+
+    refute SymphonyElixir.Linear.RateLimit.allowed?()
+  end
+
+  test "linear client successful response does not trip the rate-limit gate" do
+    SymphonyElixir.Linear.RateLimit.clear()
+    on_exit(fn -> SymphonyElixir.Linear.RateLimit.clear() end)
+
+    body = %{
+      "data" => %{"viewer" => %{"id" => "user-1"}},
+      "meta" => %{"rateLimitResult" => %{"remaining" => 2400, "duration" => 3_600_000, "limit" => 2500}}
+    }
+
+    request_fun = fn _payload, _headers -> {:ok, %{status: 200, body: body}} end
+
+    assert {:ok, ^body} =
+             Client.graphql("query Viewer { viewer { id } }", %{}, request_fun: request_fun)
+
+    assert SymphonyElixir.Linear.RateLimit.allowed?()
+    assert SymphonyElixir.Linear.RateLimit.retry_after_ms() == nil
+  end
+
   test "orchestrator sorts dispatch by priority then oldest created_at" do
     issue_same_priority_older = %Issue{
       id: "issue-old-high",
@@ -616,6 +685,21 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert skipped_issue.identifier == "MT-1005"
     assert skipped_issue.blocked_by == [%{id: "blocker-3", identifier: "MT-1006", state: "In Progress"}]
+  end
+
+  test "dispatch revalidation surfaces rate_limited errors without classifying as skip" do
+    issue = %Issue{
+      id: "rate-limited-1",
+      identifier: "MT-1100",
+      title: "Throttled refresh",
+      state: "Todo",
+      blocked_by: []
+    }
+
+    fetcher = fn ["rate-limited-1"] -> {:error, :rate_limited} end
+
+    assert {:error, :rate_limited} =
+             Orchestrator.revalidate_issue_for_dispatch_for_test(issue, fetcher)
   end
 
   test "workspace remove returns error information for missing directory" do

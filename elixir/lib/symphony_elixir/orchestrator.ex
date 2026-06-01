@@ -305,6 +305,10 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
         state
 
+      {:error, :rate_limited} ->
+        Logger.debug("Skipping Linear poll cycle; rate-limit window active")
+        state
+
       {:error, reason} ->
         Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
         state
@@ -921,6 +925,11 @@ defmodule SymphonyElixir.Orchestrator do
 
         state
 
+      {:error, :rate_limited} ->
+        Logger.debug("Skipping dispatch; Linear rate-limit window active for #{issue_context(issue)}")
+
+        state
+
       {:error, reason} ->
         Logger.warning("Skipping dispatch; issue refresh failed for #{issue_context(issue)}: #{inspect(reason)}")
         state
@@ -1094,6 +1103,17 @@ defmodule SymphonyElixir.Orchestrator do
         issues
         |> find_issue_by_id(issue_id)
         |> handle_retry_issue_lookup(state, issue_id, attempt, metadata)
+
+      {:error, :rate_limited} ->
+        Logger.debug("Retry poll deferred; Linear rate-limit window active for issue_id=#{issue_id}")
+
+        {:noreply,
+         schedule_issue_retry(
+           state,
+           issue_id,
+           attempt + 1,
+           Map.merge(metadata, %{error: "retry poll deferred: rate_limited"})
+         )}
 
       {:error, reason} ->
         Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
