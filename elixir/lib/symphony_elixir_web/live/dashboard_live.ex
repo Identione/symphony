@@ -41,7 +41,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
   def render(assigns) do
     ~H"""
     <section class="dashboard-shell">
-      <header class="hero-card">
+      <header class="hero-card" style={@payload[:hero_tint]}>
         <div class="hero-grid">
           <div>
             <p class="eyebrow">

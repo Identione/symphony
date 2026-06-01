@@ -344,6 +344,7 @@ defmodule SymphonyElixir.ExtensionsTest do
              "generated_at" => state_payload["generated_at"],
              "agent_kind" => "codex",
              "linear_project" => "project",
+             "hero_tint" => state_payload["hero_tint"],
              "counts" => %{"running" => 1, "retrying" => 1, "blocked" => 1},
              "running" => [
                %{
@@ -680,6 +681,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "MT-BLOCKED"
     assert html =~ "rendered"
     assert html =~ "turn blocked: waiting for user input"
+    assert html =~ "--hero-tint-bg:"
+    assert html =~ "--hero-tint-border:"
     assert html =~ "Runtime"
     assert html =~ "Live"
     assert html =~ "Offline"
