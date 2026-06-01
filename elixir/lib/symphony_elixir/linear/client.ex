@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, Linear.Issue}
+  alias SymphonyElixir.{Config, Linear.Issue, Linear.RateLimit}
 
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
@@ -163,24 +163,44 @@ defmodule SymphonyElixir.Linear.Client do
   @spec graphql(String.t(), map(), keyword()) :: {:ok, map()} | {:error, term()}
   def graphql(query, variables \\ %{}, opts \\ [])
       when is_binary(query) and is_map(variables) and is_list(opts) do
+    if RateLimit.allowed?() do
+      do_graphql(query, variables, opts)
+    else
+      Logger.debug("Skipping Linear GraphQL request; rate-limit window active")
+      {:error, :rate_limited}
+    end
+  end
+
+  defp do_graphql(query, variables, opts) do
     payload = build_graphql_payload(query, variables, Keyword.get(opts, :operation_name))
     request_fun = Keyword.get(opts, :request_fun, &post_graphql_request/2)
 
     with {:ok, headers} <- graphql_headers(),
          {:ok, %{status: 200, body: body}} <- request_fun.(payload, headers) do
-      {:ok, body}
+      case RateLimit.maybe_record_response(body) do
+        :rate_limited -> {:error, :rate_limited}
+        :ok -> {:ok, body}
+      end
     else
       {:ok, response} ->
-        Logger.error(
-          "Linear GraphQL request failed status=#{response.status}" <>
-            linear_error_context(payload, response)
-        )
+        body = Map.get(response, :body)
 
-        # Carry the parsed body so callers (notably `Codex.DynamicTool`) can
-        # surface Linear's GraphQL `errors[]` array to the agent for self-
-        # correction. Body is whatever the HTTP layer parsed (map for JSON,
-        # string for text, nil if unparseable).
-        {:error, {:linear_api_status, response.status, Map.get(response, :body)}}
+        case RateLimit.maybe_record_response(body) do
+          :rate_limited ->
+            {:error, :rate_limited}
+
+          :ok ->
+            Logger.error(
+              "Linear GraphQL request failed status=#{response.status}" <>
+                linear_error_context(payload, response)
+            )
+
+            # Carry the parsed body so callers (notably `Codex.DynamicTool`) can
+            # surface Linear's GraphQL `errors[]` array to the agent for self-
+            # correction. Body is whatever the HTTP layer parsed (map for JSON,
+            # string for text, nil if unparseable).
+            {:error, {:linear_api_status, response.status, body}}
+        end
 
       {:error, reason} ->
         Logger.error("Linear GraphQL request failed: #{inspect(reason)}")
