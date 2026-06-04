@@ -143,6 +143,11 @@ repo:
 ### Behavior notes
 
 - `tracker.api_key` reads `LINEAR_API_KEY` when unset or set to `$LINEAR_API_KEY`.
+- `tracker.required_labels` / `tracker.excluded_labels` (default `[]`) gate
+  dispatch by Linear label, case-insensitively. An issue is picked up only
+  if it carries *every* `required_labels` entry and *none* of the
+  `excluded_labels` entries; an excluded label always disqualifies. Leave
+  both empty to disable label gating.
 - `~` and `$VAR` are expanded in path values (except `codex.command`,
   which is a shell command string — `$VAR` expands at exec time there).
 - If `WORKFLOW.md` is missing or invalid at boot, Symphony refuses to

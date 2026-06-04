@@ -642,6 +642,90 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "issue missing a required label is not dispatch-eligible" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_required_labels: ["symphony"])
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "unlabeled-1",
+      identifier: "MT-1008",
+      title: "Missing the gate label",
+      state: "Todo",
+      labels: ["backend"]
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "required_labels requires ALL listed labels (case-insensitive)" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_required_labels: ["Symphony", "ready"])
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    only_one = %Issue{
+      id: "labeled-partial",
+      identifier: "MT-1009",
+      title: "Only one of the required labels",
+      state: "Todo",
+      labels: ["symphony"]
+    }
+
+    has_both = %Issue{
+      id: "labeled-both",
+      identifier: "MT-1010",
+      title: "Carries both required labels plus extras",
+      state: "Todo",
+      labels: ["symphony", "ready", "backend"]
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(only_one, state)
+    assert Orchestrator.should_dispatch_issue_for_test(has_both, state)
+  end
+
+  test "issue carrying an excluded label is not dispatch-eligible" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_excluded_labels: ["blocked"])
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    excluded = %Issue{
+      id: "excluded-1",
+      identifier: "MT-1011",
+      title: "Carries a forbidden label",
+      state: "Todo",
+      labels: ["ready", "blocked"]
+    }
+
+    clean = %Issue{
+      id: "excluded-clean",
+      identifier: "MT-1012",
+      title: "No forbidden labels",
+      state: "Todo",
+      labels: ["ready"]
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(excluded, state)
+    assert Orchestrator.should_dispatch_issue_for_test(clean, state)
+  end
+
   test "todo issue with terminal blockers remains dispatch-eligible" do
     state = %Orchestrator.State{
       max_concurrent_agents: 3,
