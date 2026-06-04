@@ -197,8 +197,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   defp tool_error_payload(:rate_limited) do
     %{
       "error" => %{
-        "message" =>
-          "Linear API rate limit exhausted; Symphony is pausing Linear traffic until the window resets."
+        "message" => "Linear API rate limit exhausted; Symphony is pausing Linear traffic until the window resets."
       }
     }
   end

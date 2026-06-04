@@ -106,9 +106,7 @@ defmodule SymphonyElixir.Linear.RateLimit do
     reset_at_ms = System.monotonic_time(:millisecond) + duration_ms
     :ets.insert(@table, {@reset_key, reset_at_ms})
 
-    Logger.warning(
-      "Linear API RATELIMITED; pausing Linear GraphQL traffic for #{duration_ms}ms"
-    )
+    Logger.warning("Linear API RATELIMITED; pausing Linear GraphQL traffic for #{duration_ms}ms")
 
     duration_ms
   end
@@ -129,17 +127,14 @@ defmodule SymphonyElixir.Linear.RateLimit do
     {:ok, %{}}
   end
 
+  # The named table is created exactly once, in `init/1`. The GenServer owns it
+  # with no heir, so a crashed owner takes the table down and a fresh `init/1`
+  # always observes `:undefined`. Post-boot callers (`clear/0`) only ever see the
+  # established table and take the `ref` branch, so `:ets.new/2` never races.
   defp ensure_table do
     case :ets.whereis(@table) do
-      :undefined ->
-        try do
-          :ets.new(@table, [:set, :named_table, :public, read_concurrency: true])
-        rescue
-          ArgumentError -> @table
-        end
-
-      ref ->
-        ref
+      :undefined -> :ets.new(@table, [:set, :named_table, :public, read_concurrency: true])
+      ref -> ref
     end
   end
 

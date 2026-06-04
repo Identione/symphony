@@ -54,4 +54,84 @@ defmodule SymphonyElixir.LinearRateLimitTest do
     assert RateLimit.allowed?()
     assert RateLimit.retry_after_ms() == nil
   end
+
+  test "rate_limited_body? detects the RATELIMITED error code among mixed errors" do
+    body = %{
+      "errors" => [
+        %{"message" => "unrelated"},
+        %{"extensions" => %{"code" => "RATELIMITED"}}
+      ]
+    }
+
+    assert RateLimit.rate_limited_body?(body)
+  end
+
+  test "rate_limited_body? detects an exhausted remaining budget without an error code" do
+    assert RateLimit.rate_limited_body?(%{
+             "meta" => %{"rateLimitResult" => %{"remaining" => 0}}
+           })
+  end
+
+  test "rate_limited_body? returns false for an ordinary response" do
+    refute RateLimit.rate_limited_body?(%{"data" => %{"viewer" => %{"id" => "user-1"}}})
+  end
+
+  test "maybe_record_response records a back-off only for rate-limited bodies" do
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert RateLimit.maybe_record_response(%{
+               "errors" => [%{"extensions" => %{"code" => "RATELIMITED"}}]
+             }) == :rate_limited
+    end)
+
+    refute RateLimit.allowed?()
+
+    RateLimit.clear()
+    assert RateLimit.maybe_record_response(%{"data" => %{"viewer" => %{"id" => "user-1"}}}) == :ok
+    assert RateLimit.allowed?()
+  end
+
+  test "record_rate_limited falls back to the default throttle for a nil input" do
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert RateLimit.record_rate_limited(nil) == 60_000
+    end)
+
+    refute RateLimit.allowed?()
+  end
+
+  test "record_rate_limited reads the duration nested under errors extensions" do
+    body = %{
+      "errors" => [
+        %{"message" => "no extensions"},
+        %{"extensions" => %{"rateLimitResult" => %{"duration" => 7_000}}}
+      ]
+    }
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert RateLimit.record_rate_limited(body) == 7_000
+    end)
+  end
+
+  test "start_link/0 resolves to the already-running supervised instance" do
+    assert {:error, {:already_started, pid}} = RateLimit.start_link()
+    assert is_pid(pid)
+  end
+
+  test "queries tolerate a missing ETS table and the supervisor rebuilds it" do
+    # Terminating the supervised owner drops its ETS table, so lookups fall back
+    # to the no-back-off default until the supervisor restarts the process and
+    # `init/1` recreates the table. This test is synchronous, so no other test
+    # touches RateLimit while the table is gone.
+    on_exit(fn ->
+      Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.Linear.RateLimit)
+    end)
+
+    :ok = Supervisor.terminate_child(SymphonyElixir.Supervisor, SymphonyElixir.Linear.RateLimit)
+
+    assert RateLimit.allowed?()
+    assert RateLimit.retry_after_ms() == nil
+
+    {:ok, _pid} = Supervisor.restart_child(SymphonyElixir.Supervisor, SymphonyElixir.Linear.RateLimit)
+
+    assert RateLimit.allowed?()
+  end
 end

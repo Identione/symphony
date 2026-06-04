@@ -4,6 +4,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Linear.RateLimit
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -493,8 +494,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   end
 
   test "linear client records a RATELIMITED response and short-circuits subsequent requests" do
-    SymphonyElixir.Linear.RateLimit.clear()
-    on_exit(fn -> SymphonyElixir.Linear.RateLimit.clear() end)
+    RateLimit.clear()
+    on_exit(fn -> RateLimit.clear() end)
 
     rate_limited_body = %{
       "errors" => [
@@ -540,12 +541,12 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     refute_received :linear_http_request
 
-    refute SymphonyElixir.Linear.RateLimit.allowed?()
+    refute RateLimit.allowed?()
   end
 
   test "linear client successful response does not trip the rate-limit gate" do
-    SymphonyElixir.Linear.RateLimit.clear()
-    on_exit(fn -> SymphonyElixir.Linear.RateLimit.clear() end)
+    RateLimit.clear()
+    on_exit(fn -> RateLimit.clear() end)
 
     body = %{
       "data" => %{"viewer" => %{"id" => "user-1"}},
@@ -557,8 +558,8 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert {:ok, ^body} =
              Client.graphql("query Viewer { viewer { id } }", %{}, request_fun: request_fun)
 
-    assert SymphonyElixir.Linear.RateLimit.allowed?()
-    assert SymphonyElixir.Linear.RateLimit.retry_after_ms() == nil
+    assert RateLimit.allowed?()
+    assert RateLimit.retry_after_ms() == nil
   end
 
   test "orchestrator sorts dispatch by priority then oldest created_at" do
