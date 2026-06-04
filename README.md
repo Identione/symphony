@@ -38,6 +38,12 @@ make start              # `make logs`, `make stop`, `make help` from here
 Each `make init` creates an isolated `instances/<name>/`; multiple instances can run in parallel
 from the same checkout.
 
+Add `--base-branch <name>` to point an instance at a development branch instead of `main`: agents
+branch from, sync with, and merge into `<name>` (each issue on its own `symphony/<issue-id>` branch,
+PRs targeting `<name>`), leaving `main` untouched. Omit it and nothing changes — work targets the
+repo's default branch as before. Pair such an instance with its own Linear project so only the
+intended issues feed it.
+
 Running several instances? Keep them in a local manifest instead of re-typing `make init`. Copy
 `instances.local.example` to `instances.local` (gitignored), list one instance per line as
 `<name> <init-args>` — the first token is the instance name, the rest is forwarded verbatim to

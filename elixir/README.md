@@ -86,6 +86,14 @@ raw CLI surface the Makefile rules call.
 - `--workspace-root <PATH>` — defaults to `~/code/symphony-workspaces/<repo>`
 - `--repo-path <LOCAL_PATH>` — optional pointer to a local clone
 - `--agent codex|claude` — defaults to `codex`
+- `--base-branch <NAME>` — target a development branch instead of `main`.
+  Omit (the default) and the workflow targets the repo's own default branch,
+  byte-identical to before. Set it and agents branch from / sync with /
+  merge into `<NAME>` (work isolated onto `symphony/<issue-id>` branches off
+  `origin/<NAME>`, PRs target `<NAME>`), leaving `main` untouched. The
+  base-aware behavior lives in the cloned repo's `.codex/skills/` (read via
+  `git config symphony.baseBranch`) — provision those skills in the target
+  repo. Re-run with `--force` to change the base later.
 - `--output <PATH>` — workflow output path
 - `--port <PORT>` — enable the Phoenix dashboard. `0` = OS-assigned. Omit
   for no `server:` block at all.

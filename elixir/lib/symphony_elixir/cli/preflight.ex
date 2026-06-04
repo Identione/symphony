@@ -11,6 +11,7 @@ defmodule SymphonyElixir.CLI.Preflight do
   require Logger
 
   alias SymphonyElixir.CLI.LinearProject
+  alias SymphonyElixir.Config
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Linear.Client
   alias SymphonyElixir.Workflow
@@ -27,6 +28,7 @@ defmodule SymphonyElixir.CLI.Preflight do
           system_find_executable: (String.t() -> Path.t() | nil),
           file_exists?: (Path.t() -> boolean()),
           touch_temp: (Path.t() -> :ok | {:error, term()}),
+          claude_credential_source: (Schema.t() -> String.t() | nil),
           tcp_listen: (non_neg_integer() -> :ok | {:error, term()}),
           graphql: (String.t(), map() -> {:ok, map()} | {:error, term()}),
           ensure_http_app: (-> :ok),
@@ -106,6 +108,7 @@ defmodule SymphonyElixir.CLI.Preflight do
       system_find_executable: &System.find_executable/1,
       file_exists?: &File.exists?/1,
       touch_temp: &touch_temp_file/1,
+      claude_credential_source: &Config.claude_credential_source/1,
       tcp_listen: &check_tcp_listen/1,
       graphql: &Client.graphql/2,
       # Linear queries go out through `Req`, which needs its `Finch` supervisor
@@ -214,6 +217,7 @@ defmodule SymphonyElixir.CLI.Preflight do
       {"Linear state coverage", check_states(settings, deps)},
       {"Repo clone access", check_repo_url(settings, deps)},
       {"Agent availability", check_agent(settings, deps)},
+      {"Claude credentials", check_claude_credentials(settings, deps)},
       {"Workspace root writability", check_workspace_root(settings, deps)},
       {"Dashboard port", check_dashboard_port(settings, deps)}
     ]
@@ -408,6 +412,27 @@ defmodule SymphonyElixir.CLI.Preflight do
       path -> {:ok_with_detail, "#{label}: found #{name} at #{path}"}
     end
   end
+
+  # The daemon enforces `claude_credentials_present?` at boot (Config.validate!)
+  # and otherwise loops on `:missing_claude_credentials`. Agent availability only
+  # proves the sidecar launcher is on PATH, so resolve the *credential* here too —
+  # reusing the daemon's exact precedence — and name the source so the operator
+  # knows which one matched. Non-claude adapters carry no such requirement.
+  defp check_claude_credentials(%{agent: %{kind: "claude"}} = settings, deps) do
+    case deps.claude_credential_source.(settings) do
+      nil ->
+        {:error,
+         "no Claude credential resolved — set CLAUDE_CODE_OAUTH_TOKEN (run `claude setup-token`), " <>
+           "ANTHROPIC_API_KEY, or provide a .credentials.json under the config dir. " <>
+           "On macOS the Keychain login is NOT readable by the daemon; it will fail with :missing_claude_credentials."}
+
+      source ->
+        {:ok_with_detail, "resolved via #{source}"}
+    end
+  end
+
+  defp check_claude_credentials(%{agent: %{kind: kind}}, _deps),
+    do: {:warn, "agent.kind is #{inspect(kind)}; skipping Claude credential check"}
 
   # Probe writability without materializing anything. If `workspace.root`
   # already exists we touch a temp file inside it; otherwise we walk up to

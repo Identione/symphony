@@ -252,5 +252,37 @@ defmodule SymphonyElixir.AgentAdapterDispatchTest do
 
       assert :ok = Config.validate!()
     end
+
+    test "claude_credential_source/0 names the env source and is nil when absent" do
+      write_workflow_with_agent_block!("agent:\n  kind: claude\n")
+      {:ok, settings} = Config.settings()
+
+      assert Config.claude_credential_source(settings) == nil
+
+      System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-test")
+      assert Config.claude_credential_source(settings) == "CLAUDE_CODE_OAUTH_TOKEN"
+    end
+
+    test "claude_credential_source/0 reports the credentials file path", %{tmp_home: tmp_home} do
+      override = Path.join(tmp_home, "cfg")
+      File.mkdir_p!(override)
+
+      File.write!(
+        Path.join(override, ".credentials.json"),
+        ~s({"claudeAiOauth": {"accessToken": "fake"}})
+      )
+
+      write_workflow_with_agent_block!("""
+      agent:
+        kind: claude
+        claude:
+          config_dir: "#{override}"
+      """)
+
+      {:ok, settings} = Config.settings()
+      source = Config.claude_credential_source(settings)
+      assert source =~ "credentials file ("
+      assert source =~ override
+    end
   end
 end

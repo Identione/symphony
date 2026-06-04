@@ -155,10 +155,19 @@ defmodule SymphonyElixir.CLI.InitTest do
 
   test "template prompt body stays byte-identical to the canonical elixir/WORKFLOW.md body" do
     # Single-source guard: the init template inlines the canonical prompt body so
-    # generated instances behave exactly like elixir/WORKFLOW.md. If either file's
-    # body drifts from the other, this fails loudly and both must be updated together.
-    {:ok, template} =
-      File.read(Application.app_dir(:symphony_elixir, "priv/templates/workflow.md.eex"))
+    # generated instances behave exactly like elixir/WORKFLOW.md. The body now
+    # carries EEx logic (`origin/<%= @base_branch || "main" %>` + the gated
+    # Step 0.5 kickoff), so we render with NO base — nil renders `origin/main`
+    # and emits no kickoff step — and compare the rendered body to the canonical.
+    # If either drifts, this fails loudly and both must be updated together.
+    rendered =
+      Init.render_workflow(%{
+        project_slug: "symphony-2e32f5d86d8c",
+        repo_url: "git@github.com:org/repo.git",
+        repo_path: nil,
+        agent: "codex",
+        workspace_root: "~/code/symphony-workspaces/repo"
+      })
 
     {:ok, canonical} = File.read(Path.join(File.cwd!(), "WORKFLOW.md"))
 
@@ -169,7 +178,7 @@ defmodule SymphonyElixir.CLI.InitTest do
       String.trim(marker <> body)
     end
 
-    assert body_of.(template) == body_of.(canonical)
+    assert body_of.(rendered) == body_of.(canonical)
   end
 
   test "prints next-step commands using whichever invocation form the operator used" do
@@ -448,6 +457,125 @@ defmodule SymphonyElixir.CLI.InitTest do
     # via the YAML; the generator's job is to surface the same default as
     # everything else.
     assert settings.agent.max_concurrent_agents == 10
+  end
+
+  test "init output reminds operators about repo-local skills, with a base-aware note when set" do
+    deps = capture_deps()
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-skills-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "https://linear.app/identione/project/symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:puts, no_base_message}
+    assert no_base_message =~ ".codex/skills"
+    refute no_base_message =~ "symphony.baseBranch"
+
+    base_output =
+      Path.join(System.tmp_dir!(), "WORKFLOW-skills-base-#{System.unique_integer([:positive])}.md")
+
+    on_exit(fn -> File.rm(base_output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "https://linear.app/identione/project/symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--base-branch",
+                 "develop",
+                 "--output",
+                 base_output
+               ],
+               capture_deps()
+             )
+
+    assert_received {:puts, base_message}
+    assert base_message =~ ".codex/skills"
+    assert base_message =~ "develop"
+    assert base_message =~ "symphony.baseBranch"
+  end
+
+  test "renders base-aware machinery and a round-tripping base_branch line with a base" do
+    rendered =
+      Init.render_workflow(%{
+        project_slug: "symphony-2e32f5d86d8c",
+        repo_url: "git@github.com:org/repo.git",
+        repo_path: nil,
+        agent: "codex",
+        workspace_root: "~/code/symphony-workspaces/repo",
+        base_branch: "develop"
+      })
+
+    # Body targets the chosen base and isolates work onto a deterministic issue
+    # branch (the `{{ issue.identifier }}` stays as Liquid — EEx does not touch it).
+    assert rendered =~ "origin/develop"
+    refute rendered =~ "origin/main"
+    assert rendered =~ "symphony/{{ issue.identifier }}"
+
+    # The clone hook fetches the base ref and records it for the skills channel.
+    assert rendered =~ "git config symphony.baseBranch 'develop'"
+    assert rendered =~ "develop:refs/remotes/origin/develop"
+
+    # Front-matter round-trip: the base_branch line parses back to the exact value.
+    {:ok, ["---" | rest]} = {:ok, String.split(rendered, ~r/\R/, trim: false)}
+    {front, _} = Enum.split_while(rest, &(&1 != "---"))
+    {:ok, decoded} = YamlElixir.read_from_string(Enum.join(front, "\n"))
+    assert get_in(decoded, ["repo", "base_branch"]) == "develop"
+    assert {:ok, %Schema{} = settings} = Schema.parse(decoded)
+    assert settings.repo.base_branch == "develop"
+  end
+
+  test "without a base the body is unchanged and no base machinery is emitted" do
+    rendered =
+      Init.render_workflow(%{
+        project_slug: "symphony-2e32f5d86d8c",
+        repo_url: "git@github.com:org/repo.git",
+        repo_path: nil,
+        agent: "codex",
+        workspace_root: "~/code/symphony-workspaces/repo"
+      })
+
+    assert rendered =~ "origin/main"
+    refute rendered =~ "symphony/{{ issue.identifier }}"
+    refute rendered =~ "symphony.baseBranch"
+
+    {:ok, ["---" | rest]} = {:ok, String.split(rendered, ~r/\R/, trim: false)}
+    {front, _} = Enum.split_while(rest, &(&1 != "---"))
+    {:ok, decoded} = YamlElixir.read_from_string(Enum.join(front, "\n"))
+    refute Map.has_key?(decoded["repo"], "base_branch")
+  end
+
+  test "rejects an invalid --base-branch value" do
+    for bad <- ["feature;rm", "bad name", "-x", "a..b", "foo~1", "foo/"] do
+      assert {:error, message} =
+               Init.run(
+                 [
+                   "--linear-project",
+                   "https://linear.app/identione/project/symphony-2e32f5d86d8c",
+                   "--repo-url",
+                   "git@github.com:org/repo.git",
+                   "--base-branch",
+                   bad
+                 ],
+                 capture_deps()
+               )
+
+      assert message =~ "--base-branch"
+    end
+
+    refute_received {:write, _path, _contents}
   end
 
   # --- template loaded from disk -------------------------------------------

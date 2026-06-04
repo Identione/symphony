@@ -19,9 +19,11 @@ workspace:
   root: <%= @workspace_root %>
 repo:
   url: <%= @repo_url %>
-<%= @repo_path_line %>hooks:
+<%= @repo_path_line %><%= @repo_base_branch_line %>hooks:
   after_create: |
-    git clone --depth 1 <%= @repo_url_shell %> .
+    git clone --depth 1 <%= @repo_url_shell %> .<%= if @base_branch do %>
+    git fetch --depth 1 origin <%= @base_fetch_refspec %>
+    git config symphony.baseBranch <%= @base_branch_shell %><% end %>
 agent:
   kind: <%= @agent_kind %>
   # Override max_concurrent_agents / max_turns here to deviate from the
@@ -93,7 +95,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - `linear`: interact with Linear.
 - `commit`: produce clean, logical commits during implementation.
 - `push`: keep remote branch current and publish updates.
-- `pull`: keep branch updated with latest `origin/main` before handoff.
+- `pull`: keep branch updated with latest `origin/<%= @base_branch || "main" %>` before handoff.
 - `land`: when ticket reaches `Merging`, explicitly open and follow `.codex/skills/land/SKILL.md`, which includes the `land` loop.
 
 ## Status map
@@ -122,14 +124,24 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
    - `Done` -> do nothing and shut down.
 4. Check whether a PR already exists for the current branch and whether it is closed.
    - If a branch PR exists and is `CLOSED` or `MERGED`, treat prior branch work as non-reusable for this run.
-   - Create a fresh branch from `origin/main` and restart execution flow as a new attempt.
+   - Create a fresh branch from `origin/<%= @base_branch || "main" %>` and restart execution flow as a new attempt.
 5. For `Todo` tickets, do startup sequencing in this exact order:
    - `update_issue(..., state: "In Progress")`
    - find/create `## Symphony Workpad` bootstrap comment
    - only then begin analysis/planning/implementation work.
 6. Add a short comment if state and issue content are inconsistent, then proceed with the safest flow.
 
-## Step 1: Start/continue execution (Todo or In Progress)
+<%= if @base_branch do %>## Step 0.5: Work on an issue branch (never the base branch)
+
+All work for this ticket happens on a dedicated per-issue branch off `origin/<%= @base_branch %>`. Never commit or push directly to `<%= @base_branch %>` or any protected/default branch — the `push` skill will refuse it.
+
+1. Use the deterministic branch name `symphony/{{ issue.identifier }}` so continuation turns reuse the same branch instead of branching again and losing work.
+2. If `git branch --show-current` is not `symphony/{{ issue.identifier }}`, fetch and switch to it from `origin/<%= @base_branch %>`:
+   - New branch: `git fetch origin <%= @base_branch %> && git switch -c symphony/{{ issue.identifier }} origin/<%= @base_branch %>`
+   - Already exists locally: `git switch symphony/{{ issue.identifier }}`
+3. When opening the PR, target base `<%= @base_branch %>` so the change merges into `<%= @base_branch %>`, never the repo default.
+
+<% end %>## Step 1: Start/continue execution (Todo or In Progress)
 
 1.  Find or create a single persistent scratchpad comment for the issue:
     - Search existing comments for a marker header: `## Symphony Workpad`.
@@ -153,7 +165,7 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
     - If the ticket description/comment context includes `Validation`, `Test Plan`, or `Testing` sections, copy those requirements into the workpad `Acceptance Criteria` and `Validation` sections as required checkboxes (no optional downgrade).
 7.  Run a principal-style self-review of the plan and refine it in the comment.
 8.  Before implementing, capture a concrete reproduction signal and record it in the workpad `Notes` section (command/output, screenshot, or deterministic UI behavior).
-9.  Run the `pull` skill to sync with latest `origin/main` before any code edits, then record the pull/sync result in the workpad `Notes`.
+9.  Run the `pull` skill to sync with latest `origin/<%= @base_branch || "main" %>` before any code edits, then record the pull/sync result in the workpad `Notes`.
     - Include a `pull skill evidence` note with:
       - merge source(s),
       - result (`clean` or `conflicts resolved`),
@@ -215,7 +227,7 @@ Use this only when completion is blocked by missing required tools or missing au
 7.  Before every `git push` attempt, run the required validation for your scope and confirm it passes; if it fails, address issues and rerun until green, then commit and push changes.
 8.  Attach PR URL to the issue (prefer attachment; use the workpad comment only if attachment is unavailable).
     - Ensure the GitHub PR has label `symphony` (add it if missing).
-9.  Merge latest `origin/main` into branch, resolve conflicts, and rerun checks.
+9.  Merge latest `origin/<%= @base_branch || "main" %>` into branch, resolve conflicts, and rerun checks.
 10. Update the workpad comment with final checklist status and validation notes.
     - Mark completed plan/acceptance/validation checklist items as checked.
     - Add final handoff notes (commit + validation summary) in the same workpad comment.
@@ -251,7 +263,7 @@ Use this only when completion is blocked by missing required tools or missing au
 2. Re-read the full issue body and all human comments; explicitly identify what will be done differently this attempt.
 3. Close the existing PR tied to the issue.
 4. Remove the existing `## Symphony Workpad` comment from the issue.
-5. Create a fresh branch from `origin/main`.
+5. Create a fresh branch from `origin/<%= @base_branch || "main" %>`.
 6. Start over from the normal kickoff flow:
    - If current issue state is `Todo`, move it to `In Progress`; otherwise keep the current state.
    - Create a new bootstrap `## Symphony Workpad` comment.
@@ -270,7 +282,7 @@ Use this only when completion is blocked by missing required tools or missing au
 ## Guardrails
 
 - If the branch PR is already closed/merged, do not reuse that branch or prior implementation state for continuation.
-- For closed/merged branch PRs, create a new branch from `origin/main` and restart from reproduction/planning as if starting fresh.
+- For closed/merged branch PRs, create a new branch from `origin/<%= @base_branch || "main" %>` and restart from reproduction/planning as if starting fresh.
 - If issue state is `Backlog`, do not modify it; wait for human to move to `Todo`.
 - Do not edit the issue body/description for planning or progress tracking.
 - Use exactly one persistent workpad comment (`## Symphony Workpad`) per issue.

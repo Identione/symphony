@@ -1096,6 +1096,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert settings.workspace.root == Path.join(System.tmp_dir!(), "symphony_workspaces")
   end
 
+  test "schema parses repo.base_branch and defaults it to nil" do
+    assert {:ok, settings} =
+             Schema.parse(%{repo: %{url: "git@github.com:org/repo.git", base_branch: "develop"}})
+
+    assert settings.repo.base_branch == "develop"
+
+    assert {:ok, defaulted} = Schema.parse(%{repo: %{url: "git@github.com:org/repo.git"}})
+    assert defaulted.repo.base_branch == nil
+  end
+
   test "schema resolves sandbox policies from explicit and default workspaces" do
     explicit_policy = %{"type" => "workspaceWrite", "writableRoots" => ["/tmp/explicit"]}
 

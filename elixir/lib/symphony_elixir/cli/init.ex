@@ -13,6 +13,7 @@ defmodule SymphonyElixir.CLI.Init do
     repo_path: :string,
     workspace_root: :string,
     agent: :string,
+    base_branch: :string,
     output: :string,
     force: :boolean,
     port: :integer,
@@ -181,6 +182,7 @@ defmodule SymphonyElixir.CLI.Init do
     with {:ok, project} <- parse_linear_project(opts),
          {:ok, repo_url} <- require_repo_url(opts),
          {:ok, agent} <- validate_agent(Keyword.get(opts, :agent, "codex")),
+         {:ok, base_branch} <- validate_base_branch(Keyword.get(opts, :base_branch)),
          {:ok, port} <- validate_port(Keyword.get(opts, :port)),
          {:ok, host} <- validate_host(Keyword.get(opts, :host), port),
          {:ok, instance} <- resolve_instance(opts),
@@ -198,6 +200,7 @@ defmodule SymphonyElixir.CLI.Init do
              repo_path: repo_path,
              agent: agent,
              workspace_root: workspace_root,
+             base_branch: base_branch,
              port: port,
              host: host
            }),
@@ -205,7 +208,7 @@ defmodule SymphonyElixir.CLI.Init do
            render_instance_makefile(instance_template, instance),
          :ok <- write_output(output_path, workflow, deps),
          :ok <- maybe_write_instance(instance, instance_makefile_content, deps) do
-      print_success(deps, output_path, instance)
+      print_success(deps, output_path, instance, base_branch)
       :ok
     end
   end
@@ -234,6 +237,41 @@ defmodule SymphonyElixir.CLI.Init do
 
   defp validate_agent(value) do
     {:error, "invalid --agent #{inspect(value)}: expected one of #{Enum.join(@valid_agents, ", ")}"}
+  end
+
+  # Absent flag → nil: no base-aware machinery is emitted and the generated
+  # workflow behaves exactly as today (PRs target the repo's own default
+  # branch). When present, validate with a regex stricter than
+  # `git check-ref-format` so the value is also shell/YAML-safe: only
+  # `[A-Za-z0-9._/-]`, no leading `-`, no `..`/`@{`, no trailing `/` or
+  # `.lock`. This rejects every shell metacharacter (`$;&|`"' `, backticks…)
+  # that a merely ref-legal name could otherwise carry into the clone hook.
+  @base_branch_regex ~r{\A[A-Za-z0-9._/-]+\z}
+
+  defp validate_base_branch(nil), do: {:ok, nil}
+
+  defp validate_base_branch(value) when is_binary(value) do
+    cond do
+      not Regex.match?(@base_branch_regex, value) ->
+        {:error, base_branch_error(value)}
+
+      String.starts_with?(value, "-") ->
+        {:error, base_branch_error(value)}
+
+      String.contains?(value, "..") or String.contains?(value, "@{") ->
+        {:error, base_branch_error(value)}
+
+      String.ends_with?(value, "/") or String.ends_with?(value, ".lock") ->
+        {:error, base_branch_error(value)}
+
+      true ->
+        {:ok, value}
+    end
+  end
+
+  defp base_branch_error(value) do
+    "--base-branch must be a valid git branch name using only letters, digits, " <>
+      "`.`, `_`, `/`, `-` (got: #{inspect(value)})\n\n" <> usage_message()
   end
 
   defp validate_port(nil), do: {:ok, nil}
@@ -430,7 +468,7 @@ defmodule SymphonyElixir.CLI.Init do
     end
   end
 
-  defp print_success(deps, output_path, instance) do
+  defp print_success(deps, output_path, instance, base_branch) do
     program = program_name(deps)
 
     base = """
@@ -457,7 +495,30 @@ defmodule SymphonyElixir.CLI.Init do
           """
       end
 
-    deps.puts.(base <> extra)
+    deps.puts.(base <> extra <> skills_reminder(base_branch))
+  end
+
+  # The generated prompt references repo-local skills (commit/push/pull/land/…).
+  # They resolve from the cloned target repo's `.codex/skills/`, which Symphony
+  # never vendors — so remind the operator to provision them. When a base branch
+  # is set, the base-aware behavior lives in those skills (read back via
+  # `git config symphony.baseBranch`), so the copied skills must be current.
+  defp skills_reminder(nil) do
+    """
+
+    The cloned repo must carry repo-local skills (.codex/skills/) for the
+    workflow's commit/push/pull/land steps; copy them from the Symphony repo
+    if absent.
+    """
+  end
+
+  defp skills_reminder(base_branch) do
+    skills_reminder(nil) <>
+      """
+      Base branch '#{base_branch}': the base-aware behavior (PR --base, branching
+      off origin/#{base_branch}, the protected-branch guard) lives in those skills
+      and reads `git config symphony.baseBranch` — copy the base-aware versions.
+      """
   end
 
   defp invalid_flags_message(invalid) do
@@ -497,6 +558,7 @@ defmodule SymphonyElixir.CLI.Init do
        ) do
     port = Map.get(params, :port)
     host = Map.get(params, :host)
+    base_branch = Map.get(params, :base_branch)
 
     [
       project_slug: yaml_string(project_slug),
@@ -506,7 +568,15 @@ defmodule SymphonyElixir.CLI.Init do
       repo_url_shell: shell_quote(repo_url),
       agent_kind: agent,
       agent_block: both_agent_blocks(),
-      server_block: render_server_block(port, host)
+      server_block: render_server_block(port, host),
+      # `base_branch` is nil unless `--base-branch` was given. The template
+      # uses `@base_branch || "main"` for the 6 inline `origin/<base>` refs (so
+      # nil renders today's `origin/main`) and gates the kickoff step / clone
+      # hook on `@base_branch` being truthy.
+      base_branch: base_branch,
+      repo_base_branch_line: render_repo_base_branch_line(base_branch),
+      base_fetch_refspec: base_branch && shell_quote("#{base_branch}:refs/remotes/origin/#{base_branch}"),
+      base_branch_shell: base_branch && shell_quote(base_branch)
     ]
   end
 
@@ -520,6 +590,13 @@ defmodule SymphonyElixir.CLI.Init do
 
   defp render_repo_path_line(nil), do: ""
   defp render_repo_path_line(path), do: "  path: #{yaml_string(path)}\n"
+
+  # Mirrors render_repo_path_line/1: nil → no line (front matter byte-identical
+  # to today), otherwise a `base_branch:` line nested under `repo:`. A line
+  # assign (rather than an inline `<%= if %>` in the template) keeps the YAML
+  # indentation correct and avoids EEx-conditional whitespace artifacts.
+  defp render_repo_base_branch_line(nil), do: ""
+  defp render_repo_base_branch_line(base), do: "  base_branch: #{yaml_string(base)}\n"
 
   defp render_server_block(nil, _host), do: ""
 

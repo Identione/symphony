@@ -25,6 +25,7 @@ defmodule SymphonyElixir.CLI.PreflightTest do
       end,
       file_exists?: Map.get(overrides, :file_exists?, fn _path -> true end),
       touch_temp: Map.get(overrides, :touch_temp, fn _path -> :ok end),
+      claude_credential_source: Map.get(overrides, :claude_credential_source, fn _settings -> "CLAUDE_CODE_OAUTH_TOKEN" end),
       tcp_listen: fn _port -> Map.get(overrides, :tcp_listen, :ok) end,
       graphql: fn query, vars ->
         send(parent, {:graphql, query, vars})
@@ -132,6 +133,47 @@ defmodule SymphonyElixir.CLI.PreflightTest do
     workflow_file = Path.join(workflow_root, "WORKFLOW.md")
     write_workflow_file!(workflow_file, opts)
     on_exit(fn -> File.rm_rf(workflow_root) end)
+    workflow_file
+  end
+
+  # A minimal `agent.kind: claude` WORKFLOW.md fixture (write_workflow_file!/2
+  # only knows the codex shape), used by the Claude-credential checks.
+  defp claude_workflow!(name, project_slug) do
+    workflow_root = Path.join(System.tmp_dir!(), "preflight-#{name}-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(workflow_root)
+    workflow_file = Path.join(workflow_root, "WORKFLOW.md")
+    on_exit(fn -> File.rm_rf(workflow_root) end)
+
+    File.write!(workflow_file, """
+    ---
+    tracker:
+      kind: linear
+      api_key: secret
+      project_slug: #{project_slug}
+      active_states:
+        - Todo
+        - In Progress
+      terminal_states:
+        - Done
+        - Canceled
+        - Duplicate
+    workspace:
+      root: #{Path.join(System.tmp_dir!(), "ws-#{name}-#{System.unique_integer([:positive])}")}
+    agent:
+      kind: claude
+      claude:
+        command: uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
+        permission_mode: dontAsk
+        allowed_tools:
+          - Read
+          - Bash
+    hooks:
+      timeout_ms: 60000
+    ---
+
+    prompt
+    """)
+
     workflow_file
   end
 
@@ -602,6 +644,43 @@ defmodule SymphonyElixir.CLI.PreflightTest do
 
     assert full =~ "Agent availability"
     assert full =~ "claude sidecar: found uv at /usr/local/bin/uv"
+  end
+
+  test "passes and names the credential source for agent.kind: claude" do
+    project_slug = "symphony-claude-2e32f5d86d8c"
+    workflow_file = claude_workflow!("creds-ok", project_slug)
+
+    deps =
+      build_deps(%{
+        graphql: graphql_responses(project_slug, 0),
+        find_executable: %{"git" => "/usr/bin/git", "uv" => "/usr/local/bin/uv"},
+        claude_credential_source: fn _settings -> "CLAUDE_CODE_OAUTH_TOKEN" end
+      })
+
+    assert :ok = Preflight.run([workflow_file], deps)
+
+    full = collect_puts() |> Enum.join("\n")
+    assert full =~ "[ok]   Claude credentials — resolved via CLAUDE_CODE_OAUTH_TOKEN"
+  end
+
+  test "fails when agent.kind: claude has no resolvable credential" do
+    project_slug = "symphony-claude-2e32f5d86d8c"
+    workflow_file = claude_workflow!("creds-missing", project_slug)
+
+    deps =
+      build_deps(%{
+        graphql: graphql_responses(project_slug, 0),
+        find_executable: %{"git" => "/usr/bin/git", "uv" => "/usr/local/bin/uv"},
+        claude_credential_source: fn _settings -> nil end
+      })
+
+    assert {:error, :silent_failure} = Preflight.run([workflow_file], deps)
+
+    fails = collect_puts_err()
+    full = Enum.join(fails, "\n")
+    assert full =~ "[fail] Claude credentials"
+    assert full =~ "no Claude credential resolved"
+    assert Enum.any?(fails, &String.contains?(&1, "Claude credentials"))
   end
 
   test "env-backed agent command warns instead of failing the check" do

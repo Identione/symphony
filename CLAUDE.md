@@ -55,7 +55,7 @@ The root `Makefile` does **not** launch the daemon. It only builds the escript a
 
 ```bash
 make build                                                              # root: builds elixir/bin/symphony
-make init INSTANCE=<name> ARGS="--linear-project <URL> --repo-url <URL> [--port N] [--host ADDR]"
+make init INSTANCE=<name> ARGS="--linear-project <URL> --repo-url <URL> [--base-branch <name>] [--port N] [--host ADDR]"
 cd instances/<name>
 make preflight                                                          # validate against the live env
 make start | stop | restart | status | logs | foreground                # instance daemon control
@@ -70,6 +70,8 @@ The instance Makefile's `start`/`foreground` pass the `--i-understand-that-this-
 `LINEAR_API_KEY` is expected to come from `elixir/mise.local.toml` (gitignored) — the instance `check-key` target queries the mise env. Each instance's `tracker.project_slug` should be unique; two instances polling the same project will race for the same issues.
 
 > **`--port` and `--host` semantics on `make init`:** omitting `--port` produces a workflow with no `server:` block at all (dashboard off). `--port <N>` enables the dashboard at port N; `--port 0` means OS-assigned. `--host <ADDR>` (only meaningful with `--port`) sets the bind address. Strict IP-literal validation: only `:inet.parse_strict_address/1`-parseable IPv4/IPv6 addresses are accepted (e.g. `0.0.0.0`, `127.0.0.1`, `::1`, `192.168.1.10`). DNS names like `dashboard.local` are rejected — operators with that genuine need can hand-edit `WORKFLOW.md` post-generation; the runtime path (`HttpServer.parse_host/1`) still resolves them.
+
+> **`--base-branch <name>` on `make init`:** omitting it is the default — the generated workflow targets the repo's own default branch and behaves exactly as before (no `repo.base_branch`, body says `origin/main`). Setting it (validated as a safe git branch name) makes agents branch from, sync with, and merge into `<name>` instead of `main`, leaving `main` untouched: the prompt body gains a Step 0.5 that isolates work onto a per-issue branch `symphony/<issue-id>` off `origin/<name>` and targets `<name>` for the PR, the `after_create` hook fetches `<name>` and records `git config symphony.baseBranch <name>`, and the repo-local `push`/`pull`/`land` skills read that config (with a `main` fallback) to set the PR `--base`, merge the right branch, and refuse pushing a protected/base/default branch. The base is baked into the body at generation time — to change it later, re-run `make init --force` (editing only the front-matter `repo.base_branch` won't update the baked instructions). The base-aware behavior lives in the **cloned target repo's** `.codex/skills/`, which Symphony never vendors — provision/refresh those skills in the target repo (init's output reminds you). Pair a base-branch instance with its own Linear `project_slug` so only the intended issues feed it.
 
 ## Architecture (big picture)
 

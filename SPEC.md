@@ -577,6 +577,16 @@ Fields:
   - Symphony itself MUST NOT read or write through `repo.path`; it exists so repo-local skills
     can find a stable on-disk copy outside the per-issue workspace.
   - `~` and `$VAR` are expanded under the same rules as other path fields.
+- `base_branch` (string, OPTIONAL)
+  - The git branch agents branch from, sync with, and squash-merge into. When absent (the
+    default), Symphony emits no base-aware behavior and pull requests target the repository's
+    own default branch — backward-compatible with workflows that predate this field.
+  - When set (e.g. via `symphony init --base-branch <name>`), the generated prompt body MUST
+    isolate work onto a per-issue branch created from `origin/<base_branch>` and target
+    `<base_branch>` for the PR, and the clone hook SHOULD record it (e.g.
+    `git config symphony.baseBranch <base_branch>`) so repo-local skills resolve the same base.
+  - Symphony performs no git operations itself; `base_branch` only shapes the generated prompt
+    and the operator-provisioned skills.
 
 ### 5.4 Prompt Template Contract
 
@@ -711,6 +721,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
 - `repo.url`: string or null, default `null` (consumed by `hooks.after_create` and project-bootstrap preflight)
 - `repo.path`: path or null, default `null` (operator-facing only; Symphony never reads/writes through it)
+- `repo.base_branch`: string or null, default `null` (unset → PRs target the repo default; set → work isolates onto issue branches off `origin/<base_branch>`)
 - `hooks.after_create`: shell script or null
 - `hooks.before_run`: shell script or null
 - `hooks.after_run`: shell script or null

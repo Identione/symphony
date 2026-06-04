@@ -207,23 +207,29 @@ defmodule SymphonyElixir.Config do
   #      OR $CLAUDE_CONFIG_DIR/.credentials.json
   #      OR ~/.claude/.credentials.json
   #      (live Claude Code subscription login with a `claudeAiOauth` entry)
-  defp claude_credentials_present?(agent) do
-    Enum.any?(
-      [
-        &claude_api_key_env?/0,
-        &claude_oauth_env?/0,
-        &claude_provider_routing?/0,
-        fn -> claude_oauth_credentials_file?(agent) end
-      ],
-      fn check -> check.() end
-    )
+  @doc """
+  The first resolvable Claude credential source for the given settings, as a
+  human-readable label, or `nil` when none resolves. Mirrors the claude-mode
+  auth precedence enforced by `validate_agent/1`, so preflight can surface the
+  same `:missing_claude_credentials` failure (and which source matched) before
+  the daemon is ever started.
+  """
+  @spec claude_credential_source(Schema.t()) :: String.t() | nil
+  def claude_credential_source(%Schema{agent: agent}), do: claude_credential_source_for_agent(agent)
+
+  defp claude_credential_source_for_agent(agent) do
+    cond do
+      env_present?("ANTHROPIC_API_KEY") -> "ANTHROPIC_API_KEY"
+      env_present?("ANTHROPIC_AUTH_TOKEN") -> "ANTHROPIC_AUTH_TOKEN"
+      env_present?("CLAUDE_CODE_OAUTH_TOKEN") -> "CLAUDE_CODE_OAUTH_TOKEN"
+      claude_provider_routing?() -> "cloud provider routing"
+      claude_oauth_credentials_file?(agent) -> "credentials file (#{claude_credentials_path(agent)})"
+      true -> nil
+    end
   end
 
-  defp claude_api_key_env? do
-    env_present?("ANTHROPIC_API_KEY") or env_present?("ANTHROPIC_AUTH_TOKEN")
-  end
-
-  defp claude_oauth_env?, do: env_present?("CLAUDE_CODE_OAUTH_TOKEN")
+  defp claude_credentials_present?(agent),
+    do: claude_credential_source_for_agent(agent) != nil
 
   defp claude_provider_routing? do
     Enum.any?(
