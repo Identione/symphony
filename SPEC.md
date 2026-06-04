@@ -381,6 +381,15 @@ Fields:
   - Default: `Todo`, `In Progress`
 - `terminal_states` (list of strings)
   - Default: `Closed`, `Cancelled`, `Canceled`, `Duplicate`, `Done`
+- `required_labels` (list of strings)
+  - Default: empty (no gating).
+  - When non-empty, an issue is dispatch-eligible only if it carries *all*
+    of these labels. Matching is case-insensitive.
+- `excluded_labels` (list of strings)
+  - Default: empty (no gating).
+  - When non-empty, an issue is *not* dispatch-eligible if it carries *any*
+    of these labels. Matching is case-insensitive. An excluded label always
+    disqualifies, regardless of `required_labels`.
 
 #### 5.3.2 `polling` (object)
 
@@ -707,6 +716,8 @@ not require recognizing or validating extension fields unless that extension is 
 - `tracker.project_slug`: string, REQUIRED when `tracker.kind=linear`
 - `tracker.active_states`: list of strings, default `["Todo", "In Progress"]`
 - `tracker.terminal_states`: list of strings, default `["Closed", "Cancelled", "Canceled", "Duplicate", "Done"]`
+- `tracker.required_labels`: list of strings, default `[]` (empty = no gating; case-insensitive, issue must carry *all* listed labels)
+- `tracker.excluded_labels`: list of strings, default `[]` (empty = no gating; case-insensitive, issue must carry *none* of the listed labels)
 - `polling.interval_ms`: integer, default `30000`
 - `workspace.root`: path resolved to absolute, default `<system-temp>/symphony_workspaces`
 - `repo.url`: string or null, default `null` (consumed by `hooks.after_create` and project-bootstrap preflight)
@@ -880,6 +891,8 @@ An issue is dispatch-eligible only if all are true:
 
 - It has `id`, `identifier`, `title`, and `state`.
 - Its state is in `active_states` and not in `terminal_states`.
+- If `required_labels` is non-empty, it carries *all* of those labels (case-insensitive).
+- If `excluded_labels` is non-empty, it carries *none* of those labels (case-insensitive).
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.

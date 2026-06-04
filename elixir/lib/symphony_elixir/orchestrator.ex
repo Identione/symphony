@@ -854,6 +854,7 @@ defmodule SymphonyElixir.Orchestrator do
        )
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
     issue_routable_to_worker?(issue) and
+      issue_satisfies_label_filters?(issue) and
       active_issue_state?(state_name, active_states) and
       !terminal_issue_state?(state_name, terminal_states)
   end
@@ -865,6 +866,15 @@ defmodule SymphonyElixir.Orchestrator do
        do: assigned_to_worker
 
   defp issue_routable_to_worker?(_issue), do: true
+
+  # Dispatch only when the issue carries every `required_labels` entry (all-of)
+  # and none of the `excluded_labels` entries (none-of). Empty lists are no-ops.
+  defp issue_satisfies_label_filters?(%Issue{labels: labels}) when is_list(labels) do
+    present = MapSet.new(labels, &normalize_label/1)
+
+    MapSet.subset?(required_label_set(), present) and
+      MapSet.disjoint?(excluded_label_set(), present)
+  end
 
   defp todo_issue_blocked_by_non_terminal?(
          %Issue{state: issue_state, blocked_by: blockers},
@@ -895,6 +905,21 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp normalize_issue_state(state_name) when is_binary(state_name) do
     String.downcase(String.trim(state_name))
+  end
+
+  defp normalize_label(label) when is_binary(label) do
+    String.downcase(String.trim(label))
+  end
+
+  defp required_label_set, do: label_set(Config.settings!().tracker.required_labels)
+
+  defp excluded_label_set, do: label_set(Config.settings!().tracker.excluded_labels)
+
+  defp label_set(labels) when is_list(labels) do
+    labels
+    |> Enum.map(&normalize_label/1)
+    |> Enum.filter(&(&1 != ""))
+    |> MapSet.new()
   end
 
   defp terminal_state_set do
