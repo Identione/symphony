@@ -1,3 +1,16 @@
 [tools]
 erlang = "28"
 elixir = "1.19.5-otp-28"
+# Agent runtimes on PATH. codex is the default adapter binary; uv runs the
+# Claude SDK sidecar (priv/claude_agent). codex moves fast and has no stable
+# release line to pin, so it tracks "latest" — reproducibility comes from
+# mise.lock, and bumps are deliberate via `make upgrade-tools`. erlang/elixir/uv
+# are line-pinned plumbing: change those by editing the pin here, not by churn.
+codex = "latest"
+uv = "0.11"
+
+# Record exact resolved versions + asset checksums in mise.lock so the eager
+# "latest" pin stays reproducible across machines and a swapped upstream artifact
+# fails the checksum check instead of installing silently.
+[settings]
+lockfile = true
