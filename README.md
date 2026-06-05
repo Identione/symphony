@@ -73,6 +73,10 @@ It does **not** regenerate `WORKFLOW.md` or the instance `Makefile`. To pull in 
 re-run `make init INSTANCE=<name> ARGS="--force ..."` — that clobbers both files, so back up any
 hand-edits first.
 
+It also does **not** upgrade the agent toolchain (codex, claude-agent-sdk). That's a separate,
+deliberate action — `cd elixir && make upgrade-tools` — which refreshes `mise.lock` and the
+sidecar's `uv.lock`. See [elixir/README.md](elixir/README.md#upgrading-the-agent-toolchain).
+
 - Full flag list and operator notes: [elixir/README.md](elixir/README.md)
 - Codex permissions profile setup: [SETUP.md](SETUP.md)
 - Building your own from scratch: [SPEC.md](SPEC.md)

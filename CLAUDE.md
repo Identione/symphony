@@ -20,14 +20,19 @@ There is no second implementation. All code work happens in `elixir/`.
 
 ## Working in `elixir/`
 
-Toolchain is pinned via `mise` (`elixir/mise.toml`: Erlang 28 / Elixir 1.19). **Always prefix mix commands with `mise exec --`** when running from a fresh shell — the rest of this file omits the prefix for brevity but you should include it.
+Toolchain is pinned via `mise` (`elixir/mise.toml`): Erlang 28 / Elixir 1.19 (line-pinned), plus the agent runtimes on `PATH` — `codex` (the default adapter binary, tracked as `latest`) and `uv` (runs the Claude SDK sidecar, line-pinned `0.11`). Exact resolved versions + per-platform checksums are committed in `elixir/mise.lock` (`lockfile = true`), so `mise install` is reproducible. **Always prefix mix commands with `mise exec --`** when running from a fresh shell — the rest of this file omits the prefix for brevity but you should include it.
 
 ```bash
 cd elixir
-mise install              # one-time, installs Erlang/Elixir
+mise install              # one-time, installs the full toolchain from mise.lock
 mix setup                 # fetch deps
 make all                  # full quality gate (run before handoff)
 ```
+
+Two kinds of "upgrade" — don't conflate them:
+
+- **`make upgrade-tools`** (in `elixir/Makefile`) bumps the *eager-tracked agent toolchain* — `codex` (refreshes `mise.lock`) and `claude-agent-sdk` (refreshes `priv/claude_agent/uv.lock`). Line-pinned tools (erlang/elixir/uv) move only by editing the pin in `mise.toml`. Run `make all` and commit both lockfiles after.
+- **`make upgrade` / `upgrade-all`** (root Makefile) redeploys *Symphony code* — rebuild the escript + restart instance daemons after a `git pull`. Nothing to do with the toolchain.
 
 `make all` runs: `setup → build → fmt-check → lint → coverage → dialyzer`. **Coverage threshold is 100%** (with an explicit ignore list in `mix.exs` — see `test_coverage`). New modules default to being covered; add to the ignore list only with justification.
 
