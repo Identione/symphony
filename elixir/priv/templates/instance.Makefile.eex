@@ -26,8 +26,8 @@ endif
 
 .DEFAULT_GOAL := help
 .PHONY: help start foreground stop restart status logs clean preflight \
-        upgrade _upgrade-restart-if-running \
-        dashboard-url ensure-trust check-built check-workflow check-key
+        upgrade _upgrade-restart-if-running poll api-state \
+        dashboard-url _api-base ensure-trust check-built check-workflow check-key
 
 help: ## Show this help.
 	@printf '$(BOLD)Symphony instance$(RESET)  $(DIM)— $(INSTANCE_DIR)$(RESET)\n\n'
@@ -124,6 +124,33 @@ dashboard-url:
 	  case "$$HOST" in 0.0.0.0|::|"") DH=localhost ;; *) DH="$$HOST" ;; esac; \
 	  echo "dashboard: $(CYAN)http://$$DH:$$PORT/$(RESET)"; \
 	fi
+
+poll: check-workflow ## Force an immediate poll+reconcile (POST /api/v1/refresh).
+	@BASE=$$($(MAKE) --no-print-directory _api-base) || exit 1; \
+	echo "$(DIM)POST $$BASE/api/v1/refresh$(RESET)"; \
+	RESP=$$(curl -fsS -X POST "$$BASE/api/v1/refresh") \
+	  || { echo "$(RED)error:$(RESET) request failed — is the daemon running? ($(CYAN)make status$(RESET))" >&2; exit 1; }; \
+	printf '%s' "$$RESP" | jq . 2>/dev/null || printf '%s\n' "$$RESP"
+
+api-state: check-workflow ## Print the orchestrator snapshot (GET /api/v1/state).
+	@BASE=$$($(MAKE) --no-print-directory _api-base) || exit 1; \
+	RESP=$$(curl -fsS "$$BASE/api/v1/state") \
+	  || { echo "$(RED)error:$(RESET) request failed — is the daemon running? ($(CYAN)make status$(RESET))" >&2; exit 1; }; \
+	printf '%s' "$$RESP" | jq . 2>/dev/null || printf '%s\n' "$$RESP"
+
+# Resolve the REST API base URL (http://host:port) from WORKFLOW.md's server
+# block, mirroring dashboard-url. Exits non-zero with a hint when the dashboard
+# is disabled (no server.port), so poll/api-state fail fast and clearly.
+_api-base:
+	@PORT=$$(grep -E '^  port:' "$(WORKFLOW)" 2>/dev/null | head -1 | awk '{print $$2}'); \
+	if [ -z "$$PORT" ]; then \
+	  echo "$(RED)error:$(RESET) no server.port in $(WORKFLOW) — REST API/dashboard is disabled." >&2; \
+	  echo "  re-init with $(CYAN)--port <N>$(RESET), or add a server: block to WORKFLOW.md." >&2; \
+	  exit 1; \
+	fi; \
+	HOST=$$(grep -E '^  host:' "$(WORKFLOW)" 2>/dev/null | head -1 | awk '{print $$2}' | tr -d '"'); \
+	case "$$HOST" in 0.0.0.0|::|"") DH=localhost ;; *) DH="$$HOST" ;; esac; \
+	echo "http://$$DH:$$PORT"
 
 logs: ## Tail the structured application log (rotating).
 	@touch $(STRUCT_LOG)
