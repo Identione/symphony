@@ -651,6 +651,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                %{
                  "issue_id" => "issue-http",
                  "issue_identifier" => "MT-HTTP",
+                 "issue_url" => "https://example.org/issues/MT-HTTP",
                  "state" => "In Progress",
                  "worker_host" => nil,
                  "workspace_path" => nil,
@@ -669,6 +670,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                %{
                  "issue_id" => "issue-retry",
                  "issue_identifier" => "MT-RETRY",
+                 "issue_url" => "https://example.org/issues/MT-RETRY",
                  "attempt" => 2,
                  "due_at" => state_payload["retrying"] |> List.first() |> Map.fetch!("due_at"),
                  "error" => "boom",
@@ -680,6 +682,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                %{
                  "issue_id" => "issue-blocked",
                  "issue_identifier" => "MT-BLOCKED",
+                 "issue_url" => "https://example.org/issues/MT-BLOCKED",
                  "state" => "In Progress",
                  "error" => "codex turn requires operator input",
                  "worker_host" => "dm-dev2",
@@ -1011,7 +1014,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
 
     html = html_response(get(build_conn(), "/"), 200)
-    assert html =~ "/dashboard.css"
+    assert html =~ ~r|/dashboard\.css\?v=[0-9a-f]{12}|
     assert html =~ "/dashboard.js"
     assert html =~ "/vendor/phoenix_html/phoenix_html.js"
     assert html =~ "/vendor/phoenix/phoenix.js"
@@ -1028,6 +1031,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-live"
     assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-offline"
     assert dashboard_css =~ ".graph-canvas"
+    assert dashboard_css =~ "text-decoration-thickness: 1px"
 
     phoenix_html_js = response(get(build_conn(), "/vendor/phoenix_html/phoenix_html.js"), 200)
     assert phoenix_html_js =~ "phoenix.link.click"
@@ -1081,6 +1085,10 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "MT-HTTP"
     assert html =~ "MT-RETRY"
     assert html =~ "MT-BLOCKED"
+    assert html =~ ~s(href="https://example.org/issues/MT-HTTP")
+    assert html =~ ~s(href="https://example.org/issues/MT-RETRY")
+    assert html =~ ~s(href="https://example.org/issues/MT-BLOCKED")
+    assert html =~ ~s(aria-label="Open MT-HTTP in the issue tracker")
     assert html =~ "rendered"
     assert html =~ "turn blocked: waiting for user input"
     assert html =~ "--hero-tint-bg:"
@@ -1105,6 +1113,7 @@ defmodule SymphonyElixir.ExtensionsTest do
         %{
           issue_id: "issue-http",
           identifier: "MT-HTTP",
+          issue_url: "javascript:alert('nope')",
           state: "In Progress",
           session_id: "thread-http",
           turn_count: 8,
@@ -1139,6 +1148,8 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert_eventually(fn ->
       render(view) =~ "agent message content streaming: structured update"
     end)
+
+    refute render(view) =~ "javascript:alert"
   end
 
   test "dashboard liveview renders an unavailable state without crashing" do
@@ -1242,6 +1253,7 @@ defmodule SymphonyElixir.ExtensionsTest do
         %{
           issue_id: "issue-http",
           identifier: "MT-HTTP",
+          issue_url: "https://example.org/issues/MT-HTTP",
           state: "In Progress",
           session_id: "thread-http",
           turn_count: 7,
@@ -1259,6 +1271,7 @@ defmodule SymphonyElixir.ExtensionsTest do
         %{
           issue_id: "issue-retry",
           identifier: "MT-RETRY",
+          issue_url: "https://example.org/issues/MT-RETRY",
           attempt: 2,
           due_in_ms: 2_000,
           error: "boom"
@@ -1268,6 +1281,7 @@ defmodule SymphonyElixir.ExtensionsTest do
         %{
           issue_id: "issue-blocked",
           identifier: "MT-BLOCKED",
+          issue_url: "https://example.org/issues/MT-BLOCKED",
           state: "In Progress",
           error: "codex turn requires operator input",
           worker_host: "dm-dev2",

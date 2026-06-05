@@ -26,6 +26,9 @@ defmodule SymphonyElixirWeb.StaticAssets do
   @external_resource @cytoscape_fcose_js_path
 
   @dashboard_css File.read!(@dashboard_css_path)
+  @dashboard_css_digest :crypto.hash(:sha256, @dashboard_css)
+                        |> Base.encode16(case: :lower)
+                        |> binary_part(0, 12)
   @dashboard_js File.read!(@dashboard_js_path)
   @phoenix_html_js File.read!(@phoenix_html_js_path)
   @phoenix_js File.read!(@phoenix_js_path)
@@ -50,6 +53,9 @@ defmodule SymphonyElixirWeb.StaticAssets do
     "/vendor/cose-base/cose-base.js" => {"application/javascript", @cose_base_js},
     "/vendor/cytoscape-fcose/cytoscape-fcose.js" => {"application/javascript", @cytoscape_fcose_js}
   }
+
+  @spec dashboard_css_url() :: String.t()
+  def dashboard_css_url, do: "/dashboard.css?v=#{@dashboard_css_digest}"
 
   @spec fetch(String.t()) :: {:ok, String.t(), binary()} | :error
   def fetch(path) when is_binary(path) do

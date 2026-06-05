@@ -273,6 +273,9 @@ Phoenix LiveView at `/`, JSON API at `/api/v1/state`,
 by `server.port` in WORKFLOW.md or the `--port` CLI flag at start time.
 Bandit fronts the stack.
 
+Tracker issue identifiers in dashboard rows link to the tracker-provided URL
+when it uses `http` or `https`.
+
 ## Project layout
 
 - `lib/` — application code and Mix tasks

@@ -1975,6 +1975,7 @@ SHOULD return:
 - `running` (list of running session rows)
 - each running row SHOULD include `turn_count` and `agent_kind`
 - `retrying` (list of retry queue rows)
+- session and retry rows SHOULD include the tracker-provided issue URL when available
 - `agent_totals`
   - `input_tokens`
   - `output_tokens`
@@ -2122,6 +2123,7 @@ Minimum endpoints:
           "issue_id": "abc123",
           "issue_identifier": "MT-649",
           "agent_kind": "claude",
+          "issue_url": "https://tracker.example/issues/MT-649",
           "state": "In Progress",
           "session_id": "f47ac10b-58cc-4372-a567-0e02b2c3d479",
           "turn_count": 7,
@@ -2142,6 +2144,7 @@ Minimum endpoints:
         {
           "issue_id": "def456",
           "issue_identifier": "MT-650",
+          "issue_url": "https://tracker.example/issues/MT-650",
           "attempt": 3,
           "due_at": "2026-02-24T20:16:00Z",
           "error": "no available orchestrator slots"
