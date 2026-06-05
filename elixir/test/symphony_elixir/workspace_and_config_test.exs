@@ -1102,6 +1102,29 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.settings!().codex.command == "codex app-server"
   end
 
+  test "config default workspace.root tracks runtime TMPDIR, not compile-time value" do
+    previous_tmpdir = System.get_env("TMPDIR")
+    on_exit(fn -> restore_env("TMPDIR", previous_tmpdir) end)
+
+    runtime_tmpdir =
+      Path.join(
+        previous_tmpdir || "/tmp",
+        "symphony-elixir-tmpdir-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(runtime_tmpdir)
+    on_exit(fn -> File.rm_rf(runtime_tmpdir) end)
+
+    System.put_env("TMPDIR", runtime_tmpdir)
+
+    assert System.tmp_dir!() == runtime_tmpdir
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: nil)
+
+    assert Config.settings!().workspace.root ==
+             Path.join(System.tmp_dir!(), "symphony_workspaces")
+  end
+
   test "config resolves $VAR references for env-backed secret and path values" do
     workspace_env_var = "SYMP_WORKSPACE_ROOT_#{System.unique_integer([:positive])}"
     api_key_env_var = "SYMP_LINEAR_API_KEY_#{System.unique_integer([:positive])}"
