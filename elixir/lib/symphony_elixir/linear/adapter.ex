@@ -37,14 +37,23 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  # `orderBy: createdAt` is kept explicit so consumers can rely on a deterministic
+  # within-page ordering regardless of Linear's default (`updatedAt`). Pagination
+  # via `pageInfo { hasNextPage endCursor }` guarantees `fetch_comments/1` returns
+  # every comment on the issue — including the `## Symphony Workpad` marker — even
+  # when the issue has more than `@comments_page_size` comments (IDE-103).
   @comments_query """
-  query SymphonyIssueComments($issueId: String!, $first: Int!) {
+  query SymphonyIssueComments($issueId: String!, $first: Int!, $after: String) {
     issue(id: $issueId) {
-      comments(first: $first, orderBy: createdAt) {
+      comments(first: $first, after: $after, orderBy: createdAt) {
         nodes {
           id
           body
           resolvedAt
+        }
+        pageInfo {
+          hasNextPage
+          endCursor
         }
       }
     }
@@ -99,20 +108,42 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @spec fetch_comments(String.t()) :: {:ok, [SymphonyElixir.Tracker.comment()]} | {:error, term()}
   def fetch_comments(issue_id) when is_binary(issue_id) do
-    case client_module().graphql(@comments_query, %{issueId: issue_id, first: @comments_page_size}) do
-      {:ok, response} ->
-        case get_in(response, ["data", "issue", "comments", "nodes"]) do
-          nodes when is_list(nodes) ->
-            {:ok, Enum.map(nodes, &normalize_comment/1)}
+    fetch_comments_page(issue_id, nil, [])
+  end
 
-          _ ->
-            {:error, :comments_fetch_failed}
-        end
-
-      {:error, reason} ->
-        {:error, reason}
+  defp fetch_comments_page(issue_id, after_cursor, acc_comments) do
+    with {:ok, response} <-
+           client_module().graphql(@comments_query, %{
+             issueId: issue_id,
+             first: @comments_page_size,
+             after: after_cursor
+           }),
+         %{"nodes" => nodes} = comments when is_list(nodes) <-
+           get_in(response, ["data", "issue", "comments"]) do
+      page = Enum.map(nodes, &normalize_comment/1)
+      updated_acc = Enum.reverse(page, acc_comments)
+      advance_comments_page(issue_id, updated_acc, Map.get(comments, "pageInfo"))
+    else
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :comments_fetch_failed}
     end
   end
+
+  defp advance_comments_page(issue_id, acc_comments, page_info) do
+    case next_page_cursor(page_info) do
+      {:ok, next_cursor} -> fetch_comments_page(issue_id, next_cursor, acc_comments)
+      :done -> {:ok, Enum.reverse(acc_comments)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp next_page_cursor(%{"hasNextPage" => true, "endCursor" => end_cursor})
+       when is_binary(end_cursor) and byte_size(end_cursor) > 0 do
+    {:ok, end_cursor}
+  end
+
+  defp next_page_cursor(%{"hasNextPage" => true}), do: {:error, :linear_missing_end_cursor}
+  defp next_page_cursor(_), do: :done
 
   @spec update_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def update_comment(comment_id, body) when is_binary(comment_id) and is_binary(body) do
