@@ -302,10 +302,10 @@ defmodule SymphonyElixir.Orchestrator do
 
     case DeterministicFailure.handle(action, issue, settings) do
       {:ok, :escalated} ->
-        next_state =
-          put_deterministic_failure(state, issue_id, %{entry | notified_alert?: true, notified_escalation?: true})
-
-        {:escalated, escalate_running_issue(next_state, issue_id, running_entry)}
+        # No need to persist the notified flags here: `escalate_running_issue/3`
+        # drops the counter entry entirely (the issue is leaving the active set),
+        # so any flag write would be immediately discarded.
+        {:escalated, escalate_running_issue(state, issue_id, running_entry)}
 
       :ok ->
         {:continue, put_deterministic_failure(state, issue_id, %{entry | notified_alert?: true})}

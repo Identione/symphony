@@ -37,7 +37,7 @@ agent:
   # blocker comment. After M, it also moves the issue to
   # `deterministic_failure_escalation_state` so the polling loop stops
   # re-dispatching. Transient codes (`rate_limited`, `overloaded`,
-  # `turn_timeout`, `unknown`) reset the counter so a brief upstream blip
+  # `turn_timeout`, `response_timeout`, `unknown`) reset the counter so a brief upstream blip
   # never trips these thresholds. Defaults: 3 / 5 / "Human Review". Lower the
   # alert/escalation thresholds for tighter feedback; raise
   # max_retry_backoff_ms below to slow retries between alerts.

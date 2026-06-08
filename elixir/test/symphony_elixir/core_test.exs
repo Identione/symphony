@@ -1371,6 +1371,34 @@ defmodule SymphonyElixir.CoreTest do
     end
   end
 
+  test "classify_error_code maps IDE-71 structured failure shapes to codes" do
+    # Guards the IDE-71 -> IDE-73 seam. `AgentRunner` is in mix.exs
+    # `test_coverage: ignore_modules`, so the 100% coverage gate does NOT
+    # exercise these clauses. This test is the only regression guard: if
+    # IDE-71's error-tuple shapes ever drift, every deterministic failure
+    # collapses to `:unknown` (reset as transient), silently disabling the
+    # deterministic-failure escalation — and nothing else would catch it.
+    assert AgentRunner.classify_error_code({:turn_failed, :quota_exceeded, %{}}) ==
+             :quota_exceeded
+
+    assert AgentRunner.classify_error_code({:codex_error_notification, :rate_limited, %{}}) ==
+             :rate_limited
+
+    assert AgentRunner.classify_error_code({:claude_sdk_error, :context_window_exhausted, "m"}) ==
+             :context_window_exhausted
+
+    assert AgentRunner.classify_error_code(:turn_timeout) == :turn_timeout
+    assert AgentRunner.classify_error_code(:response_timeout) == :response_timeout
+    assert AgentRunner.classify_error_code({:port_exit, 1}) == :port_exit
+    assert AgentRunner.classify_error_code({:claude_sidecar_exit, 127}) == :claude_sidecar_exit
+
+    # Pre-IDE-71 2-tuple shapes, non-atom codes, and anything unrecognized fall
+    # back to `:unknown` (treated as transient → the counter resets).
+    assert AgentRunner.classify_error_code({:claude_sdk_error, "2-tuple"}) == :unknown
+    assert AgentRunner.classify_error_code({:turn_failed, %{"params" => 1}}) == :unknown
+    assert AgentRunner.classify_error_code(:anything_else) == :unknown
+  end
+
   test "agent runner continues with a follow-up turn while the issue remains active" do
     test_root =
       Path.join(
