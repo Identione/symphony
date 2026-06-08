@@ -37,6 +37,30 @@ defmodule SymphonyElixir.Linear.Adapter do
   }
   """
 
+  @comments_query """
+  query SymphonyIssueComments($issueId: String!, $first: Int!) {
+    issue(id: $issueId) {
+      comments(first: $first, orderBy: createdAt) {
+        nodes {
+          id
+          body
+          resolvedAt
+        }
+      }
+    }
+  }
+  """
+
+  @update_comment_mutation """
+  mutation SymphonyUpdateComment($id: String!, $body: String!) {
+    commentUpdate(id: $id, input: {body: $body}) {
+      success
+    }
+  }
+  """
+
+  @comments_page_size 50
+
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues, do: client_module().fetch_candidate_issues()
 
@@ -71,6 +95,43 @@ defmodule SymphonyElixir.Linear.Adapter do
       {:error, reason} -> {:error, reason}
       _ -> {:error, :issue_update_failed}
     end
+  end
+
+  @spec fetch_comments(String.t()) :: {:ok, [SymphonyElixir.Tracker.comment()]} | {:error, term()}
+  def fetch_comments(issue_id) when is_binary(issue_id) do
+    case client_module().graphql(@comments_query, %{issueId: issue_id, first: @comments_page_size}) do
+      {:ok, response} ->
+        case get_in(response, ["data", "issue", "comments", "nodes"]) do
+          nodes when is_list(nodes) ->
+            {:ok, Enum.map(nodes, &normalize_comment/1)}
+
+          _ ->
+            {:error, :comments_fetch_failed}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  @spec update_comment(String.t(), String.t()) :: :ok | {:error, term()}
+  def update_comment(comment_id, body) when is_binary(comment_id) and is_binary(body) do
+    with {:ok, response} <- client_module().graphql(@update_comment_mutation, %{id: comment_id, body: body}),
+         true <- get_in(response, ["data", "commentUpdate", "success"]) == true do
+      :ok
+    else
+      false -> {:error, :comment_update_failed}
+      {:error, reason} -> {:error, reason}
+      _ -> {:error, :comment_update_failed}
+    end
+  end
+
+  defp normalize_comment(node) do
+    %{
+      id: Map.get(node, "id"),
+      body: Map.get(node, "body", ""),
+      resolved_at: Map.get(node, "resolvedAt")
+    }
   end
 
   defp client_module do

@@ -1208,6 +1208,67 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.settings!().worker.max_concurrent_agents_per_host == 2
   end
 
+  test "schema rejects deterministic_failure_escalation_threshold below the alert threshold" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               agent: %{
+                 deterministic_failure_alert_threshold: 5,
+                 deterministic_failure_escalation_threshold: 3
+               }
+             })
+
+    assert message =~ "deterministic_failure_escalation_threshold"
+    assert message =~ "must be >= deterministic_failure_alert_threshold"
+  end
+
+  test "schema rejects non-positive deterministic_failure thresholds" do
+    assert {:error, {:invalid_workflow_config, alert_message}} =
+             Schema.parse(%{
+               agent: %{deterministic_failure_alert_threshold: 0}
+             })
+
+    assert alert_message =~ "deterministic_failure_alert_threshold"
+
+    assert {:error, {:invalid_workflow_config, escalate_message}} =
+             Schema.parse(%{
+               agent: %{deterministic_failure_escalation_threshold: 0}
+             })
+
+    assert escalate_message =~ "deterministic_failure_escalation_threshold"
+  end
+
+  test "schema rejects deterministic_failure_escalation_state that overlaps tracker.active_states" do
+    # Operator misconfigures the escalation state to a value that's still in
+    # the polling-active set → the loop would just re-claim the issue. IDE-73
+    # rework #2 surfaces this at parse time.
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               tracker: %{active_states: ["Todo", "In Progress"]},
+               agent: %{deterministic_failure_escalation_state: "In Progress"}
+             })
+
+    assert message =~ "deterministic_failure_escalation_state"
+    assert message =~ "must not appear in tracker.active_states"
+
+    # Comparison is case-insensitive (matches `normalize_issue_state/1`).
+    assert {:error, {:invalid_workflow_config, lowercase_message}} =
+             Schema.parse(%{
+               tracker: %{active_states: ["in progress"]},
+               agent: %{deterministic_failure_escalation_state: "In Progress"}
+             })
+
+    assert lowercase_message =~ "deterministic_failure_escalation_state"
+
+    # Disjoint config validates clean (defaults: "Human Review" vs ["Todo","In Progress"]).
+    assert {:ok, settings} =
+             Schema.parse(%{
+               tracker: %{active_states: ["Todo", "In Progress"]},
+               agent: %{deterministic_failure_escalation_state: "Human Review"}
+             })
+
+    assert settings.agent.deterministic_failure_escalation_state == "Human Review"
+  end
+
   test "schema helpers cover custom type and state limit validation" do
     assert StringOrMap.type() == :map
     assert StringOrMap.embed_as(:json) == :self

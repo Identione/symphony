@@ -37,14 +37,38 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def create_comment(issue_id, body) do
-    send_event({:memory_tracker_comment, issue_id, body})
-    :ok
+    with_injection(:memory_tracker_create_comment_response, fn ->
+      send_event({:memory_tracker_comment, issue_id, body})
+      :ok
+    end)
   end
 
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(issue_id, state_name) do
-    send_event({:memory_tracker_state_update, issue_id, state_name})
-    :ok
+    with_injection(:memory_tracker_update_issue_state_response, fn ->
+      send_event({:memory_tracker_state_update, issue_id, state_name})
+      :ok
+    end)
+  end
+
+  @spec fetch_comments(String.t()) :: {:ok, [SymphonyElixir.Tracker.comment()]} | {:error, term()}
+  def fetch_comments(issue_id) do
+    with_injection(:memory_tracker_fetch_comments_response, fn ->
+      comments =
+        :symphony_elixir
+        |> Application.get_env(:memory_tracker_comments, %{})
+        |> Map.get(issue_id, [])
+
+      {:ok, comments}
+    end)
+  end
+
+  @spec update_comment(String.t(), String.t()) :: :ok | {:error, term()}
+  def update_comment(comment_id, body) do
+    with_injection(:memory_tracker_update_comment_response, fn ->
+      send_event({:memory_tracker_comment_update, comment_id, body})
+      :ok
+    end)
   end
 
   defp configured_issues do
@@ -59,6 +83,17 @@ defmodule SymphonyElixir.Tracker.Memory do
     case Application.get_env(:symphony_elixir, :memory_tracker_recipient) do
       pid when is_pid(pid) -> send(pid, message)
       _ -> :ok
+    end
+  end
+
+  # Test-only injection point: tests set e.g.
+  # `Application.put_env(:symphony_elixir, :memory_tracker_update_comment_response, {:error, :boom})`
+  # to drive the DeterministicFailure `{:error, _}` branches without a real
+  # GraphQL transport.
+  defp with_injection(key, fun) do
+    case Application.get_env(:symphony_elixir, key) do
+      {:error, _} = err -> err
+      _ -> fun.()
     end
   end
 

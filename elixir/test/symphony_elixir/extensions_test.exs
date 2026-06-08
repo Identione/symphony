@@ -197,9 +197,42 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert_receive {:memory_tracker_comment, "issue-1", "comment"}
     assert_receive {:memory_tracker_state_update, "issue-1", "Done"}
 
+    Application.put_env(:symphony_elixir, :memory_tracker_comments, %{
+      "issue-1" => [%{id: "c1", body: "## Symphony Workpad\n", resolved_at: nil}]
+    })
+
+    assert {:ok, [%{id: "c1", body: "## Symphony Workpad\n", resolved_at: nil}]} =
+             SymphonyElixir.Tracker.fetch_comments("issue-1")
+
+    assert {:ok, []} = SymphonyElixir.Tracker.fetch_comments("unknown-issue")
+
+    assert :ok = SymphonyElixir.Tracker.update_comment("c1", "edited")
+    assert_receive {:memory_tracker_comment_update, "c1", "edited"}
+
+    # Error-injection hooks short-circuit the happy path so tests can drive
+    # the DeterministicFailure error branches without a real transport.
+    Application.put_env(:symphony_elixir, :memory_tracker_fetch_comments_response, {:error, :boom})
+    assert {:error, :boom} = SymphonyElixir.Tracker.fetch_comments("issue-1")
+    Application.delete_env(:symphony_elixir, :memory_tracker_fetch_comments_response)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_update_comment_response, {:error, :boom})
+    assert {:error, :boom} = SymphonyElixir.Tracker.update_comment("c1", "edited")
+    Application.delete_env(:symphony_elixir, :memory_tracker_update_comment_response)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_create_comment_response, {:error, :boom})
+    assert {:error, :boom} = SymphonyElixir.Tracker.create_comment("issue-1", "comment")
+    Application.delete_env(:symphony_elixir, :memory_tracker_create_comment_response)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_update_issue_state_response, {:error, :boom})
+    assert {:error, :boom} = SymphonyElixir.Tracker.update_issue_state("issue-1", "Done")
+    Application.delete_env(:symphony_elixir, :memory_tracker_update_issue_state_response)
+
+    Application.delete_env(:symphony_elixir, :memory_tracker_comments)
     Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
     assert :ok = Memory.create_comment("issue-1", "quiet")
     assert :ok = Memory.update_issue_state("issue-1", "Quiet")
+    assert {:ok, []} = Memory.fetch_comments("issue-1")
+    assert :ok = Memory.update_comment("c1", "quiet")
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
     assert SymphonyElixir.Tracker.adapter() == Adapter
@@ -317,6 +350,70 @@ defmodule SymphonyElixir.ExtensionsTest do
     )
 
     assert {:error, :issue_update_failed} = Adapter.update_issue_state("issue-1", "Odd")
+
+    # fetch_comments/1: happy path normalizes node shapes (covers
+    # `normalize_comment/1` for both full and partial responses), missing-data
+    # malformed responses, and GraphQL transport errors.
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "comments" => %{
+               "nodes" => [
+                 %{"id" => "c1", "body" => "hi", "resolvedAt" => nil},
+                 %{"id" => "c2", "body" => "resolved", "resolvedAt" => "2025-01-01T00:00:00Z"},
+                 %{"id" => "c3"}
+               ]
+             }
+           }
+         }
+       }}
+    )
+
+    assert {:ok, comments} = Adapter.fetch_comments("issue-1")
+    assert_receive {:graphql_called, fetch_comments_query, %{first: 50, issueId: "issue-1"}}
+    assert fetch_comments_query =~ "orderBy: createdAt"
+
+    assert comments == [
+             %{id: "c1", body: "hi", resolved_at: nil},
+             %{id: "c2", body: "resolved", resolved_at: "2025-01-01T00:00:00Z"},
+             %{id: "c3", body: "", resolved_at: nil}
+           ]
+
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{"issue" => nil}}})
+    assert {:error, :comments_fetch_failed} = Adapter.fetch_comments("issue-1")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :transport_down})
+    assert {:error, :transport_down} = Adapter.fetch_comments("issue-1")
+
+    # update_comment/2: happy path + GraphQL error + success:false +
+    # malformed-payload fallback.
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"commentUpdate" => %{"success" => true}}}}
+    )
+
+    assert :ok = Adapter.update_comment("comment-1", "edited")
+    assert_receive {:graphql_called, update_comment_query, %{body: "edited", id: "comment-1"}}
+    assert update_comment_query =~ "commentUpdate"
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"commentUpdate" => %{"success" => false}}}}
+    )
+
+    assert {:error, :comment_update_failed} = Adapter.update_comment("comment-1", "edited")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :transport_down})
+    assert {:error, :transport_down} = Adapter.update_comment("comment-1", "edited")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{}}})
+    assert {:error, :comment_update_failed} = Adapter.update_comment("comment-1", "weird")
+
+    Process.put({FakeLinearClient, :graphql_result}, :unexpected)
+    assert {:error, :comment_update_failed} = Adapter.update_comment("comment-1", "odd")
   end
 
   test "phoenix observability api preserves state, issue, and refresh responses" do
