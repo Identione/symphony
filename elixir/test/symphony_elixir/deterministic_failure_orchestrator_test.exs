@@ -31,6 +31,10 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
     on_exit(fn ->
       Application.delete_env(:symphony_elixir, :memory_tracker_comments)
       Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
+      Application.delete_env(:symphony_elixir, :memory_tracker_fetch_comments_delay_ms)
+      Application.delete_env(:symphony_elixir, :memory_tracker_update_comment_delay_ms)
+      Application.delete_env(:symphony_elixir, :memory_tracker_create_comment_delay_ms)
+      Application.delete_env(:symphony_elixir, :memory_tracker_update_issue_state_delay_ms)
     end)
 
     issue =
@@ -201,9 +205,14 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
 
     assert_receive {:memory_tracker_state_update, "issue-det-orch", "Human Review"}, 500
 
+    # Under the IDE-102 async hop, `escalate_running_issue/3` runs in the
+    # `:deterministic_failure_result` handler after the Tracker round-trips
+    # complete — so wait for `claimed` to drop (the last bit the handler
+    # touches) rather than `running` (which is cleared on `:DOWN`).
     state =
       wait_for_state(pid, fn s ->
-        not Map.has_key?(s.running, issue.id) and not Map.has_key?(s.retry_attempts, issue.id)
+        not MapSet.member?(s.claimed, issue.id) and
+          not Map.has_key?(s.pending_escalations, issue.id)
       end)
 
     refute Map.has_key?(state.running, issue.id), "escalated issue must be dropped from running"
@@ -447,12 +456,14 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
     # path through `decide/3`.
     assert_receive {:memory_tracker_comment_update, "workpad-esc-retry", _body}, 500
 
+    # Under the IDE-102 async hop the counter is persisted on `:DOWN` but the
+    # retry is scheduled by the `:deterministic_failure_result` handler only
+    # after the state-move failure surfaces. Wait for retry_attempts to land
+    # so the assertions below see the post-handler state.
     state =
       wait_for_state(pid, fn s ->
-        case s.deterministic_failures[issue.id] do
-          %{count: 5} -> true
-          _ -> false
-        end
+        match?(%{count: 5}, s.deterministic_failures[issue.id]) and
+          Map.has_key?(s.retry_attempts, issue.id)
       end)
 
     assert %{count: 5, notified_alert?: true, notified_escalation?: false} =
@@ -474,5 +485,250 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
     # this is the existing retry path doing its job.
     refute Map.has_key?(state.running, issue.id)
     assert Map.has_key?(state.retry_attempts, issue.id)
+  end
+
+  # ── IDE-102: async escalation ────────────────────────────────────────────
+  #
+  # `DeterministicFailure.handle/3` runs under `SymphonyElixir.TaskSupervisor`,
+  # so a slow/blocked Linear API call cannot stall dispatch for other issues.
+  # These tests pin down the contract: the GenServer stays responsive while
+  # the side effect is in flight, the counter/flag persistence contract from
+  # IDE-73 is preserved, and the state-move + drop guarantee still holds
+  # across the async hop.
+
+  defp put_workpad(issue_id, comment_id) do
+    Application.put_env(:symphony_elixir, :memory_tracker_comments, %{
+      issue_id => [
+        %{
+          id: comment_id,
+          body: "## Symphony Workpad\n\n### Plan\n\n- [ ] do",
+          resolved_at: nil
+        }
+      ]
+    })
+  end
+
+  defp set_tracker_delays(ms) do
+    Application.put_env(:symphony_elixir, :memory_tracker_fetch_comments_delay_ms, ms)
+    Application.put_env(:symphony_elixir, :memory_tracker_update_comment_delay_ms, ms)
+    Application.put_env(:symphony_elixir, :memory_tracker_update_issue_state_delay_ms, ms)
+  end
+
+  test "issue A's slow escalation does not block issue B's :DOWN from advancing on the GenServer",
+       %{issue: issue} do
+    issue_b = %{issue | id: "issue-det-orch-b", identifier: "DET-2"}
+
+    put_workpad(issue.id, "workpad-a")
+    # ~300ms total delay on the escalation path for issue A.
+    set_tracker_delays(100)
+
+    pid = start_orchestrator(:AsyncMultiIssueOrchestrator)
+    ref_a = make_ref()
+    ref_b = make_ref()
+
+    :sys.replace_state(pid, fn state ->
+      state
+      |> Map.put(:running, %{
+        issue.id => running_entry(issue, ref_a),
+        issue_b.id => running_entry(issue_b, ref_b)
+      })
+      |> Map.put(:claimed, MapSet.new([issue.id, issue_b.id]))
+      |> Map.put(:retry_attempts, %{})
+      |> Map.put(:deterministic_failures, %{
+        issue.id => %{
+          code: :quota_exceeded,
+          count: 4,
+          notified_alert?: true,
+          notified_escalation?: false
+        }
+      })
+    end)
+
+    # Issue A: cross the escalation threshold → slow async side effect.
+    send(pid, {:DOWN, ref_a, :process, self(), {:agent_run_failed, :quota_exceeded, :anything}})
+
+    # Issue B: a transient code that should reset its (empty) counter and
+    # schedule a retry. If the orchestrator were blocked on A's Linear
+    # round-trips, B's DOWN would queue behind them and this assertion would
+    # take ~300ms.
+    send(pid, {:DOWN, ref_b, :process, self(), {:agent_run_failed, :rate_limited, :anything}})
+
+    advanced_at_ms =
+      time_until(fn ->
+        s = :sys.get_state(pid)
+        Map.has_key?(s.retry_attempts, issue_b.id) and not Map.has_key?(s.running, issue_b.id)
+      end)
+
+    assert advanced_at_ms < 100,
+           "issue B's :DOWN waited on issue A's escalation side effect; advanced in #{advanced_at_ms}ms"
+
+    # Eventually A's escalation lands and drops it from claimed/running.
+    state =
+      wait_for_state(
+        pid,
+        fn s ->
+          not Map.has_key?(s.pending_escalations, issue.id) and
+            not Map.has_key?(s.running, issue.id)
+        end,
+        2_000
+      )
+
+    refute MapSet.member?(state.claimed, issue.id)
+    refute Map.has_key?(state.deterministic_failures, issue.id)
+  end
+
+  test "while an escalation task is in flight, the issue stays in `claimed` and out of `running`/`retry_attempts`",
+       %{issue: issue} do
+    put_workpad(issue.id, "workpad-inflight")
+    # Delay the very first Tracker call so we have a window to observe the
+    # in-flight state before any side effect lands.
+    Application.put_env(:symphony_elixir, :memory_tracker_fetch_comments_delay_ms, 200)
+
+    pid = start_orchestrator(:AsyncInflightStateOrchestrator)
+    ref = make_ref()
+    seed_running(pid, issue.id, running_entry(issue, ref))
+
+    seed_counter(pid, issue.id, %{
+      code: :quota_exceeded,
+      count: 4,
+      notified_alert?: true,
+      notified_escalation?: false
+    })
+
+    send(pid, {:DOWN, ref, :process, self(), {:agent_run_failed, :quota_exceeded, :anything}})
+
+    inflight =
+      wait_for_state(pid, fn s -> Map.has_key?(s.pending_escalations, issue.id) end)
+
+    refute Map.has_key?(inflight.running, issue.id),
+           "issue is popped from running on :DOWN"
+
+    assert MapSet.member?(inflight.claimed, issue.id),
+           "issue stays in `claimed` so the polling loop won't re-dispatch it while the escalation task is in flight"
+
+    refute Map.has_key?(inflight.retry_attempts, issue.id),
+           "no retry timer is scheduled until the result handler decides (escalate=drop, alert/error=retry)"
+
+    # Let the in-flight side effect complete so the stray messages don't leak
+    # past on_exit cleanup.
+    assert_receive {:memory_tracker_comment_update, "workpad-inflight", _}, 2_000
+    assert_receive {:memory_tracker_state_update, "issue-det-orch", "Human Review"}, 2_000
+  end
+
+  test "release_issue_claim wipes pending_escalations so a late result is a no-op", %{issue: issue} do
+    put_workpad(issue.id, "workpad-late")
+    Application.put_env(:symphony_elixir, :memory_tracker_fetch_comments_delay_ms, 200)
+
+    pid = start_orchestrator(:LateResultOrchestrator)
+    ref = make_ref()
+    seed_running(pid, issue.id, running_entry(issue, ref))
+
+    seed_counter(pid, issue.id, %{
+      code: :quota_exceeded,
+      count: 2,
+      notified_alert?: false,
+      notified_escalation?: false
+    })
+
+    send(pid, {:DOWN, ref, :process, self(), {:agent_run_failed, :quota_exceeded, :anything}})
+
+    pending =
+      wait_for_state(pid, fn s -> Map.has_key?(s.pending_escalations, issue.id) end).pending_escalations[
+        issue.id
+      ]
+
+    # Simulate an external path wiping the claim mid-flight (e.g. the issue
+    # moved to a terminal state via reconciliation). The pending entry must
+    # be dropped so the in-flight task's eventual result is ignored.
+    :sys.replace_state(pid, fn state ->
+      %{
+        state
+        | claimed: MapSet.delete(state.claimed, issue.id),
+          retry_attempts: Map.delete(state.retry_attempts, issue.id),
+          pending_escalations: Map.delete(state.pending_escalations, issue.id),
+          deterministic_failures: Map.delete(state.deterministic_failures, issue.id)
+      }
+    end)
+
+    # Forge a stale result message with the original token. The orchestrator
+    # should drop it because pending_escalations no longer has an entry.
+    send(
+      pid,
+      {:deterministic_failure_result, issue.id, pending.token, {:alert, :quota_exceeded, 3}, :ok}
+    )
+
+    state = :sys.get_state(pid)
+    refute Map.has_key?(state.deterministic_failures, issue.id)
+    refute Map.has_key?(state.pending_escalations, issue.id)
+    refute Map.has_key?(state.retry_attempts, issue.id)
+
+    # Drain the late side-effect message so it doesn't leak into the next test.
+    receive do
+      {:memory_tracker_comment_update, "workpad-late", _} -> :ok
+    after
+      2_000 -> flunk("expected the in-flight side effect to eventually fire")
+    end
+  end
+
+  test "a task crash surfaces as an :error result and keeps the counter retryable", %{issue: issue} do
+    pid = start_orchestrator(:TaskCrashOrchestrator)
+    ref = make_ref()
+    seed_running(pid, issue.id, running_entry(issue, ref))
+
+    pending = %{
+      token: make_ref(),
+      action: {:alert, :quota_exceeded, 3},
+      entry: %{code: :quota_exceeded, count: 3, notified_alert?: false, notified_escalation?: false},
+      running_entry: running_entry(issue, ref),
+      reason: {:agent_run_failed, :quota_exceeded, :anything}
+    }
+
+    :sys.replace_state(pid, fn state ->
+      %{
+        state
+        | running: %{},
+          claimed: MapSet.put(state.claimed, issue.id),
+          deterministic_failures: Map.put(state.deterministic_failures, issue.id, pending.entry),
+          pending_escalations: Map.put(state.pending_escalations, issue.id, pending)
+      }
+    end)
+
+    send(
+      pid,
+      {:deterministic_failure_result, issue.id, pending.token, pending.action, {:error, {:task_crashed, :error, %RuntimeError{message: "boom"}, []}}}
+    )
+
+    state =
+      wait_for_state(pid, fn s -> Map.has_key?(s.retry_attempts, issue.id) end)
+
+    # Flags stay clear so the next same-code :DOWN re-fires the alert path
+    # via `decide/3` (IDE-73 retry contract preserved across the async hop).
+    assert %{code: :quota_exceeded, count: 3, notified_alert?: false, notified_escalation?: false} =
+             state.deterministic_failures[issue.id]
+
+    refute Map.has_key?(state.pending_escalations, issue.id)
+    assert Map.has_key?(state.retry_attempts, issue.id)
+  end
+
+  # Tight loop that polls `fun` until it returns truthy and reports how long
+  # it took. Used to assert the orchestrator GenServer remains responsive
+  # while a `DeterministicFailure` side effect runs under the Task supervisor.
+  defp time_until(fun, timeout_ms \\ 1_000) do
+    start = System.monotonic_time(:millisecond)
+    deadline = start + timeout_ms
+    do_time_until(fun, start, deadline)
+  end
+
+  defp do_time_until(fun, start, deadline) do
+    if fun.() do
+      System.monotonic_time(:millisecond) - start
+    else
+      if System.monotonic_time(:millisecond) >= deadline do
+        flunk("timed out waiting for predicate to become truthy")
+      else
+        Process.sleep(2)
+        do_time_until(fun, start, deadline)
+      end
+    end
   end
 end

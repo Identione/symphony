@@ -54,6 +54,13 @@ defmodule SymphonyElixir.Orchestrator do
       # non-active state after M (IDE-73). Keyed by Linear issue id; entries
       # follow `t:SymphonyElixir.DeterministicFailure.entry/0`.
       deterministic_failures: %{},
+      # In-flight DeterministicFailure escalations (IDE-102). Keyed by issue id;
+      # each value is a `t:pending_escalation/0` carrying the data we need to
+      # apply the result when the task messages back. The issue is held in
+      # `claimed` while pending so the polling loop won't re-dispatch it, but
+      # is NOT in `running` (the agent has exited) and has no retry timer
+      # scheduled yet — the result handler decides whether to schedule one.
+      pending_escalations: %{},
       codex_totals: nil,
       claude_totals: nil,
       codex_rate_limits: nil
@@ -205,6 +212,24 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:retry_issue, _issue_id}, state), do: {:noreply, state}
 
+  # The token guards against stale results — a reconcile path can wipe
+  # `pending_escalations[issue_id]` while the task is in flight, and the
+  # task's eventual message must then no-op rather than re-apply state.
+  def handle_info({:deterministic_failure_result, issue_id, token, action, result}, state) do
+    case Map.get(state.pending_escalations, issue_id) do
+      %{token: ^token} = pending ->
+        state = %{state | pending_escalations: Map.delete(state.pending_escalations, issue_id)}
+        state = apply_deterministic_failure_result(state, issue_id, pending, action, result)
+        notify_dashboard()
+        {:noreply, state}
+
+      _ ->
+        Logger.debug("Ignoring stale deterministic_failure_result for issue_id=#{issue_id} action=#{inspect(action)}")
+
+        {:noreply, state}
+    end
+  end
+
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
     {:noreply, state}
@@ -235,8 +260,10 @@ defmodule SymphonyElixir.Orchestrator do
       state
       |> maybe_track_deterministic_failure(issue_id, running_entry, reason)
       |> case do
-        {:escalated, escalated_state} ->
-          escalated_state
+        # Side effect handed off to a supervised task; scheduling a retry
+        # here would race with the result handler's own retry decision.
+        {:pending, next_state} ->
+          next_state
 
         {:continue, next_state} ->
           retry_agent_down(next_state, issue_id, running_entry, session_id, reason)
@@ -288,32 +315,123 @@ defmodule SymphonyElixir.Orchestrator do
             {:continue, clear_deterministic_failure(state, issue_id)}
 
           {updated_entry, action} ->
-            apply_deterministic_action(state, issue_id, running_entry, updated_entry, action, settings)
+            apply_deterministic_action(
+              state,
+              issue_id,
+              running_entry,
+              reason,
+              updated_entry,
+              action,
+              settings
+            )
         end
     end
   end
 
-  defp apply_deterministic_action(state, issue_id, _running_entry, entry, :no_action, _settings) do
+  defp apply_deterministic_action(
+         state,
+         issue_id,
+         _running_entry,
+         _reason,
+         entry,
+         :no_action,
+         _settings
+       ) do
     {:continue, put_deterministic_failure(state, issue_id, entry)}
   end
 
-  defp apply_deterministic_action(state, issue_id, running_entry, entry, action, settings) do
+  # The Tracker round-trips inside `DeterministicFailure.handle/3` (workpad
+  # fetch, comment update/create, state move) can block for up to
+  # `agent.max_retry_backoff_ms` (5 min default). Run them under
+  # `SymphonyElixir.TaskSupervisor` so the orchestrator's main loop stays free
+  # to handle other issues' `:DOWN`/dispatch/poll messages while they're in
+  # flight. We persist the incremented counter immediately, but the
+  # `notified_*` flags and the escalation state-drop are deferred to the
+  # result handler so the IDE-73 retry contract (flags only set on success)
+  # is preserved.
+  defp apply_deterministic_action(state, issue_id, running_entry, reason, entry, action, settings) do
     issue = Map.get(running_entry, :issue) || running_entry_issue_fallback(running_entry, issue_id)
+    session_id = running_entry_session_id(running_entry)
 
-    case DeterministicFailure.handle(action, issue, settings) do
-      {:ok, :escalated} ->
-        # No need to persist the notified flags here: `escalate_running_issue/3`
-        # drops the counter entry entirely (the issue is leaving the active set),
-        # so any flag write would be immediately discarded.
-        {:escalated, escalate_running_issue(state, issue_id, running_entry)}
+    case spawn_deterministic_action(issue_id, issue, action, settings) do
+      {:ok, token} ->
+        pending = %{
+          token: token,
+          action: action,
+          entry: entry,
+          running_entry: running_entry,
+          reason: reason
+        }
 
-      :ok ->
-        {:continue, put_deterministic_failure(state, issue_id, %{entry | notified_alert?: true})}
+        {:pending,
+         state
+         |> put_deterministic_failure(issue_id, entry)
+         |> put_pending_escalation(issue_id, pending)}
 
-      {:error, _reason} ->
-        # Notification flags stay clear so `decide/3` re-emits the same action
-        # on the next same-code failure (the retry contract).
-        {:continue, put_deterministic_failure(state, issue_id, entry)}
+      {:error, spawn_reason} ->
+        # Spawning the side effect failed (e.g. Task.Supervisor at
+        # `max_children`). Persist the counter increment and fall through to
+        # the existing retry path so the next same-code :DOWN re-tries the
+        # alert/escalate side effect via `decide/3`.
+        Logger.warning("DeterministicFailure spawn failed for #{inspect(action)} issue_id=#{issue_id}: #{inspect(spawn_reason)}")
+
+        {:continue,
+         retry_agent_down(
+           put_deterministic_failure(state, issue_id, entry),
+           issue_id,
+           running_entry,
+           session_id,
+           reason
+         )}
+    end
+  end
+
+  defp spawn_deterministic_action(issue_id, issue, action, settings) do
+    recipient = self()
+    token = make_ref()
+
+    spawn_result =
+      Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+        result =
+          try do
+            DeterministicFailure.handle(action, issue, settings)
+          catch
+            kind, caught_reason ->
+              {:error, {:task_crashed, kind, caught_reason, __STACKTRACE__}}
+          end
+
+        send(recipient, {:deterministic_failure_result, issue_id, token, action, result})
+      end)
+
+    case spawn_result do
+      {:ok, _pid} -> {:ok, token}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp apply_deterministic_failure_result(state, issue_id, pending, action, result) do
+    %{entry: entry, running_entry: running_entry, reason: reason} = pending
+    session_id = running_entry_session_id(running_entry)
+
+    case {action, result} do
+      {{:escalate, _, _}, {:ok, :escalated}} ->
+        # `escalate_running_issue/3` resets the counter (issue is leaving the
+        # active set), so any flag write here would be immediately discarded.
+        escalate_running_issue(state, issue_id, running_entry)
+
+      {{:alert, _, _}, :ok} ->
+        state
+        |> put_deterministic_failure(issue_id, %{entry | notified_alert?: true})
+        |> retry_agent_down(issue_id, running_entry, session_id, reason)
+
+      {_action, _other} ->
+        # :alert that errored, or :escalate where the comment post or state
+        # move failed. Notification flags stay clear so the next same-code
+        # failure re-fires the same action via `decide/3` (IDE-73 retry
+        # contract); the issue still needs a retry scheduled.
+        state
+        |> put_deterministic_failure(issue_id, entry)
+        |> retry_agent_down(issue_id, running_entry, session_id, reason)
     end
   end
 
@@ -332,8 +450,13 @@ defmodule SymphonyElixir.Orchestrator do
         claimed: MapSet.delete(state.claimed, issue_id),
         blocked: Map.delete(state.blocked, issue_id),
         retry_attempts: Map.delete(state.retry_attempts, issue_id),
-        deterministic_failures: DeterministicFailure.reset(state.deterministic_failures, issue_id)
+        deterministic_failures: DeterministicFailure.reset(state.deterministic_failures, issue_id),
+        pending_escalations: Map.delete(state.pending_escalations, issue_id)
     }
+  end
+
+  defp put_pending_escalation(state, issue_id, pending) do
+    %{state | pending_escalations: Map.put(state.pending_escalations, issue_id, pending)}
   end
 
   defp cancel_retry_timer(state, issue_id) do
@@ -684,7 +807,8 @@ defmodule SymphonyElixir.Orchestrator do
             claimed: MapSet.delete(state.claimed, issue_id),
             blocked: Map.delete(state.blocked, issue_id),
             retry_attempts: Map.delete(state.retry_attempts, issue_id),
-            deterministic_failures: DeterministicFailure.reset(state.deterministic_failures, issue_id)
+            deterministic_failures: DeterministicFailure.reset(state.deterministic_failures, issue_id),
+            pending_escalations: Map.delete(state.pending_escalations, issue_id)
         }
 
       _ ->
@@ -1360,7 +1484,8 @@ defmodule SymphonyElixir.Orchestrator do
       | claimed: MapSet.delete(state.claimed, issue_id),
         blocked: Map.delete(state.blocked, issue_id),
         retry_attempts: Map.delete(state.retry_attempts, issue_id),
-        deterministic_failures: DeterministicFailure.reset(state.deterministic_failures, issue_id)
+        deterministic_failures: DeterministicFailure.reset(state.deterministic_failures, issue_id),
+        pending_escalations: Map.delete(state.pending_escalations, issue_id)
     }
   end
 
