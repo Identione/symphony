@@ -942,9 +942,22 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       |> Map.put(:claimed, MapSet.put(initial_state.claimed, issue_id))
     end)
 
+    before_ms = System.monotonic_time(:millisecond)
     send(pid, :tick)
-    Process.sleep(100)
-    state = :sys.get_state(pid)
+
+    # Deterministically wait until the stall is detected, the worker is killed,
+    # the issue leaves `running`, and a retry is scheduled — instead of sleeping
+    # a fixed 100ms and reading once. The old approach made the wall-clock
+    # assertion below flaky under `--cover`: instrumentation could eat the
+    # ±500ms slack and drop `remaining_ms` below the lower bound.
+    state =
+      wait_for_state(pid, fn s ->
+        not Process.alive?(worker_pid) and
+          not Map.has_key?(s.running, issue_id) and
+          Map.has_key?(s.retry_attempts, issue_id)
+      end)
+
+    after_ms = System.monotonic_time(:millisecond)
 
     refute Process.alive?(worker_pid)
     refute Map.has_key?(state.running, issue_id)
@@ -957,9 +970,15 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = state.retry_attempts[issue_id]
 
     assert is_integer(due_at_ms)
-    remaining_ms = due_at_ms - System.monotonic_time(:millisecond)
-    assert remaining_ms >= 9_500
-    assert remaining_ms <= 10_500
+
+    # `due_at_ms` was computed inside the orchestrator as
+    # `System.monotonic_time(:millisecond) + 10_000` (the attempt-1 stall
+    # backoff, @failure_retry_base_ms) at some instant T within
+    # [before_ms, after_ms]. Bracket it by that measured window rather than a
+    # fixed wall-clock tolerance: the bounds hold no matter how slowly the
+    # poll/scheduling ran under instrumentation, while still pinning the 10s backoff.
+    assert due_at_ms >= before_ms + 10_000
+    assert due_at_ms <= after_ms + 10_000
   end
 
   test "orchestrator blocks stalled workers that are waiting on MCP elicitation" do
@@ -2235,6 +2254,26 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
          timestamp: DateTime.utc_now()
        }}
     )
+  end
+
+  defp wait_for_state(pid, predicate, timeout_ms \\ 2_000) when is_function(predicate, 1) do
+    deadline_ms = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait_for_state(pid, predicate, deadline_ms)
+  end
+
+  defp do_wait_for_state(pid, predicate, deadline_ms) do
+    state = :sys.get_state(pid)
+
+    if predicate.(state) do
+      state
+    else
+      if System.monotonic_time(:millisecond) >= deadline_ms do
+        flunk("timed out waiting for orchestrator state: #{inspect(state)}")
+      else
+        Process.sleep(5)
+        do_wait_for_state(pid, predicate, deadline_ms)
+      end
+    end
   end
 
   defp wait_for_snapshot(pid, predicate, timeout_ms \\ 200) when is_function(predicate, 1) do
