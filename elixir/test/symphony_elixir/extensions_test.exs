@@ -494,6 +494,26 @@ defmodule SymphonyElixir.ExtensionsTest do
     Process.put({FakeLinearClient, :graphql_result}, {:error, :transport_down})
     assert {:error, :transport_down} = Adapter.fetch_comments("issue-1")
 
+    # A `comments` payload with no `pageInfo` key at all is treated as terminal
+    # (defensive fallback for a Linear response missing pagination metadata):
+    # the single page is returned and the walk stops without another call.
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "comments" => %{
+               "nodes" => [%{"id" => "solo", "body" => "no page info", "resolvedAt" => nil}]
+             }
+           }
+         }
+       }}
+    )
+
+    assert {:ok, [%{id: "solo", body: "no page info", resolved_at: nil}]} =
+             Adapter.fetch_comments("issue-1")
+
     # update_comment/2: happy path + GraphQL error + success:false +
     # malformed-payload fallback.
     Process.put(
@@ -522,12 +542,17 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert {:error, :comment_update_failed} = Adapter.update_comment("comment-1", "odd")
   end
 
-  test "linear adapter caps fetch_comments pagination at @max_pages and stops calling the client" do
+  test "linear adapter caps fetch_comments pagination at @max_comment_pages and stops calling the client" do
     Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
 
-    max_pages = Pagination.max_pages()
+    # `fetch_comments/1` uses its own, more generous comment-specific cap
+    # (`@max_comment_pages`, 2500 comments at a 50-row page size) rather than
+    # the shared `Pagination.max_pages()` budget — a single busy issue can
+    # legitimately carry hundreds of comments (IDE-110).
+    max_pages = Adapter.max_comment_pages()
+    assert max_pages > Pagination.max_pages()
 
-    stuck_response = fn cursor ->
+    advancing_response = fn cursor ->
       {:ok,
        %{
          "data" => %{
@@ -543,14 +568,16 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     # Server keeps advertising another page with a *new* cursor every call:
     # this is the cap path (no stuck-cursor short-circuit), so the cap must fire
-    # after exactly `@max_pages` GraphQL calls — never more. Pre-seed enough
-    # distinct responses; if the paginator overshoots it will fall back to the
-    # `nil` default response and the result/assert messages would surface that.
-    responses = Enum.map(1..(max_pages + 5), &stuck_response.(&1))
+    # after exactly `@max_comment_pages` GraphQL calls — never more. Pre-seed
+    # enough distinct responses; if the paginator overshoots it falls back to
+    # the `nil` default response and the assert messages would surface that.
+    # Both pagination guards collapse into a single loud error so the
+    # deterministic-failure escalation path sees one signal (IDE-110).
+    responses = Enum.map(1..(max_pages + 5), &advancing_response.(&1))
     Process.put({FakeLinearClient, :graphql_results}, responses)
     Process.put({FakeLinearClient, :graphql_result}, nil)
 
-    assert {:error, :linear_pagination_exhausted} = Adapter.fetch_comments("issue-1")
+    assert {:error, :comment_pagination_exceeded} = Adapter.fetch_comments("issue-1")
 
     for _ <- 1..max_pages do
       assert_receive {:graphql_called, _query, %{issueId: "issue-1"}}
@@ -558,8 +585,9 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     refute_receive {:graphql_called, _query, %{issueId: "issue-1"}}, 50
 
-    # A stuck `endCursor` is the more diagnostic failure mode and must beat the
-    # cap: detection fires on the second call, well before `@max_pages`.
+    # A non-advancing (stuck) `endCursor` — Linear returns `hasNextPage: true`
+    # with the SAME cursor repeatedly — must short-circuit on the second call,
+    # well before the cap, and surface the same unified error.
     stuck_cursor_response =
       {:ok,
        %{
@@ -576,7 +604,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     Process.put({FakeLinearClient, :graphql_results}, List.duplicate(stuck_cursor_response, max_pages + 5))
     Process.put({FakeLinearClient, :graphql_result}, nil)
 
-    assert {:error, :linear_stuck_cursor} = Adapter.fetch_comments("issue-2")
+    assert {:error, :comment_pagination_exceeded} = Adapter.fetch_comments("issue-2")
 
     assert_receive {:graphql_called, _query, %{issueId: "issue-2", after: nil}}
     assert_receive {:graphql_called, _query, %{issueId: "issue-2", after: "STUCK"}}

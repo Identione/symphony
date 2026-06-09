@@ -70,6 +70,18 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @comments_page_size 50
 
+  # Comment-specific pagination cap. `Pagination`'s shared default (20 pages /
+  # ~1000 items) is sized for issue lists; a single busy issue can legitimately
+  # carry far more comments, so `fetch_comments/1` opts into a more generous
+  # budget: 50 pages x @comments_page_size = 2500 comments before we give up.
+  # That is well above any realistic real-world comment count yet still bounds
+  # an externally-driven loop (a server advertising `hasNextPage: true` forever)
+  # to a finite number of network round-trips.
+  @max_comment_pages 50
+
+  @spec max_comment_pages() :: pos_integer()
+  def max_comment_pages, do: @max_comment_pages
+
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues, do: client_module().fetch_candidate_issues()
 
@@ -106,9 +118,24 @@ defmodule SymphonyElixir.Linear.Adapter do
     end
   end
 
-  @spec fetch_comments(String.t()) :: {:ok, [SymphonyElixir.Tracker.comment()]} | {:error, term()}
+  @spec fetch_comments(String.t()) ::
+          {:ok, [SymphonyElixir.Tracker.comment()]}
+          | {:error, :comment_pagination_exceeded}
+          | {:error, term()}
   def fetch_comments(issue_id) when is_binary(issue_id) do
-    Pagination.paginate(&fetch_comments_page(issue_id, &1))
+    case Pagination.paginate(&fetch_comments_page(issue_id, &1), max_pages: @max_comment_pages) do
+      # Collapse both pagination safety-valve trips — the hard page cap and a
+      # non-advancing (stuck) cursor — into one loud error. We deliberately fail
+      # rather than return partial comments: this result feeds the
+      # deterministic-failure escalation path, where a silently-truncated comment
+      # list could hide the `## Symphony Workpad` marker and corrupt escalation
+      # decisions. Failing loud is the safer outcome (IDE-110).
+      {:error, reason} when reason in [:linear_pagination_exhausted, :linear_stuck_cursor] ->
+        {:error, :comment_pagination_exceeded}
+
+      other ->
+        other
+    end
   end
 
   defp fetch_comments_page(issue_id, after_cursor) do
