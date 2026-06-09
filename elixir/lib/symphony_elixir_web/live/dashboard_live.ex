@@ -14,6 +14,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
       socket
       |> assign(:payload, load_payload())
       |> assign(:now, DateTime.utc_now())
+      |> assign(:refresh_notice, nil)
 
     if connected?(socket) do
       :ok = ObservabilityPubSub.subscribe()
@@ -33,6 +34,27 @@ defmodule SymphonyElixirWeb.DashboardLive do
   def handle_info(:observability_updated, socket) do
     {:noreply,
      socket
+     |> assign(:payload, load_payload())
+     |> assign(:now, DateTime.utc_now())}
+  end
+
+  @impl true
+  def handle_event("force_poll", _params, socket) do
+    notice =
+      case Presenter.refresh_payload(orchestrator()) do
+        {:ok, %{coalesced: true}} ->
+          "Poll already pending — request coalesced."
+
+        {:ok, %{requested_at: requested_at}} ->
+          "Poll queued at #{requested_at}. If a rate-limit window is active it runs once that clears."
+
+        {:error, :unavailable} ->
+          "Orchestrator unavailable — poll not queued."
+      end
+
+    {:noreply,
+     socket
+     |> assign(:refresh_notice, notice)
      |> assign(:payload, load_payload())
      |> assign(:now, DateTime.utc_now())}
   end
@@ -69,6 +91,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
               <span class="status-badge-dot"></span>
               Offline
             </span>
+            <button type="button" class="subtle-button" phx-click="force_poll">
+              Force poll
+            </button>
+            <%= if @refresh_notice do %>
+              <span class="hero-meta refresh-notice"><%= @refresh_notice %></span>
+            <% end %>
           </div>
         </div>
       </header>

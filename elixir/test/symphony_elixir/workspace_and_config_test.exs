@@ -4,6 +4,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Linear.RateLimit
 
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
@@ -492,6 +493,75 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert log =~ "Variable \\\"$ids\\\" got invalid value"
   end
 
+  test "linear client records a RATELIMITED response and short-circuits subsequent requests" do
+    RateLimit.clear()
+    on_exit(fn -> RateLimit.clear() end)
+
+    rate_limited_body = %{
+      "errors" => [
+        %{
+          "message" => "Rate limit exceeded.",
+          "extensions" => %{"code" => "RATELIMITED"}
+        }
+      ],
+      "meta" => %{
+        "rateLimitResult" => %{
+          "remaining" => 0,
+          "duration" => 3_600_000,
+          "limit" => 2500
+        }
+      }
+    }
+
+    parent = self()
+
+    request_fun = fn _payload, _headers ->
+      send(parent, :linear_http_request)
+      {:ok, %{status: 400, body: rate_limited_body}}
+    end
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, :rate_limited} =
+                 Client.graphql("query Viewer { viewer { id } }", %{}, request_fun: request_fun)
+      end)
+
+    assert_received :linear_http_request
+    assert log =~ "Linear API RATELIMITED"
+
+    # Subsequent calls skip the HTTP request entirely until the window resets.
+    assert {:error, :rate_limited} =
+             Client.graphql(
+               "query Viewer { viewer { id } }",
+               %{},
+               request_fun: fn _payload, _headers ->
+                 flunk("HTTP request should not have been made while rate-limited")
+               end
+             )
+
+    refute_received :linear_http_request
+
+    refute RateLimit.allowed?()
+  end
+
+  test "linear client successful response does not trip the rate-limit gate" do
+    RateLimit.clear()
+    on_exit(fn -> RateLimit.clear() end)
+
+    body = %{
+      "data" => %{"viewer" => %{"id" => "user-1"}},
+      "meta" => %{"rateLimitResult" => %{"remaining" => 2400, "duration" => 3_600_000, "limit" => 2500}}
+    }
+
+    request_fun = fn _payload, _headers -> {:ok, %{status: 200, body: body}} end
+
+    assert {:ok, ^body} =
+             Client.graphql("query Viewer { viewer { id } }", %{}, request_fun: request_fun)
+
+    assert RateLimit.allowed?()
+    assert RateLimit.retry_after_ms() == nil
+  end
+
   test "orchestrator sorts dispatch by priority then oldest created_at" do
     issue_same_priority_older = %Issue{
       id: "issue-old-high",
@@ -572,6 +642,90 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
+  test "issue missing a required label is not dispatch-eligible" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_required_labels: ["symphony"])
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "unlabeled-1",
+      identifier: "MT-1008",
+      title: "Missing the gate label",
+      state: "Todo",
+      labels: ["backend"]
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "required_labels requires ALL listed labels (case-insensitive)" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_required_labels: ["Symphony", "ready"])
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    only_one = %Issue{
+      id: "labeled-partial",
+      identifier: "MT-1009",
+      title: "Only one of the required labels",
+      state: "Todo",
+      labels: ["symphony"]
+    }
+
+    has_both = %Issue{
+      id: "labeled-both",
+      identifier: "MT-1010",
+      title: "Carries both required labels plus extras",
+      state: "Todo",
+      labels: ["symphony", "ready", "backend"]
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(only_one, state)
+    assert Orchestrator.should_dispatch_issue_for_test(has_both, state)
+  end
+
+  test "issue carrying an excluded label is not dispatch-eligible" do
+    write_workflow_file!(Workflow.workflow_file_path(), tracker_excluded_labels: ["blocked"])
+
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    excluded = %Issue{
+      id: "excluded-1",
+      identifier: "MT-1011",
+      title: "Carries a forbidden label",
+      state: "Todo",
+      labels: ["ready", "blocked"]
+    }
+
+    clean = %Issue{
+      id: "excluded-clean",
+      identifier: "MT-1012",
+      title: "No forbidden labels",
+      state: "Todo",
+      labels: ["ready"]
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(excluded, state)
+    assert Orchestrator.should_dispatch_issue_for_test(clean, state)
+  end
+
   test "todo issue with terminal blockers remains dispatch-eligible" do
     state = %Orchestrator.State{
       max_concurrent_agents: 3,
@@ -616,6 +770,21 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert skipped_issue.identifier == "MT-1005"
     assert skipped_issue.blocked_by == [%{id: "blocker-3", identifier: "MT-1006", state: "In Progress"}]
+  end
+
+  test "dispatch revalidation surfaces rate_limited errors without classifying as skip" do
+    issue = %Issue{
+      id: "rate-limited-1",
+      identifier: "MT-1100",
+      title: "Throttled refresh",
+      state: "Todo",
+      blocked_by: []
+    }
+
+    fetcher = fn ["rate-limited-1"] -> {:error, :rate_limited} end
+
+    assert {:error, :rate_limited} =
+             Orchestrator.revalidate_issue_for_dispatch_for_test(issue, fetcher)
   end
 
   test "workspace remove returns error information for missing directory" do
@@ -933,6 +1102,29 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert Config.settings!().codex.command == "codex app-server"
   end
 
+  test "config default workspace.root tracks runtime TMPDIR, not compile-time value" do
+    previous_tmpdir = System.get_env("TMPDIR")
+    on_exit(fn -> restore_env("TMPDIR", previous_tmpdir) end)
+
+    runtime_tmpdir =
+      Path.join(
+        previous_tmpdir || "/tmp",
+        "symphony-elixir-tmpdir-#{System.unique_integer([:positive])}"
+      )
+
+    File.mkdir_p!(runtime_tmpdir)
+    on_exit(fn -> File.rm_rf(runtime_tmpdir) end)
+
+    System.put_env("TMPDIR", runtime_tmpdir)
+
+    assert System.tmp_dir!() == runtime_tmpdir
+
+    write_workflow_file!(Workflow.workflow_file_path(), workspace_root: nil)
+
+    assert Config.settings!().workspace.root ==
+             Path.join(System.tmp_dir!(), "symphony_workspaces")
+  end
+
   test "config resolves $VAR references for env-backed secret and path values" do
     workspace_env_var = "SYMP_WORKSPACE_ROOT_#{System.unique_integer([:positive])}"
     api_key_env_var = "SYMP_LINEAR_API_KEY_#{System.unique_integer([:positive])}"
@@ -1014,6 +1206,67 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     write_workflow_file!(Workflow.workflow_file_path(), worker_max_concurrent_agents_per_host: 2)
     assert :ok = Config.validate!()
     assert Config.settings!().worker.max_concurrent_agents_per_host == 2
+  end
+
+  test "schema rejects deterministic_failure_escalation_threshold below the alert threshold" do
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               agent: %{
+                 deterministic_failure_alert_threshold: 5,
+                 deterministic_failure_escalation_threshold: 3
+               }
+             })
+
+    assert message =~ "deterministic_failure_escalation_threshold"
+    assert message =~ "must be >= deterministic_failure_alert_threshold"
+  end
+
+  test "schema rejects non-positive deterministic_failure thresholds" do
+    assert {:error, {:invalid_workflow_config, alert_message}} =
+             Schema.parse(%{
+               agent: %{deterministic_failure_alert_threshold: 0}
+             })
+
+    assert alert_message =~ "deterministic_failure_alert_threshold"
+
+    assert {:error, {:invalid_workflow_config, escalate_message}} =
+             Schema.parse(%{
+               agent: %{deterministic_failure_escalation_threshold: 0}
+             })
+
+    assert escalate_message =~ "deterministic_failure_escalation_threshold"
+  end
+
+  test "schema rejects deterministic_failure_escalation_state that overlaps tracker.active_states" do
+    # Operator misconfigures the escalation state to a value that's still in
+    # the polling-active set → the loop would just re-claim the issue. IDE-73
+    # rework #2 surfaces this at parse time.
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               tracker: %{active_states: ["Todo", "In Progress"]},
+               agent: %{deterministic_failure_escalation_state: "In Progress"}
+             })
+
+    assert message =~ "deterministic_failure_escalation_state"
+    assert message =~ "must not appear in tracker.active_states"
+
+    # Comparison is case-insensitive (matches `normalize_issue_state/1`).
+    assert {:error, {:invalid_workflow_config, lowercase_message}} =
+             Schema.parse(%{
+               tracker: %{active_states: ["in progress"]},
+               agent: %{deterministic_failure_escalation_state: "In Progress"}
+             })
+
+    assert lowercase_message =~ "deterministic_failure_escalation_state"
+
+    # Disjoint config validates clean (defaults: "Human Review" vs ["Todo","In Progress"]).
+    assert {:ok, settings} =
+             Schema.parse(%{
+               tracker: %{active_states: ["Todo", "In Progress"]},
+               agent: %{deterministic_failure_escalation_state: "Human Review"}
+             })
+
+    assert settings.agent.deterministic_failure_escalation_state == "Human Review"
   end
 
   test "schema helpers cover custom type and state limit validation" do

@@ -1,5 +1,5 @@
 .PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer e2e \
-        escript ensure-deps
+        escript ensure-deps upgrade-tools
 
 # mise refuses to activate an untrusted config (per-machine trust state),
 # which would silently strip mix/elixir from PATH. Trust at parse time so a
@@ -12,10 +12,13 @@ _ := $(shell mise trust --quiet . 2>/dev/null || true)
 MIX ?= mise exec -- mix
 
 help:
-	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, ci, build, escript, all"
+	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, ci, build, escript, all, upgrade-tools"
 	@echo
 	@echo "Daemon launches happen from generated instance Makefiles under instances/<name>/."
 	@echo "Run 'make init INSTANCE=<name> ARGS=\"...\"' at the repo root to create one."
+	@echo
+	@echo "upgrade-tools bumps the agent toolchain (codex, claude-agent-sdk). This is"
+	@echo "NOT the root 'make upgrade', which redeploys Symphony code to instances."
 
 setup:
 	$(MIX) setup
@@ -73,3 +76,14 @@ ci:
 	$(MAKE) dialyzer
 
 all: ci
+
+# Bump the eager-tracked agent toolchain and refresh both lockfiles in one go:
+# codex (mise.lock, "latest" pin) and claude-agent-sdk (priv/claude_agent/uv.lock,
+# ">=" spec). Line-pinned tools (erlang/elixir/uv) stay put — change those by
+# editing mise.toml. This is distinct from the root `make upgrade`, which rebuilds
+# the escript and restarts instance daemons after a `git pull`.
+upgrade-tools:
+	mise upgrade codex
+	cd priv/claude_agent && mise exec -- uv lock --upgrade
+	@echo
+	@echo "Lockfiles refreshed. Run 'make all', then commit mise.lock + priv/claude_agent/uv.lock."

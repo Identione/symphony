@@ -5,8 +5,9 @@ defmodule SymphonyElixir.OrchestratorRetryPolicyTest do
     1. pure decisions from `Orchestrator.RetryPolicy.decide/4` (the policy
        table itself), and
     2. orchestrator integration through `handle_info({:DOWN, …})` so the
-       cached classification, blocking transition, and override delays are
-       observable in the live retry_attempts/blocked maps.
+       error code (read from the `{:agent_run_failed, code, reason}` exit
+       reason) and override delays are observable in the live
+       retry_attempts/blocked maps.
   """
   use SymphonyElixir.TestSupport
 
@@ -28,22 +29,19 @@ defmodule SymphonyElixir.OrchestratorRetryPolicyTest do
 
   defp seed_running_entry!(pid, issue_id, identifier, opts \\ []) do
     ref = make_ref()
-    classification = Keyword.get(opts, :classification)
     # `retry_attempt: 0` (or unset) seeds the running entry as a first-attempt
     # worker; `next_retry_attempt_from_running/1` returns nil and the policy
     # treats this as attempt #1.
     retry_attempt = Keyword.get(opts, :retry_attempt, 0)
 
-    running_entry =
-      %{
-        pid: self(),
-        ref: ref,
-        identifier: identifier,
-        retry_attempt: retry_attempt,
-        issue: %Issue{id: issue_id, identifier: identifier, state: "In Progress"},
-        started_at: DateTime.utc_now()
-      }
-      |> maybe_put_classification(classification)
+    running_entry = %{
+      pid: self(),
+      ref: ref,
+      identifier: identifier,
+      retry_attempt: retry_attempt,
+      issue: %Issue{id: issue_id, identifier: identifier, state: "In Progress"},
+      started_at: DateTime.utc_now()
+    }
 
     initial_state = :sys.get_state(pid)
 
@@ -58,8 +56,13 @@ defmodule SymphonyElixir.OrchestratorRetryPolicyTest do
     ref
   end
 
-  defp maybe_put_classification(entry, nil), do: entry
-  defp maybe_put_classification(entry, %{} = c), do: Map.put(entry, :last_failure_classification, c)
+  # Synthesises the exit reason `AgentRunner.run/3` would raise for a
+  # classified upstream failure. Wrapping in `{:agent_run_failed, code, inner}`
+  # is the contract `Orchestrator.extract_error_code/1` reads in the :DOWN
+  # handler — same wrapper IDE-71/IDE-73 standardised on.
+  defp agent_run_failed_reason(code, inner \\ nil) do
+    {:agent_run_failed, code, inner}
+  end
 
   describe "RetryPolicy.decide/4 — built-in policy table" do
     test "rate_limited uses long backoff and honors Retry-After hint" do
@@ -170,33 +173,39 @@ defmodule SymphonyElixir.OrchestratorRetryPolicyTest do
     end
   end
 
-  describe "AgentRunner.classify_failure/1" do
-    test "extracts code + retry_after from Claude adapter tuples" do
-      assert %{error_code: :rate_limited, retry_after_ms: 30_000} =
-               AgentRunner.classify_failure({:claude_sdk_error, :rate_limited, "RateLimitError: rate_limited (retry-after: 30s)"})
+  describe "AgentRunner.classify_error_code/1 + extract_retry_after_ms/1" do
+    test "classifies Claude SDK error tuples and parses Retry-After hint" do
+      reason = {:claude_sdk_error, :rate_limited, "RateLimitError: rate_limited (retry-after: 30s)"}
+      assert :rate_limited = AgentRunner.classify_error_code(reason)
+      assert 30_000 = AgentRunner.extract_retry_after_ms(reason)
 
-      assert %{error_code: :context_window_exhausted, retry_after_ms: nil} =
-               AgentRunner.classify_failure({:claude_sdk_error, :context_window_exhausted, "prompt is too long"})
+      reason2 = {:claude_sdk_error, :context_window_exhausted, "prompt is too long"}
+      assert :context_window_exhausted = AgentRunner.classify_error_code(reason2)
+      assert is_nil(AgentRunner.extract_retry_after_ms(reason2))
     end
 
-    test "extracts code + retry_after from Codex turn/failed tuples" do
+    test "classifies Codex turn/failed tuples and parses upstream Retry-After header / retry_after field" do
       params = %{
         "error" => %{"code" => "rate_limit", "status" => 429, "headers" => %{"Retry-After" => "45"}}
       }
 
-      assert %{error_code: :rate_limited, retry_after_ms: 45_000} =
-               AgentRunner.classify_failure({:turn_failed, :rate_limited, params})
+      reason = {:turn_failed, :rate_limited, params}
+      assert :rate_limited = AgentRunner.classify_error_code(reason)
+      assert 45_000 = AgentRunner.extract_retry_after_ms(reason)
 
-      assert %{error_code: :overloaded, retry_after_ms: 7_000} =
-               AgentRunner.classify_failure({:codex_error_notification, :overloaded, %{"error" => %{"retry_after" => 7, "status" => 503}}})
+      reason2 =
+        {:codex_error_notification, :overloaded, %{"error" => %{"retry_after" => 7, "status" => 503}}}
+
+      assert :overloaded = AgentRunner.classify_error_code(reason2)
+      assert 7_000 = AgentRunner.extract_retry_after_ms(reason2)
     end
 
-    test "unknown reasons fall back to :unknown with no Retry-After" do
-      assert %{error_code: :unknown, retry_after_ms: nil} =
-               AgentRunner.classify_failure({:port_exit, 137})
+    test "non-adapter reasons fall back to :unknown with no Retry-After hint" do
+      assert :port_exit = AgentRunner.classify_error_code({:port_exit, 137})
+      assert is_nil(AgentRunner.extract_retry_after_ms({:port_exit, 137}))
 
-      assert %{error_code: :unknown, retry_after_ms: nil} =
-               AgentRunner.classify_failure(:some_atom)
+      assert :unknown = AgentRunner.classify_error_code(:some_atom)
+      assert is_nil(AgentRunner.extract_retry_after_ms(:some_atom))
     end
   end
 
@@ -204,12 +213,16 @@ defmodule SymphonyElixir.OrchestratorRetryPolicyTest do
     test "rate_limited DOWN schedules a long-backoff retry honoring Retry-After" do
       pid = start_orchestrator!(:RateLimitedDownOrchestrator)
       issue_id = "ide-72-rate-limited"
+      ref = seed_running_entry!(pid, issue_id, "IDE-72-RL")
 
-      ref =
-        seed_running_entry!(pid, issue_id, "IDE-72-RL", classification: %{error_code: :rate_limited, retry_after_ms: 45_000})
+      # Inner reason carries the upstream `Retry-After` header so the
+      # orchestrator's reason-extraction path discovers the hint without
+      # any sidechannel message.
+      inner =
+        {:turn_failed, :rate_limited, %{"error" => %{"headers" => %{"Retry-After" => "45"}, "status" => 429}}}
 
       baseline_ms = System.monotonic_time(:millisecond)
-      send(pid, {:DOWN, ref, :process, self(), :killed})
+      send(pid, {:DOWN, ref, :process, self(), agent_run_failed_reason(:rate_limited, inner)})
       Process.sleep(75)
       state = :sys.get_state(pid)
 
@@ -225,12 +238,10 @@ defmodule SymphonyElixir.OrchestratorRetryPolicyTest do
     test "overloaded DOWN without a Retry-After uses the long-backoff default" do
       pid = start_orchestrator!(:OverloadedDownOrchestrator)
       issue_id = "ide-72-overloaded"
-
-      ref =
-        seed_running_entry!(pid, issue_id, "IDE-72-OV", classification: %{error_code: :overloaded, retry_after_ms: nil})
+      ref = seed_running_entry!(pid, issue_id, "IDE-72-OV")
 
       baseline_ms = System.monotonic_time(:millisecond)
-      send(pid, {:DOWN, ref, :process, self(), :killed})
+      send(pid, {:DOWN, ref, :process, self(), agent_run_failed_reason(:overloaded)})
       Process.sleep(75)
       state = :sys.get_state(pid)
 
@@ -242,11 +253,9 @@ defmodule SymphonyElixir.OrchestratorRetryPolicyTest do
     test "context_window_exhausted DOWN moves the issue to blocked without scheduling a retry" do
       pid = start_orchestrator!(:ContextWindowDownOrchestrator)
       issue_id = "ide-72-context"
+      ref = seed_running_entry!(pid, issue_id, "IDE-72-CTX")
 
-      ref =
-        seed_running_entry!(pid, issue_id, "IDE-72-CTX", classification: %{error_code: :context_window_exhausted, retry_after_ms: nil})
-
-      send(pid, {:DOWN, ref, :process, self(), :killed})
+      send(pid, {:DOWN, ref, :process, self(), agent_run_failed_reason(:context_window_exhausted)})
       Process.sleep(75)
       state = :sys.get_state(pid)
 
@@ -258,11 +267,9 @@ defmodule SymphonyElixir.OrchestratorRetryPolicyTest do
     test "quota_exceeded DOWN moves the issue to blocked without scheduling a retry" do
       pid = start_orchestrator!(:QuotaDownOrchestrator)
       issue_id = "ide-72-quota"
+      ref = seed_running_entry!(pid, issue_id, "IDE-72-Q")
 
-      ref =
-        seed_running_entry!(pid, issue_id, "IDE-72-Q", classification: %{error_code: :quota_exceeded, retry_after_ms: nil})
-
-      send(pid, {:DOWN, ref, :process, self(), :killed})
+      send(pid, {:DOWN, ref, :process, self(), agent_run_failed_reason(:quota_exceeded)})
       Process.sleep(75)
       state = :sys.get_state(pid)
 
@@ -271,11 +278,13 @@ defmodule SymphonyElixir.OrchestratorRetryPolicyTest do
       assert error =~ "quota_exceeded"
     end
 
-    test "missing classification falls back to the historical exponential backoff" do
+    test "missing classification (raw exit) falls back to the historical exponential backoff" do
       pid = start_orchestrator!(:UnknownFallbackOrchestrator)
       issue_id = "ide-72-unknown"
       ref = seed_running_entry!(pid, issue_id, "IDE-72-UN")
 
+      # Raw `:boom` — not an `{:agent_run_failed, …}` wrapper, so the
+      # orchestrator extracts no code and the policy falls through to `:unknown`.
       baseline_ms = System.monotonic_time(:millisecond)
       send(pid, {:DOWN, ref, :process, self(), :boom})
       Process.sleep(75)
@@ -285,27 +294,6 @@ defmodule SymphonyElixir.OrchestratorRetryPolicyTest do
       remaining = due_at_ms - baseline_ms
       # First abnormal exit ≈ 10s with the legacy exponential schedule.
       assert remaining in 9_000..11_000, "expected ~10s legacy backoff, got #{remaining}"
-    end
-
-    test "`:agent_failure_classified` caches the failure code on the running entry" do
-      pid = start_orchestrator!(:ClassificationCacheOrchestrator)
-      issue_id = "ide-72-cache"
-      ref = seed_running_entry!(pid, issue_id, "IDE-72-C")
-
-      send(
-        pid,
-        {:agent_failure_classified, issue_id, %{error_code: :quota_exceeded, retry_after_ms: nil, reason_summary: "credit_balance_too_low"}}
-      )
-
-      Process.sleep(25)
-
-      send(pid, {:DOWN, ref, :process, self(), :killed})
-      Process.sleep(75)
-      state = :sys.get_state(pid)
-
-      refute Map.has_key?(state.retry_attempts, issue_id)
-      assert %{error: error} = state.blocked[issue_id]
-      assert error =~ "quota_exceeded"
     end
   end
 

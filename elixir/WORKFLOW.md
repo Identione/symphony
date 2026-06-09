@@ -54,6 +54,21 @@ agent:
   #     honor_retry_after: true
   #   unknown:
   #     strategy: no_retry
+  # Deterministic-failure escalation (IDE-73). After N consecutive failures
+  # carrying the same structured `error_code` (IDE-71 taxonomy:
+  # quota_exceeded / context_window_exhausted / invalid_request / port_exit /
+  # claude_sidecar_exit), Symphony appends a summary to the existing
+  # `## Symphony Workpad` comment — or, if none exists, posts a standalone
+  # blocker comment. After M, it also moves the issue to
+  # `deterministic_failure_escalation_state` so the polling loop stops
+  # re-dispatching. Transient codes (`rate_limited`, `overloaded`,
+  # `turn_timeout`, `response_timeout`, `unknown`) reset the counter so a brief upstream blip
+  # never trips these thresholds. Defaults: 3 / 5 / "Human Review". Lower the
+  # alert/escalation thresholds for tighter feedback; raise
+  # max_retry_backoff_ms below to slow retries between alerts.
+  # deterministic_failure_alert_threshold: 3
+  # deterministic_failure_escalation_threshold: 5
+  # deterministic_failure_escalation_state: "Human Review"
   # Claude Agent SDK adapter (SPEC.md §10.8). Switch to `codex` to use the
   # legacy Codex App-Server adapter — the nested `agent.codex` block below
   # is preserved so the swap is one-line.

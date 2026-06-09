@@ -22,27 +22,42 @@ defmodule SymphonyElixir.AgentRunner do
         :ok
 
       {:error, reason} ->
-        classification = classify_failure(reason)
-        send_failure_classification(codex_update_recipient, issue, reason, classification)
         Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
-        raise RuntimeError, "Agent run failed for #{issue_context(issue)}: #{inspect(reason)}"
+        # Carry the classified `error_code` (IDE-71 taxonomy) through the
+        # process exit so the orchestrator's :DOWN handler can branch on it
+        # without re-parsing `inspect(reason)`. The previous `raise
+        # RuntimeError` collapsed every failure into an opaque
+        # `{%RuntimeError{}, stacktrace}` exit reason.
+        exit({:agent_run_failed, classify_error_code(reason), reason})
     end
   end
 
-  # IDE-71 adapter contract: a classified error arrives as `{tag, code, body}`
-  # with `code` already atomized. Anything else maps to `:unknown`.
-  @classified_tags [:claude_sdk_error, :turn_failed, :codex_error_notification]
-
   @doc false
-  @spec classify_failure(term()) :: %{error_code: atom(), retry_after_ms: pos_integer() | nil}
-  def classify_failure({tag, code, body}) when tag in @classified_tags and is_atom(code),
-    do: %{error_code: code, retry_after_ms: parse_retry_after(body)}
+  @spec classify_error_code(term()) :: atom()
+  def classify_error_code({:turn_failed, code, _params}) when is_atom(code), do: code
+  def classify_error_code({:codex_error_notification, code, _payload}) when is_atom(code), do: code
+  def classify_error_code({:claude_sdk_error, code, _msg}) when is_atom(code), do: code
+  def classify_error_code(:turn_timeout), do: :turn_timeout
+  def classify_error_code(:response_timeout), do: :response_timeout
+  def classify_error_code({:port_exit, _status}), do: :port_exit
+  def classify_error_code({:claude_sidecar_exit, _status}), do: :claude_sidecar_exit
+  def classify_error_code(_reason), do: :unknown
 
-  def classify_failure(_other), do: %{error_code: :unknown, retry_after_ms: nil}
+  @doc """
+  Best-effort `Retry-After` hint (ms) extracted from a classified failure
+  reason. IDE-72 retry policy consumes this when the upstream error carries
+  an explicit hint (Codex puts the value in `params.error.headers`/
+  `params.error.retry_after`; Claude only carries rendered exception text,
+  so we fall back to a bounded regex over `inspect/2` of the payload). Returns
+  `nil` when no hint is present or the value isn't a positive integer.
+  """
+  @spec extract_retry_after_ms(term()) :: pos_integer() | nil
+  def extract_retry_after_ms({tag, _code, body})
+      when tag in [:claude_sdk_error, :turn_failed, :codex_error_notification],
+      do: parse_retry_after(body)
 
-  # Codex puts upstream HTTP headers in `params.error.headers`; Claude only
-  # carries rendered exception text. The map clauses cover the structured case;
-  # the inspect-fallback catches odd nestings without walking the whole tree.
+  def extract_retry_after_ms(_other), do: nil
+
   defp parse_retry_after(payload) when is_map(payload) do
     parse_retry_after_from_map(payload) ||
       parse_retry_after(inspect(payload, limit: 50, printable_limit: 512))
@@ -89,15 +104,6 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp retry_after_value_to_ms(_value), do: nil
-
-  defp send_failure_classification(recipient, %Issue{id: issue_id}, reason, classification)
-       when is_binary(issue_id) and is_pid(recipient) do
-    summary = reason |> inspect(limit: 5, printable_limit: 256) |> cap(@log_value_limit)
-    send(recipient, {:agent_failure_classified, issue_id, Map.put(classification, :reason_summary, summary)})
-    :ok
-  end
-
-  defp send_failure_classification(_recipient, _issue, _reason, _classification), do: :ok
 
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")

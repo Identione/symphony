@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, DeterministicFailure, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Orchestrator.RetryPolicy
 
@@ -50,6 +50,18 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       blocked: %{},
       retry_attempts: %{},
+      # Per-issue counter of consecutive same-code adapter failures, used to
+      # surface stuck issues to Linear after N alerts and escalate them to a
+      # non-active state after M (IDE-73). Keyed by Linear issue id; entries
+      # follow `t:SymphonyElixir.DeterministicFailure.entry/0`.
+      deterministic_failures: %{},
+      # In-flight DeterministicFailure escalations (IDE-102). Keyed by issue id;
+      # each value is a `t:pending_escalation/0` carrying the data we need to
+      # apply the result when the task messages back. The issue is held in
+      # `claimed` while pending so the polling loop won't re-dispatch it, but
+      # is NOT in `running` (the agent has exited) and has no retry timer
+      # scheduled yet — the result handler decides whether to schedule one.
+      pending_escalations: %{},
       codex_totals: nil,
       claude_totals: nil,
       codex_rate_limits: nil
@@ -170,21 +182,6 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  # Fired by AgentRunner before it raises so the `:DOWN` handler downstream
-  # has a structured error code to branch on. Missing classification
-  # (workspace crash, hook failure pre-classify) is treated as `:unknown`.
-  def handle_info({:agent_failure_classified, issue_id, classification}, %{running: running} = state)
-      when is_binary(issue_id) and is_map(classification) do
-    case Map.get(running, issue_id) do
-      nil ->
-        {:noreply, state}
-
-      running_entry ->
-        updated = Map.put(running_entry, :last_failure_classification, classification)
-        {:noreply, %{state | running: Map.put(running, issue_id, updated)}}
-    end
-  end
-
   def handle_info(
         {:codex_worker_update, issue_id, %{event: _, timestamp: _} = update},
         %{running: running} = state
@@ -216,6 +213,24 @@ defmodule SymphonyElixir.Orchestrator do
 
   def handle_info({:retry_issue, _issue_id}, state), do: {:noreply, state}
 
+  # The token guards against stale results — a reconcile path can wipe
+  # `pending_escalations[issue_id]` while the task is in flight, and the
+  # task's eventual message must then no-op rather than re-apply state.
+  def handle_info({:deterministic_failure_result, issue_id, token, action, result}, state) do
+    case Map.get(state.pending_escalations, issue_id) do
+      %{token: ^token} = pending ->
+        state = %{state | pending_escalations: Map.delete(state.pending_escalations, issue_id)}
+        state = apply_deterministic_failure_result(state, issue_id, pending, action, result)
+        notify_dashboard()
+        {:noreply, state}
+
+      _ ->
+        Logger.debug("Ignoring stale deterministic_failure_result for issue_id=#{issue_id} action=#{inspect(action)}")
+
+        {:noreply, state}
+    end
+  end
+
   def handle_info(msg, state) do
     Logger.debug("Orchestrator ignored message: #{inspect(msg)}")
     {:noreply, state}
@@ -228,6 +243,7 @@ defmodule SymphonyElixir.Orchestrator do
       Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
 
       state
+      |> clear_deterministic_failure(issue_id)
       |> complete_issue(issue_id)
       |> schedule_issue_retry(issue_id, 1, %{
         identifier: running_entry.identifier,
@@ -242,7 +258,17 @@ defmodule SymphonyElixir.Orchestrator do
     if input_required_blocker?(running_entry) do
       block_input_required_agent_down(state, issue_id, running_entry, session_id, reason)
     else
-      retry_agent_down(state, issue_id, running_entry, session_id, reason)
+      state
+      |> maybe_track_deterministic_failure(issue_id, running_entry, reason)
+      |> case do
+        # Side effect handed off to a supervised task; scheduling a retry
+        # here would race with the result handler's own retry decision.
+        {:pending, next_state} ->
+          next_state
+
+        {:continue, next_state} ->
+          retry_agent_down(next_state, issue_id, running_entry, session_id, reason)
+      end
     end
   end
 
@@ -251,13 +277,14 @@ defmodule SymphonyElixir.Orchestrator do
 
     Logger.warning("Agent task blocked for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}: #{error}")
 
-    block_issue_from_entry(state, issue_id, running_entry, error)
+    state
+    |> clear_deterministic_failure(issue_id)
+    |> block_issue_from_entry(issue_id, running_entry, error)
   end
 
   defp retry_agent_down(state, issue_id, running_entry, session_id, reason) do
-    classification = Map.get(running_entry, :last_failure_classification) || %{}
-    error_code = Map.get(classification, :error_code, :unknown)
-    retry_after_ms = Map.get(classification, :retry_after_ms)
+    error_code = extract_error_code(reason) || :unknown
+    retry_after_ms = AgentRunner.extract_retry_after_ms(extract_inner_reason(reason))
     next_attempt = next_retry_attempt_from_running(running_entry) || 1
 
     case RetryPolicy.decide(error_code, next_attempt, retry_after_ms, Config.settings!()) do
@@ -289,6 +316,205 @@ defmodule SymphonyElixir.Orchestrator do
     )
 
     block_issue_from_entry(state, issue_id, running_entry, error)
+  end
+
+  # `reason` here is the process exit reason from the `:DOWN` handler. When
+  # `AgentRunner.run/3` fails it `exit/1`s with `{:agent_run_failed, code,
+  # inner_reason}` so the structured taxonomy survives the supervisor hop.
+  # Anything else (raw atoms, `:killed`, etc.) bypasses the deterministic-
+  # failure counter — those come from kill paths inside the orchestrator
+  # itself or from tests synthesising abnormal exits, and shouldn't be treated
+  # as classified upstream failures.
+  defp maybe_track_deterministic_failure(state, issue_id, running_entry, reason) do
+    case extract_error_code(reason) do
+      nil ->
+        {:continue, clear_deterministic_failure(state, issue_id)}
+
+      code ->
+        settings = Config.settings!()
+        prev_entry = Map.get(state.deterministic_failures, issue_id)
+
+        case DeterministicFailure.decide(prev_entry, code, settings) do
+          {:drop, :no_action} ->
+            {:continue, clear_deterministic_failure(state, issue_id)}
+
+          {updated_entry, action} ->
+            apply_deterministic_action(
+              state,
+              issue_id,
+              running_entry,
+              reason,
+              updated_entry,
+              action,
+              settings
+            )
+        end
+    end
+  end
+
+  defp apply_deterministic_action(
+         state,
+         issue_id,
+         _running_entry,
+         _reason,
+         entry,
+         :no_action,
+         _settings
+       ) do
+    {:continue, put_deterministic_failure(state, issue_id, entry)}
+  end
+
+  # The Tracker round-trips inside `DeterministicFailure.handle/3` (workpad
+  # fetch, comment update/create, state move) can block for up to
+  # `agent.max_retry_backoff_ms` (5 min default). Run them under
+  # `SymphonyElixir.TaskSupervisor` so the orchestrator's main loop stays free
+  # to handle other issues' `:DOWN`/dispatch/poll messages while they're in
+  # flight. We persist the incremented counter immediately, but the
+  # `notified_*` flags and the escalation state-drop are deferred to the
+  # result handler so the IDE-73 retry contract (flags only set on success)
+  # is preserved.
+  defp apply_deterministic_action(state, issue_id, running_entry, reason, entry, action, settings) do
+    issue = Map.get(running_entry, :issue) || running_entry_issue_fallback(running_entry, issue_id)
+    session_id = running_entry_session_id(running_entry)
+
+    case spawn_deterministic_action(issue_id, issue, action, settings) do
+      {:ok, token} ->
+        pending = %{
+          token: token,
+          action: action,
+          entry: entry,
+          running_entry: running_entry,
+          reason: reason
+        }
+
+        {:pending,
+         state
+         |> put_deterministic_failure(issue_id, entry)
+         |> put_pending_escalation(issue_id, pending)}
+
+      {:error, spawn_reason} ->
+        # Spawning the side effect failed (e.g. Task.Supervisor at
+        # `max_children`). Persist the counter increment and fall through to
+        # the existing retry path so the next same-code :DOWN re-tries the
+        # alert/escalate side effect via `decide/3`.
+        Logger.warning("DeterministicFailure spawn failed for #{inspect(action)} issue_id=#{issue_id}: #{inspect(spawn_reason)}")
+
+        {:continue,
+         retry_agent_down(
+           put_deterministic_failure(state, issue_id, entry),
+           issue_id,
+           running_entry,
+           session_id,
+           reason
+         )}
+    end
+  end
+
+  defp spawn_deterministic_action(issue_id, issue, action, settings) do
+    recipient = self()
+    token = make_ref()
+
+    spawn_result =
+      Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+        result =
+          try do
+            DeterministicFailure.handle(action, issue, settings)
+          catch
+            kind, caught_reason ->
+              {:error, {:task_crashed, kind, caught_reason, __STACKTRACE__}}
+          end
+
+        send(recipient, {:deterministic_failure_result, issue_id, token, action, result})
+      end)
+
+    case spawn_result do
+      {:ok, _pid} -> {:ok, token}
+      {:error, _} = err -> err
+    end
+  end
+
+  defp apply_deterministic_failure_result(state, issue_id, pending, action, result) do
+    %{entry: entry, running_entry: running_entry, reason: reason} = pending
+    session_id = running_entry_session_id(running_entry)
+
+    case {action, result} do
+      {{:escalate, _, _}, {:ok, :escalated}} ->
+        # `escalate_running_issue/3` resets the counter (issue is leaving the
+        # active set), so any flag write here would be immediately discarded.
+        escalate_running_issue(state, issue_id, running_entry)
+
+      {{:alert, _, _}, :ok} ->
+        state
+        |> put_deterministic_failure(issue_id, %{entry | notified_alert?: true})
+        |> retry_agent_down(issue_id, running_entry, session_id, reason)
+
+      {_action, _other} ->
+        # :alert that errored, or :escalate where the comment post or state
+        # move failed. Notification flags stay clear so the next same-code
+        # failure re-fires the same action via `decide/3` (IDE-73 retry
+        # contract); the issue still needs a retry scheduled.
+        state
+        |> put_deterministic_failure(issue_id, entry)
+        |> retry_agent_down(issue_id, running_entry, session_id, reason)
+    end
+  end
+
+  # When DeterministicFailure successfully escalates an issue, the polling
+  # loop must stop re-dispatching it. Drop the bookkeeping mirroring what
+  # `release_issue_claim/2` does, but without re-scheduling a retry. We also
+  # cancel any in-flight retry timer; the issue now lives in the escalation
+  # state and `reconcile_running_issues` would otherwise still see it queued.
+  defp escalate_running_issue(state, issue_id, running_entry) do
+    cancel_retry_timer(state, issue_id)
+    cleanup_issue_workspace(Map.get(running_entry, :identifier), Map.get(running_entry, :worker_host))
+
+    %{
+      state
+      | running: Map.delete(state.running, issue_id),
+        claimed: MapSet.delete(state.claimed, issue_id),
+        blocked: Map.delete(state.blocked, issue_id),
+        retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        deterministic_failures: DeterministicFailure.reset(state.deterministic_failures, issue_id),
+        pending_escalations: Map.delete(state.pending_escalations, issue_id)
+    }
+  end
+
+  defp put_pending_escalation(state, issue_id, pending) do
+    %{state | pending_escalations: Map.put(state.pending_escalations, issue_id, pending)}
+  end
+
+  defp cancel_retry_timer(state, issue_id) do
+    case Map.get(state.retry_attempts, issue_id) do
+      %{timer_ref: timer_ref} when is_reference(timer_ref) ->
+        Process.cancel_timer(timer_ref)
+        :ok
+
+      _ ->
+        :ok
+    end
+  end
+
+  defp put_deterministic_failure(state, issue_id, entry) do
+    %{state | deterministic_failures: Map.put(state.deterministic_failures, issue_id, entry)}
+  end
+
+  defp clear_deterministic_failure(state, issue_id) do
+    %{state | deterministic_failures: DeterministicFailure.reset(state.deterministic_failures, issue_id)}
+  end
+
+  defp extract_error_code({:agent_run_failed, code, _reason}) when is_atom(code), do: code
+  defp extract_error_code(_reason), do: nil
+
+  defp extract_inner_reason({:agent_run_failed, _code, inner}), do: inner
+  defp extract_inner_reason(reason), do: reason
+
+  defp running_entry_issue_fallback(running_entry, issue_id) do
+    %Issue{
+      id: issue_id,
+      identifier: Map.get(running_entry, :identifier) || issue_id,
+      title: "",
+      state: ""
+    }
   end
 
   defp maybe_dispatch(%State{} = state) do
@@ -343,6 +569,10 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, {:workflow_parse_error, reason}} ->
         Logger.error("Failed to parse WORKFLOW.md: #{inspect(reason)}")
+        state
+
+      {:error, :rate_limited} ->
+        Logger.debug("Skipping Linear poll cycle; rate-limit window active")
         state
 
       {:error, reason} ->
@@ -603,7 +833,9 @@ defmodule SymphonyElixir.Orchestrator do
           | running: Map.delete(state.running, issue_id),
             claimed: MapSet.delete(state.claimed, issue_id),
             blocked: Map.delete(state.blocked, issue_id),
-            retry_attempts: Map.delete(state.retry_attempts, issue_id)
+            retry_attempts: Map.delete(state.retry_attempts, issue_id),
+            deterministic_failures: DeterministicFailure.reset(state.deterministic_failures, issue_id),
+            pending_escalations: Map.delete(state.pending_escalations, issue_id)
         }
 
       _ ->
@@ -890,6 +1122,7 @@ defmodule SymphonyElixir.Orchestrator do
        )
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
     issue_routable_to_worker?(issue) and
+      issue_satisfies_label_filters?(issue) and
       active_issue_state?(state_name, active_states) and
       !terminal_issue_state?(state_name, terminal_states)
   end
@@ -901,6 +1134,15 @@ defmodule SymphonyElixir.Orchestrator do
        do: assigned_to_worker
 
   defp issue_routable_to_worker?(_issue), do: true
+
+  # Dispatch only when the issue carries every `required_labels` entry (all-of)
+  # and none of the `excluded_labels` entries (none-of). Empty lists are no-ops.
+  defp issue_satisfies_label_filters?(%Issue{labels: labels}) when is_list(labels) do
+    present = MapSet.new(labels, &normalize_label/1)
+
+    MapSet.subset?(required_label_set(), present) and
+      MapSet.disjoint?(excluded_label_set(), present)
+  end
 
   defp todo_issue_blocked_by_non_terminal?(
          %Issue{state: issue_state, blocked_by: blockers},
@@ -933,6 +1175,21 @@ defmodule SymphonyElixir.Orchestrator do
     String.downcase(String.trim(state_name))
   end
 
+  defp normalize_label(label) when is_binary(label) do
+    String.downcase(String.trim(label))
+  end
+
+  defp required_label_set, do: label_set(Config.settings!().tracker.required_labels)
+
+  defp excluded_label_set, do: label_set(Config.settings!().tracker.excluded_labels)
+
+  defp label_set(labels) when is_list(labels) do
+    labels
+    |> Enum.map(&normalize_label/1)
+    |> Enum.filter(&(&1 != ""))
+    |> MapSet.new()
+  end
+
   defp terminal_state_set do
     Config.settings!().tracker.terminal_states
     |> Enum.map(&normalize_issue_state/1)
@@ -958,6 +1215,11 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:skip, %Issue{} = refreshed_issue} ->
         Logger.info("Skipping stale dispatch after issue refresh: #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)} blocked_by=#{length(refreshed_issue.blocked_by)}")
+
+        state
+
+      {:error, :rate_limited} ->
+        Logger.debug("Skipping dispatch; Linear rate-limit window active for #{issue_context(issue)}")
 
         state
 
@@ -1135,6 +1397,17 @@ defmodule SymphonyElixir.Orchestrator do
         |> find_issue_by_id(issue_id)
         |> handle_retry_issue_lookup(state, issue_id, attempt, metadata)
 
+      {:error, :rate_limited} ->
+        Logger.debug("Retry poll deferred; Linear rate-limit window active for issue_id=#{issue_id}")
+
+        {:noreply,
+         schedule_issue_retry(
+           state,
+           issue_id,
+           attempt + 1,
+           Map.merge(metadata, %{error: "retry poll deferred: rate_limited"})
+         )}
+
       {:error, reason} ->
         Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
 
@@ -1237,7 +1510,9 @@ defmodule SymphonyElixir.Orchestrator do
       state
       | claimed: MapSet.delete(state.claimed, issue_id),
         blocked: Map.delete(state.blocked, issue_id),
-        retry_attempts: Map.delete(state.retry_attempts, issue_id)
+        retry_attempts: Map.delete(state.retry_attempts, issue_id),
+        deterministic_failures: DeterministicFailure.reset(state.deterministic_failures, issue_id),
+        pending_escalations: Map.delete(state.pending_escalations, issue_id)
     }
   end
 

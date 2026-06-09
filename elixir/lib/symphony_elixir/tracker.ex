@@ -5,11 +5,25 @@ defmodule SymphonyElixir.Tracker do
 
   alias SymphonyElixir.Config
 
+  @typedoc """
+  Comment view returned by `fetch_comments/1`. `:resolved_at` is `nil` for an
+  open comment; an ISO-8601 string when Linear resolved it. The deterministic-
+  failure escalation flow (IDE-73) skips resolved comments when searching for
+  the `## Symphony Workpad` marker so it never appends into a closed thread.
+  """
+  @type comment :: %{
+          required(:id) => String.t(),
+          required(:body) => String.t(),
+          optional(:resolved_at) => String.t() | nil
+        }
+
   @callback fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issues_by_states([String.t()]) :: {:ok, [term()]} | {:error, term()}
   @callback fetch_issue_states_by_ids([String.t()]) :: {:ok, [term()]} | {:error, term()}
   @callback create_comment(String.t(), String.t()) :: :ok | {:error, term()}
   @callback update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
+  @callback fetch_comments(String.t()) :: {:ok, [comment()]} | {:error, term()}
+  @callback update_comment(String.t(), String.t()) :: :ok | {:error, term()}
 
   @spec fetch_candidate_issues() :: {:ok, [term()]} | {:error, term()}
   def fetch_candidate_issues do
@@ -34,6 +48,16 @@ defmodule SymphonyElixir.Tracker do
   @spec update_issue_state(String.t(), String.t()) :: :ok | {:error, term()}
   def update_issue_state(issue_id, state_name) do
     adapter().update_issue_state(issue_id, state_name)
+  end
+
+  @spec fetch_comments(String.t()) :: {:ok, [comment()]} | {:error, term()}
+  def fetch_comments(issue_id) do
+    adapter().fetch_comments(issue_id)
+  end
+
+  @spec update_comment(String.t(), String.t()) :: :ok | {:error, term()}
+  def update_comment(comment_id, body) do
+    adapter().update_comment(comment_id, body)
   end
 
   @spec adapter() :: module()

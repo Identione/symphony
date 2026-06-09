@@ -31,10 +31,10 @@ defmodule SymphonyElixir.CodexAppServerErrorTest do
     event = "'" <> String.replace(event_json, "'", ~s('"'"')) <> "'"
 
     # Responses have no single quotes, so single-quoting is safe.
-    "(IFS= read -r _; echo '{\"id\":1,\"result\":{}}';" <>
+    ~s|(IFS= read -r _; echo '{"id":1,"result":{}}';| <>
       " IFS= read -r _;" <>
-      " IFS= read -r _; echo '{\"id\":2,\"result\":{\"thread\":{\"id\":\"th1\"}}}';" <>
-      " IFS= read -r _; echo '{\"id\":3,\"result\":{\"turn\":{\"id\":\"tu1\"}}}';" <>
+      ~s| IFS= read -r _; echo '{"id":2,"result":{"thread":{"id":"th1"}}}';| <>
+      ~s| IFS= read -r _; echo '{"id":3,"result":{"turn":{"id":"tu1"}}}';| <>
       " echo #{event};" <>
       " while IFS= read -r _; do :; done)"
   end

@@ -585,33 +585,28 @@ defmodule SymphonyElixir.Codex.AppServer do
   defp codex_error_payload(%{"params" => params}), do: params
   defp codex_error_payload(payload), do: payload
 
+  # Ordered classification rules: {classification, http_status, downcased substrings}.
+  # The first rule whose status or any substring matches the error wins, mirroring
+  # the original top-to-bottom `cond`.
+  @codex_error_rules [
+    {:rate_limited, 429, ["rate_limit", "rate limit"]},
+    {:context_window_exhausted, 413, ["context_length", "context window", "token_limit"]},
+    {:overloaded, 503, ["overload"]},
+    {:quota_exceeded, 402, ["quota", "credit"]},
+    {:invalid_request, 400, ["invalid_request", "invalid request"]}
+  ]
+
   defp classify_codex_error_code(%{"error" => error}) when is_map(error) do
-    code = Map.get(error, "code", "") |> to_string()
-    type = Map.get(error, "type", "") |> to_string()
+    code = error |> Map.get("code", "") |> to_string()
+    type = error |> Map.get("type", "") |> to_string()
     status = Map.get(error, "status")
     combined = String.downcase("#{code} #{type}")
 
-    cond do
-      status == 429 or String.contains?(combined, "rate_limit") or String.contains?(combined, "rate limit") ->
-        :rate_limited
-
-      status == 413 or String.contains?(combined, "context_length") or
-        String.contains?(combined, "context window") or String.contains?(combined, "token_limit") ->
-        :context_window_exhausted
-
-      status == 503 or String.contains?(combined, "overload") ->
-        :overloaded
-
-      status == 402 or String.contains?(combined, "quota") or String.contains?(combined, "credit") ->
-        :quota_exceeded
-
-      status == 400 or String.contains?(combined, "invalid_request") or
-          String.contains?(combined, "invalid request") ->
-        :invalid_request
-
-      true ->
-        :unknown
-    end
+    Enum.find_value(@codex_error_rules, :unknown, fn {classification, rule_status, substrings} ->
+      if status == rule_status or Enum.any?(substrings, &String.contains?(combined, &1)) do
+        classification
+      end
+    end)
   end
 
   defp classify_codex_error_code(_), do: :unknown

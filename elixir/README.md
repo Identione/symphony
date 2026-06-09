@@ -67,6 +67,36 @@ workflow and the instance Makefile are regenerated together.
   can be copied into your repo; the `linear` skill uses Symphony's
   `linear_graphql` app-server tool.
 
+## Toolchain
+
+`mise` (`mise.toml`) pins the whole toolchain, and `mise install` resolves it
+from the committed lockfile `mise.lock` (per-platform checksums, so a swapped
+upstream artifact fails verification instead of installing silently):
+
+- **Erlang 28 / Elixir 1.19** — line-pinned plumbing.
+- **`codex`** — the default adapter binary, tracked as `latest` (it moves fast
+  and has no stable release line); reproducibility comes from `mise.lock`.
+- **`uv`** — runs the Claude SDK sidecar (`priv/claude_agent`); line-pinned.
+
+The Claude adapter's fast-moving piece is the Python `claude-agent-sdk`
+package, declared `>=` in `priv/claude_agent/pyproject.toml` and pinned in
+`priv/claude_agent/uv.lock` — uv's domain, not mise's.
+
+### Upgrading the agent toolchain
+
+```bash
+make upgrade-tools     # bump codex (mise.lock) + claude-agent-sdk (uv.lock)
+make all               # verify, then commit mise.lock + priv/claude_agent/uv.lock
+```
+
+`make upgrade-tools` only moves the *eager-tracked* tools (codex,
+`claude-agent-sdk`). Line-pinned tools (erlang/elixir/uv) move by editing the
+pin in `mise.toml` and re-running `mise install`.
+
+> Not to be confused with the root **`make upgrade` / `upgrade-all`**, which
+> redeploys Symphony *code* (rebuild escript + restart instance daemons after a
+> `git pull`) and never touches the toolchain.
+
 ## CLI reference
 
 The Makefile-driven flow above is the supported path; what follows is the
@@ -143,6 +173,11 @@ repo:
 ### Behavior notes
 
 - `tracker.api_key` reads `LINEAR_API_KEY` when unset or set to `$LINEAR_API_KEY`.
+- `tracker.required_labels` / `tracker.excluded_labels` (default `[]`) gate
+  dispatch by Linear label, case-insensitively. An issue is picked up only
+  if it carries *every* `required_labels` entry and *none* of the
+  `excluded_labels` entries; an excluded label always disqualifies. Leave
+  both empty to disable label gating.
 - `~` and `$VAR` are expanded in path values (except `codex.command`,
   which is a shell command string — `$VAR` expands at exec time there).
 - If `WORKFLOW.md` is missing or invalid at boot, Symphony refuses to

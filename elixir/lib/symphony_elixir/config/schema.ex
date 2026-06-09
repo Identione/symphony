@@ -54,6 +54,8 @@ defmodule SymphonyElixir.Config.Schema do
       field(:assignee, :string)
       field(:active_states, {:array, :string}, default: ["Todo", "In Progress"])
       field(:terminal_states, {:array, :string}, default: ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"])
+      field(:required_labels, {:array, :string}, default: [])
+      field(:excluded_labels, {:array, :string}, default: [])
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -61,7 +63,17 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:kind, :endpoint, :api_key, :project_slug, :assignee, :active_states, :terminal_states],
+        [
+          :kind,
+          :endpoint,
+          :api_key,
+          :project_slug,
+          :assignee,
+          :active_states,
+          :terminal_states,
+          :required_labels,
+          :excluded_labels
+        ],
         empty_values: []
       )
     end
@@ -92,7 +104,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
-      field(:root, :string, default: Path.join(System.tmp_dir!(), "symphony_workspaces"))
+      field(:root, :string)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -321,6 +333,14 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_concurrent_agents_by_state, :map, default: %{})
       field(:retry_policy, :map, default: %{})
       field(:kind, :string, default: "codex")
+      # Deterministic-failure escalation (IDE-73). Tracks consecutive failures
+      # carrying the same structured `error_code` (IDE-71 taxonomy) — quota
+      # exhaustion, context-window overflow, sidecar binary missing, etc.
+      # Transient codes (`rate_limited`, `overloaded`) reset the counter and
+      # never trip these thresholds.
+      field(:deterministic_failure_alert_threshold, :integer, default: 3)
+      field(:deterministic_failure_escalation_threshold, :integer, default: 5)
+      field(:deterministic_failure_escalation_state, :string, default: "Human Review")
       embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
       embeds_one(:claude, Claude, on_replace: :update, defaults_to_struct: true)
     end
@@ -339,7 +359,10 @@ defmodule SymphonyElixir.Config.Schema do
           :max_retry_backoff_ms,
           :max_concurrent_agents_by_state,
           :retry_policy,
-          :kind
+          :kind,
+          :deterministic_failure_alert_threshold,
+          :deterministic_failure_escalation_threshold,
+          :deterministic_failure_escalation_state
         ],
         empty_values: []
       )
@@ -349,10 +372,28 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
+      |> validate_number(:deterministic_failure_alert_threshold, greater_than: 0)
+      |> validate_number(:deterministic_failure_escalation_threshold, greater_than: 0)
+      |> validate_thresholds_order()
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
       |> update_change(:retry_policy, &Schema.normalize_retry_policy/1)
       |> Schema.validate_retry_policy(:retry_policy)
+    end
+
+    defp validate_thresholds_order(changeset) do
+      alert = get_field(changeset, :deterministic_failure_alert_threshold)
+      escalate = get_field(changeset, :deterministic_failure_escalation_threshold)
+
+      if is_integer(alert) and is_integer(escalate) and escalate < alert do
+        add_error(
+          changeset,
+          :deterministic_failure_escalation_threshold,
+          "must be >= deterministic_failure_alert_threshold"
+        )
+      else
+        changeset
+      end
     end
   end
 
@@ -673,6 +714,36 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:repo, with: &Repo.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
+    |> validate_deterministic_escalation_state_disjoint()
+  end
+
+  # If the escalation state is still listed in `tracker.active_states`, the
+  # polling loop would re-claim the escalated issue on the next tick — the
+  # exact infinite loop the escalation exists to break.
+  defp validate_deterministic_escalation_state_disjoint(changeset) do
+    with %Agent{deterministic_failure_escalation_state: escalation_state} when is_binary(escalation_state) <-
+           get_field(changeset, :agent),
+         %Tracker{active_states: active_states} when is_list(active_states) <-
+           get_field(changeset, :tracker),
+         true <- escalation_state_in_active_states?(escalation_state, active_states) do
+      add_error(
+        changeset,
+        :agent,
+        "deterministic_failure_escalation_state must not appear in tracker.active_states " <>
+          "(escalation_state=#{inspect(escalation_state)}, active_states=#{inspect(active_states)})"
+      )
+    else
+      _ -> changeset
+    end
+  end
+
+  defp escalation_state_in_active_states?(escalation_state, active_states)
+       when is_binary(escalation_state) and is_list(active_states) do
+    normalized_escalation = normalize_issue_state(escalation_state)
+
+    Enum.any?(active_states, fn active ->
+      is_binary(active) and normalize_issue_state(active) == normalized_escalation
+    end)
   end
 
   defp finalize_settings(settings) do
@@ -731,6 +802,8 @@ defmodule SymphonyElixir.Config.Schema do
       resolved -> resolved
     end
   end
+
+  defp resolve_path_value(nil, default), do: default
 
   defp resolve_path_value(value, default) when is_binary(value) do
     case normalize_path_token(value) do

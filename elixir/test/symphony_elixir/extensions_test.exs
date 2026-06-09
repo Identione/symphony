@@ -197,9 +197,42 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert_receive {:memory_tracker_comment, "issue-1", "comment"}
     assert_receive {:memory_tracker_state_update, "issue-1", "Done"}
 
+    Application.put_env(:symphony_elixir, :memory_tracker_comments, %{
+      "issue-1" => [%{id: "c1", body: "## Symphony Workpad\n", resolved_at: nil}]
+    })
+
+    assert {:ok, [%{id: "c1", body: "## Symphony Workpad\n", resolved_at: nil}]} =
+             SymphonyElixir.Tracker.fetch_comments("issue-1")
+
+    assert {:ok, []} = SymphonyElixir.Tracker.fetch_comments("unknown-issue")
+
+    assert :ok = SymphonyElixir.Tracker.update_comment("c1", "edited")
+    assert_receive {:memory_tracker_comment_update, "c1", "edited"}
+
+    # Error-injection hooks short-circuit the happy path so tests can drive
+    # the DeterministicFailure error branches without a real transport.
+    Application.put_env(:symphony_elixir, :memory_tracker_fetch_comments_response, {:error, :boom})
+    assert {:error, :boom} = SymphonyElixir.Tracker.fetch_comments("issue-1")
+    Application.delete_env(:symphony_elixir, :memory_tracker_fetch_comments_response)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_update_comment_response, {:error, :boom})
+    assert {:error, :boom} = SymphonyElixir.Tracker.update_comment("c1", "edited")
+    Application.delete_env(:symphony_elixir, :memory_tracker_update_comment_response)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_create_comment_response, {:error, :boom})
+    assert {:error, :boom} = SymphonyElixir.Tracker.create_comment("issue-1", "comment")
+    Application.delete_env(:symphony_elixir, :memory_tracker_create_comment_response)
+
+    Application.put_env(:symphony_elixir, :memory_tracker_update_issue_state_response, {:error, :boom})
+    assert {:error, :boom} = SymphonyElixir.Tracker.update_issue_state("issue-1", "Done")
+    Application.delete_env(:symphony_elixir, :memory_tracker_update_issue_state_response)
+
+    Application.delete_env(:symphony_elixir, :memory_tracker_comments)
     Application.delete_env(:symphony_elixir, :memory_tracker_recipient)
     assert :ok = Memory.create_comment("issue-1", "quiet")
     assert :ok = Memory.update_issue_state("issue-1", "Quiet")
+    assert {:ok, []} = Memory.fetch_comments("issue-1")
+    assert :ok = Memory.update_comment("c1", "quiet")
 
     write_workflow_file!(Workflow.workflow_file_path(), tracker_kind: "linear")
     assert SymphonyElixir.Tracker.adapter() == Adapter
@@ -317,6 +350,175 @@ defmodule SymphonyElixir.ExtensionsTest do
     )
 
     assert {:error, :issue_update_failed} = Adapter.update_issue_state("issue-1", "Odd")
+
+    # The query advertises pagination metadata (`pageInfo { hasNextPage
+    # endCursor }`) so callers can rely on every comment being returned even on
+    # issues with more than `@comments_page_size` comments (IDE-103).
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "comments" => %{
+               "nodes" => [
+                 %{"id" => "c1", "body" => "hi", "resolvedAt" => nil},
+                 %{"id" => "c2", "body" => "resolved", "resolvedAt" => "2025-01-01T00:00:00Z"},
+                 %{"id" => "c3"}
+               ],
+               "pageInfo" => %{"hasNextPage" => false, "endCursor" => nil}
+             }
+           }
+         }
+       }}
+    )
+
+    assert {:ok, comments} = Adapter.fetch_comments("issue-1")
+
+    assert_receive {:graphql_called, fetch_comments_query, %{first: 50, issueId: "issue-1", after: nil}}
+
+    assert fetch_comments_query =~ "orderBy: createdAt"
+    assert fetch_comments_query =~ "pageInfo"
+    assert fetch_comments_query =~ "hasNextPage"
+    assert fetch_comments_query =~ "endCursor"
+
+    assert comments == [
+             %{id: "c1", body: "hi", resolved_at: nil},
+             %{id: "c2", body: "resolved", resolved_at: "2025-01-01T00:00:00Z"},
+             %{id: "c3", body: "", resolved_at: nil}
+           ]
+
+    # Multi-page walk: the workpad sits on page 2 and must still be surfaced
+    # so `DeterministicFailure.find_workpad_comment/1` appends to the workpad
+    # instead of posting a standalone blocker (IDE-103).
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "comments" => %{
+                 "nodes" => [
+                   %{"id" => "page1-c1", "body" => "first", "resolvedAt" => nil},
+                   %{"id" => "page1-c2", "body" => "second", "resolvedAt" => nil}
+                 ],
+                 "pageInfo" => %{"hasNextPage" => true, "endCursor" => "cursor-page-2"}
+               }
+             }
+           }
+         }},
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "comments" => %{
+                 "nodes" => [
+                   %{
+                     "id" => "page2-workpad",
+                     "body" => "## Symphony Workpad\n\nlives on page 2",
+                     "resolvedAt" => nil
+                   },
+                   %{"id" => "page2-tail", "body" => "last", "resolvedAt" => nil}
+                 ],
+                 "pageInfo" => %{"hasNextPage" => false, "endCursor" => "cursor-end"}
+               }
+             }
+           }
+         }}
+      ]
+    )
+
+    assert {:ok, paginated} = Adapter.fetch_comments("issue-1")
+
+    assert_receive {:graphql_called, _page1_query, %{first: 50, issueId: "issue-1", after: nil}}
+
+    assert_receive {:graphql_called, _page2_query, %{first: 50, issueId: "issue-1", after: "cursor-page-2"}}
+
+    assert paginated == [
+             %{id: "page1-c1", body: "first", resolved_at: nil},
+             %{id: "page1-c2", body: "second", resolved_at: nil},
+             %{id: "page2-workpad", body: "## Symphony Workpad\n\nlives on page 2", resolved_at: nil},
+             %{id: "page2-tail", body: "last", resolved_at: nil}
+           ]
+
+    assert Enum.any?(paginated, &(&1.id == "page2-workpad")),
+           "workpad on page 2 must be surfaced once pagination is in effect"
+
+    # `hasNextPage: true` with a missing/empty `endCursor` is treated as a
+    # malformed Linear response — surface a clean error rather than looping
+    # forever or silently dropping pages.
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "comments" => %{
+               "nodes" => [%{"id" => "c", "body" => "", "resolvedAt" => nil}],
+               "pageInfo" => %{"hasNextPage" => true, "endCursor" => nil}
+             }
+           }
+         }
+       }}
+    )
+
+    assert {:error, :linear_missing_end_cursor} = Adapter.fetch_comments("issue-1")
+
+    # Transport failure on a later page propagates so callers don't act on a
+    # partial result.
+    Process.put(
+      {FakeLinearClient, :graphql_results},
+      [
+        {:ok,
+         %{
+           "data" => %{
+             "issue" => %{
+               "comments" => %{
+                 "nodes" => [%{"id" => "p1", "body" => "ok", "resolvedAt" => nil}],
+                 "pageInfo" => %{"hasNextPage" => true, "endCursor" => "cursor-2"}
+               }
+             }
+           }
+         }},
+        {:error, :transport_down}
+      ]
+    )
+
+    assert {:error, :transport_down} = Adapter.fetch_comments("issue-1")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{"issue" => nil}}})
+    assert {:error, :comments_fetch_failed} = Adapter.fetch_comments("issue-1")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :transport_down})
+    assert {:error, :transport_down} = Adapter.fetch_comments("issue-1")
+
+    # update_comment/2: happy path + GraphQL error + success:false +
+    # malformed-payload fallback.
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"commentUpdate" => %{"success" => true}}}}
+    )
+
+    assert :ok = Adapter.update_comment("comment-1", "edited")
+    assert_receive {:graphql_called, update_comment_query, %{body: "edited", id: "comment-1"}}
+    assert update_comment_query =~ "commentUpdate"
+
+    Process.put(
+      {FakeLinearClient, :graphql_result},
+      {:ok, %{"data" => %{"commentUpdate" => %{"success" => false}}}}
+    )
+
+    assert {:error, :comment_update_failed} = Adapter.update_comment("comment-1", "edited")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:error, :transport_down})
+    assert {:error, :transport_down} = Adapter.update_comment("comment-1", "edited")
+
+    Process.put({FakeLinearClient, :graphql_result}, {:ok, %{"data" => %{}}})
+    assert {:error, :comment_update_failed} = Adapter.update_comment("comment-1", "weird")
+
+    Process.put({FakeLinearClient, :graphql_result}, :unexpected)
+    assert {:error, :comment_update_failed} = Adapter.update_comment("comment-1", "odd")
   end
 
   test "phoenix observability api preserves state, issue, and refresh responses" do
