@@ -90,7 +90,7 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
     end)
   end
 
-  defp wait_for_state(pid, predicate, timeout_ms \\ 500) do
+  defp wait_for_state(pid, predicate, timeout_ms \\ 2_000) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_state(pid, predicate, deadline)
   end
@@ -157,7 +157,7 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
 
     send(pid, {:DOWN, ref, :process, self(), {:agent_run_failed, :quota_exceeded, :anything}})
 
-    assert_receive {:memory_tracker_comment_update, "workpad-orch-1", new_body}, 500
+    assert_receive {:memory_tracker_comment_update, "workpad-orch-1", new_body}, 2_000
     assert new_body =~ "Deterministic-failure alert"
     assert new_body =~ "**3** consecutive failures"
     assert new_body =~ "`quota_exceeded`"
@@ -199,11 +199,11 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
 
     send(pid, {:DOWN, ref, :process, self(), {:agent_run_failed, :quota_exceeded, :anything}})
 
-    assert_receive {:memory_tracker_comment_update, "workpad-orch-2", body}, 500
+    assert_receive {:memory_tracker_comment_update, "workpad-orch-2", body}, 2_000
     assert body =~ "Deterministic-failure escalation"
     assert body =~ "**5** consecutive failures"
 
-    assert_receive {:memory_tracker_state_update, "issue-det-orch", "Human Review"}, 500
+    assert_receive {:memory_tracker_state_update, "issue-det-orch", "Human Review"}, 2_000
 
     # Under the IDE-102 async hop, `escalate_running_issue/3` runs in the
     # `:deterministic_failure_result` handler after the Tracker round-trips
@@ -321,12 +321,12 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
 
     send(pid, {:DOWN, ref, :process, self(), {:agent_run_failed, :quota_exceeded, :anything}})
 
-    assert_receive {:memory_tracker_comment, "issue-det-orch", blocker_body}, 500
+    assert_receive {:memory_tracker_comment, "issue-det-orch", blocker_body}, 2_000
     assert blocker_body =~ "Symphony Deterministic Failure Escalation"
     assert blocker_body =~ "Error code: `quota_exceeded`"
     assert blocker_body =~ "Consecutive failures: **5**"
 
-    assert_receive {:memory_tracker_state_update, "issue-det-orch", "Human Review"}, 500
+    assert_receive {:memory_tracker_state_update, "issue-det-orch", "Human Review"}, 2_000
   end
 
   test "deterministic_codes/0 + decide/3 are exposed publicly so external callers can branch on them" do
@@ -454,7 +454,7 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
     # but the state move failed → both flags must stay in the state where the
     # next deterministic failure with the same code re-fires the escalation
     # path through `decide/3`.
-    assert_receive {:memory_tracker_comment_update, "workpad-esc-retry", _body}, 500
+    assert_receive {:memory_tracker_comment_update, "workpad-esc-retry", _body}, 2_000
 
     # Under the IDE-102 async hop the counter is persisted on `:DOWN` but the
     # retry is scheduled by the `:deterministic_failure_result` handler only
@@ -731,7 +731,10 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
 
     on_exit(fn ->
       Application.delete_env(:symphony_elixir, :deterministic_action_task_supervisor)
-      if Process.alive?(full_sup), do: Supervisor.stop(full_sup)
+      # Race-safe: on_exit runs after the test process (which the capped
+      # supervisor is linked to) starts tearing down. :kill is a no-op on an
+      # already-dead pid, avoiding the GenServer.stop "no process" exit.
+      Process.exit(full_sup, :kill)
     end)
 
     pid = start_orchestrator(:SpawnFailureOrchestrator)

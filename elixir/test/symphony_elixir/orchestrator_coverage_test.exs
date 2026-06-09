@@ -1745,7 +1745,10 @@ defmodule SymphonyElixir.OrchestratorCoverageTest do
 
     on_exit(fn ->
       Application.delete_env(:symphony_elixir, :agent_task_supervisor)
-      if Process.alive?(full_sup), do: Supervisor.stop(full_sup)
+      # Race-safe: on_exit runs after the test process (which the capped
+      # supervisor is linked to) starts tearing down. :kill is a no-op on an
+      # already-dead pid, avoiding the GenServer.stop "no process" exit.
+      Process.exit(full_sup, :kill)
     end)
 
     pid = start_orchestrator(:SpawnFailureDispatch)
