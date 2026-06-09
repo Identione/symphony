@@ -391,7 +391,7 @@ defmodule SymphonyElixir.Orchestrator do
     token = make_ref()
 
     spawn_result =
-      Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+      Task.Supervisor.start_child(deterministic_action_task_supervisor(), fn ->
         result =
           try do
             DeterministicFailure.handle(action, issue, settings)
@@ -407,6 +407,13 @@ defmodule SymphonyElixir.Orchestrator do
       {:ok, _pid} -> {:ok, token}
       {:error, _} = err -> err
     end
+  end
+
+  # Test seam: defaults to the real `SymphonyElixir.TaskSupervisor` but can be
+  # overridden so tests can point the deterministic-action spawn at a capped
+  # `Task.Supervisor` and exercise the `{:error, :max_children}` fallback.
+  defp deterministic_action_task_supervisor do
+    Application.get_env(:symphony_elixir, :deterministic_action_task_supervisor, SymphonyElixir.TaskSupervisor)
   end
 
   defp apply_deterministic_failure_result(state, issue_id, pending, action, result) do

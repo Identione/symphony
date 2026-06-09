@@ -710,6 +710,67 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
     assert Map.has_key?(state.retry_attempts, issue.id)
   end
 
+  test "a failed side-effect spawn persists the counter, leaves flags clear, and schedules a retry without a pending escalation",
+       %{issue: issue} do
+    Application.put_env(:symphony_elixir, :memory_tracker_comments, %{
+      issue.id => [
+        %{
+          id: "workpad-spawn-fail",
+          body: "## Symphony Workpad\n\n### Plan\n\n- [ ] do",
+          resolved_at: nil
+        }
+      ]
+    })
+
+    # Force `Task.Supervisor.start_child/2` to return `{:error, :max_children}`
+    # by pointing the orchestrator's deterministic-action supervisor at a
+    # test-local Task.Supervisor capped at zero children.
+    {:ok, full_sup} = Task.Supervisor.start_link(max_children: 0)
+
+    Application.put_env(:symphony_elixir, :deterministic_action_task_supervisor, full_sup)
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :deterministic_action_task_supervisor)
+      if Process.alive?(full_sup), do: Supervisor.stop(full_sup)
+    end)
+
+    pid = start_orchestrator(:SpawnFailureOrchestrator)
+    ref = make_ref()
+    seed_running(pid, issue.id, running_entry(issue, ref))
+
+    # Pre-seed at N-1 so a single DOWN crosses the alert threshold and tries to
+    # spawn the side effect — which then fails because the supervisor is full.
+    seed_counter(pid, issue.id, %{
+      code: :quota_exceeded,
+      count: 2,
+      notified_alert?: false,
+      notified_escalation?: false
+    })
+
+    send(pid, {:DOWN, ref, :process, self(), {:agent_run_failed, :quota_exceeded, :anything}})
+
+    state =
+      wait_for_state(pid, fn s ->
+        match?(%{count: 3}, s.deterministic_failures[issue.id]) and
+          Map.has_key?(s.retry_attempts, issue.id)
+      end)
+
+    # Counter advanced to 3 but both notification flags stay clear because the
+    # side effect never ran (the spawn failed before `handle/3`).
+    assert %{code: :quota_exceeded, count: 3, notified_alert?: false, notified_escalation?: false} =
+             state.deterministic_failures[issue.id]
+
+    # No pending escalation entry is left behind — the spawn never succeeded.
+    refute Map.has_key?(state.pending_escalations, issue.id)
+
+    # The issue falls through to the existing retry path.
+    assert Map.has_key?(state.retry_attempts, issue.id)
+
+    # The full supervisor never accepted a child, so no side-effect message fired.
+    refute_received {:memory_tracker_comment_update, "workpad-spawn-fail", _}
+    refute_received {:memory_tracker_state_update, _, _}
+  end
+
   # Tight loop that polls `fun` until it returns truthy and reports how long
   # it took. Used to assert the orchestrator GenServer remains responsive
   # while a `DeterministicFailure` side effect runs under the Task supervisor.
