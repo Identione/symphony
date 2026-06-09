@@ -4,6 +4,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Codex, StringOrMap}
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Linear.Pagination
   alias SymphonyElixir.Linear.RateLimit
 
   test "workspace bootstrap can be implemented in after_create hook" do
@@ -461,6 +462,79 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert query =~ "SymphonyLinearIssuesById"
 
     assert_receive {:fetch_issue_states_page, ^query, %{ids: ^second_batch_ids, first: 5, relationFirst: 50}}
+  end
+
+  test "linear client caps state-pagination at @max_pages and surfaces a stuck cursor" do
+    max_pages = Pagination.max_pages()
+    parent = self()
+
+    raw_issue = fn cursor ->
+      %{
+        "id" => "issue-#{cursor || "first"}",
+        "identifier" => "MT-#{cursor || "first"}",
+        "title" => "Issue",
+        "state" => %{"name" => "Todo"},
+        "labels" => %{"nodes" => []},
+        "inverseRelations" => %{"nodes" => []}
+      }
+    end
+
+    # Server keeps returning a *new* end cursor each call -> cap path. The
+    # paginator must stop after exactly `@max_pages` GraphQL round-trips even
+    # though the server keeps claiming `hasNextPage: true` (IDE-104).
+    cap_call_count = :counters.new(1, [:atomics])
+
+    cap_graphql_fun = fn _query, variables ->
+      :counters.add(cap_call_count, 1, 1)
+      n = :counters.get(cap_call_count, 1)
+      send(parent, {:cap_call, variables.after})
+
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => [raw_issue.(variables.after)],
+             "pageInfo" => %{"hasNextPage" => true, "endCursor" => "fresh-cursor-#{n}"}
+           }
+         }
+       }}
+    end
+
+    assert {:error, :linear_pagination_exhausted} =
+             Client.do_fetch_by_states_for_test("proj", ["Todo"], nil, cap_graphql_fun)
+
+    assert :counters.get(cap_call_count, 1) == max_pages
+
+    for _ <- 1..max_pages, do: assert_receive({:cap_call, _})
+    refute_receive {:cap_call, _}, 50
+
+    # Stuck end_cursor must short-circuit ahead of the cap with a more
+    # diagnostic error (IDE-104).
+    stuck_call_count = :counters.new(1, [:atomics])
+
+    stuck_graphql_fun = fn _query, variables ->
+      :counters.add(stuck_call_count, 1, 1)
+      send(parent, {:stuck_call, variables.after})
+
+      {:ok,
+       %{
+         "data" => %{
+           "issues" => %{
+             "nodes" => [raw_issue.(variables.after)],
+             "pageInfo" => %{"hasNextPage" => true, "endCursor" => "STUCK"}
+           }
+         }
+       }}
+    end
+
+    assert {:error, :linear_stuck_cursor} =
+             Client.do_fetch_by_states_for_test("proj", ["Todo"], nil, stuck_graphql_fun)
+
+    assert :counters.get(stuck_call_count, 1) == 2
+
+    assert_receive {:stuck_call, nil}
+    assert_receive {:stuck_call, "STUCK"}
+    refute_receive {:stuck_call, _}, 50
   end
 
   test "linear client logs response bodies for non-200 graphql responses" do

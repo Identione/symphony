@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Linear.Client do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, Linear.Issue, Linear.RateLimit}
+  alias SymphonyElixir.{Config, Linear.Issue, Linear.Pagination, Linear.RateLimit}
 
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
@@ -233,15 +233,23 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   @doc false
-  @spec next_page_cursor_for_test(map()) :: {:ok, String.t()} | :done | {:error, term()}
-  def next_page_cursor_for_test(page_info) when is_map(page_info), do: next_page_cursor(page_info)
-
-  @doc false
   @spec merge_issue_pages_for_test([[Issue.t()]]) :: [Issue.t()]
   def merge_issue_pages_for_test(issue_pages) when is_list(issue_pages) do
     issue_pages
     |> Enum.reduce([], &prepend_page_issues/2)
     |> finalize_paginated_issues()
+  end
+
+  @doc false
+  @spec do_fetch_by_states_for_test(
+          String.t(),
+          [String.t()],
+          map() | nil,
+          (String.t(), map() -> {:ok, map()} | {:error, term()})
+        ) :: {:ok, [Issue.t()]} | {:error, term()}
+  def do_fetch_by_states_for_test(project_slug, state_names, assignee_filter, graphql_fun)
+      when is_binary(project_slug) and is_list(state_names) and is_function(graphql_fun, 2) do
+    do_fetch_by_states(project_slug, state_names, assignee_filter, graphql_fun)
   end
 
   @doc false
@@ -261,32 +269,23 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp do_fetch_by_states(project_slug, state_names, assignee_filter) do
-    do_fetch_by_states_page(project_slug, state_names, assignee_filter, nil, [])
+    do_fetch_by_states(project_slug, state_names, assignee_filter, &graphql/2)
   end
 
-  defp do_fetch_by_states_page(project_slug, state_names, assignee_filter, after_cursor, acc_issues) do
-    with {:ok, body} <-
-           graphql(@query, %{
-             projectSlug: project_slug,
-             stateNames: state_names,
-             first: @issue_page_size,
-             relationFirst: @issue_page_size,
-             after: after_cursor
-           }),
-         {:ok, issues, page_info} <- decode_linear_page_response(body, assignee_filter) do
-      updated_acc = prepend_page_issues(issues, acc_issues)
-
-      case next_page_cursor(page_info) do
-        {:ok, next_cursor} ->
-          do_fetch_by_states_page(project_slug, state_names, assignee_filter, next_cursor, updated_acc)
-
-        :done ->
-          {:ok, finalize_paginated_issues(updated_acc)}
-
-        {:error, reason} ->
-          {:error, reason}
+  defp do_fetch_by_states(project_slug, state_names, assignee_filter, graphql_fun)
+       when is_function(graphql_fun, 2) do
+    Pagination.paginate(fn after_cursor ->
+      with {:ok, body} <-
+             graphql_fun.(@query, %{
+               projectSlug: project_slug,
+               stateNames: state_names,
+               first: @issue_page_size,
+               relationFirst: @issue_page_size,
+               after: after_cursor
+             }) do
+        decode_linear_page_response(body, assignee_filter)
       end
-    end
+    end)
   end
 
   defp prepend_page_issues(issues, acc_issues) when is_list(issues) and is_list(acc_issues) do
@@ -460,14 +459,6 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp decode_linear_page_response(response, assignee_filter), do: decode_linear_response(response, assignee_filter)
-
-  defp next_page_cursor(%{has_next_page: true, end_cursor: end_cursor})
-       when is_binary(end_cursor) and byte_size(end_cursor) > 0 do
-    {:ok, end_cursor}
-  end
-
-  defp next_page_cursor(%{has_next_page: true}), do: {:error, :linear_missing_end_cursor}
-  defp next_page_cursor(_), do: :done
 
   defp normalize_issue(issue, assignee_filter) when is_map(issue) do
     assignee = issue["assignee"]

@@ -5,6 +5,7 @@ defmodule SymphonyElixir.ExtensionsTest do
   import Phoenix.LiveViewTest
 
   alias SymphonyElixir.Linear.Adapter
+  alias SymphonyElixir.Linear.Pagination
   alias SymphonyElixir.Tracker.Memory
 
   @endpoint SymphonyElixirWeb.Endpoint
@@ -519,6 +520,67 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     Process.put({FakeLinearClient, :graphql_result}, :unexpected)
     assert {:error, :comment_update_failed} = Adapter.update_comment("comment-1", "odd")
+  end
+
+  test "linear adapter caps fetch_comments pagination at @max_pages and stops calling the client" do
+    Application.put_env(:symphony_elixir, :linear_client_module, FakeLinearClient)
+
+    max_pages = Pagination.max_pages()
+
+    stuck_response = fn cursor ->
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "comments" => %{
+               "nodes" => [%{"id" => "c-#{cursor}", "body" => "x", "resolvedAt" => nil}],
+               "pageInfo" => %{"hasNextPage" => true, "endCursor" => "cursor-#{cursor}"}
+             }
+           }
+         }
+       }}
+    end
+
+    # Server keeps advertising another page with a *new* cursor every call:
+    # this is the cap path (no stuck-cursor short-circuit), so the cap must fire
+    # after exactly `@max_pages` GraphQL calls — never more. Pre-seed enough
+    # distinct responses; if the paginator overshoots it will fall back to the
+    # `nil` default response and the result/assert messages would surface that.
+    responses = Enum.map(1..(max_pages + 5), &stuck_response.(&1))
+    Process.put({FakeLinearClient, :graphql_results}, responses)
+    Process.put({FakeLinearClient, :graphql_result}, nil)
+
+    assert {:error, :linear_pagination_exhausted} = Adapter.fetch_comments("issue-1")
+
+    for _ <- 1..max_pages do
+      assert_receive {:graphql_called, _query, %{issueId: "issue-1"}}
+    end
+
+    refute_receive {:graphql_called, _query, %{issueId: "issue-1"}}, 50
+
+    # A stuck `endCursor` is the more diagnostic failure mode and must beat the
+    # cap: detection fires on the second call, well before `@max_pages`.
+    stuck_cursor_response =
+      {:ok,
+       %{
+         "data" => %{
+           "issue" => %{
+             "comments" => %{
+               "nodes" => [%{"id" => "stuck-c", "body" => "x", "resolvedAt" => nil}],
+               "pageInfo" => %{"hasNextPage" => true, "endCursor" => "STUCK"}
+             }
+           }
+         }
+       }}
+
+    Process.put({FakeLinearClient, :graphql_results}, List.duplicate(stuck_cursor_response, max_pages + 5))
+    Process.put({FakeLinearClient, :graphql_result}, nil)
+
+    assert {:error, :linear_stuck_cursor} = Adapter.fetch_comments("issue-2")
+
+    assert_receive {:graphql_called, _query, %{issueId: "issue-2", after: nil}}
+    assert_receive {:graphql_called, _query, %{issueId: "issue-2", after: "STUCK"}}
+    refute_receive {:graphql_called, _query, %{issueId: "issue-2"}}, 50
   end
 
   test "phoenix observability api preserves state, issue, and refresh responses" do
