@@ -16,9 +16,11 @@ defmodule SymphonyElixir.MixProject do
           SymphonyElixir.Config,
           SymphonyElixir.Linear.Client,
           SymphonyElixir.SpecsCheck,
+          # Orchestrator stays ignored: it is heavily covered by behavioral
+          # tests (orchestrator_coverage_test.exs + others), but a true 100%
+          # would require either deleting defensive guard clauses or adding
+          # test-only backdoors. Tracked by IDE-116.
           SymphonyElixir.Orchestrator,
-          SymphonyElixir.Orchestrator.State,
-          SymphonyElixir.AgentRunner,
           SymphonyElixir.CLI,
           SymphonyElixir.CLI.Init,
           SymphonyElixir.CLI.Preflight,
