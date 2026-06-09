@@ -5,7 +5,7 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @behaviour SymphonyElixir.Tracker
 
-  alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Linear.{Client, Pagination}
 
   @create_comment_mutation """
   mutation SymphonyCreateComment($issueId: String!, $body: String!) {
@@ -108,10 +108,10 @@ defmodule SymphonyElixir.Linear.Adapter do
 
   @spec fetch_comments(String.t()) :: {:ok, [SymphonyElixir.Tracker.comment()]} | {:error, term()}
   def fetch_comments(issue_id) when is_binary(issue_id) do
-    fetch_comments_page(issue_id, nil, [])
+    Pagination.paginate(&fetch_comments_page(issue_id, &1))
   end
 
-  defp fetch_comments_page(issue_id, after_cursor, acc_comments) do
+  defp fetch_comments_page(issue_id, after_cursor) do
     with {:ok, response} <-
            client_module().graphql(@comments_query, %{
              issueId: issue_id,
@@ -120,30 +120,18 @@ defmodule SymphonyElixir.Linear.Adapter do
            }),
          %{"nodes" => nodes} = comments when is_list(nodes) <-
            get_in(response, ["data", "issue", "comments"]) do
-      page = Enum.map(nodes, &normalize_comment/1)
-      updated_acc = Enum.reverse(page, acc_comments)
-      advance_comments_page(issue_id, updated_acc, Map.get(comments, "pageInfo"))
+      {:ok, Enum.map(nodes, &normalize_comment/1), normalize_page_info(Map.get(comments, "pageInfo"))}
     else
       {:error, reason} -> {:error, reason}
       _ -> {:error, :comments_fetch_failed}
     end
   end
 
-  defp advance_comments_page(issue_id, acc_comments, page_info) do
-    case next_page_cursor(page_info) do
-      {:ok, next_cursor} -> fetch_comments_page(issue_id, next_cursor, acc_comments)
-      :done -> {:ok, Enum.reverse(acc_comments)}
-      {:error, reason} -> {:error, reason}
-    end
+  defp normalize_page_info(%{"hasNextPage" => has_next} = page_info) do
+    %{has_next_page: has_next == true, end_cursor: Map.get(page_info, "endCursor")}
   end
 
-  defp next_page_cursor(%{"hasNextPage" => true, "endCursor" => end_cursor})
-       when is_binary(end_cursor) and byte_size(end_cursor) > 0 do
-    {:ok, end_cursor}
-  end
-
-  defp next_page_cursor(%{"hasNextPage" => true}), do: {:error, :linear_missing_end_cursor}
-  defp next_page_cursor(_), do: :done
+  defp normalize_page_info(_), do: %{has_next_page: false, end_cursor: nil}
 
   @spec update_comment(String.t(), String.t()) :: :ok | {:error, term()}
   def update_comment(comment_id, body) when is_binary(comment_id) and is_binary(body) do
