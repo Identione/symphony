@@ -306,28 +306,25 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp snapshot_with_samples(token_samples, now_ms) do
-    case snapshot_payload() do
-      {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
-        total_tokens = Map.get(codex_totals, :total_tokens, 0)
+    do_snapshot_with_samples(snapshot_payload(), token_samples, now_ms)
+  end
 
-        {
-          {:ok,
-           %{
-             running: running,
-             retrying: retrying,
-             codex_totals: codex_totals,
-             rate_limits: Map.get(snapshot, :rate_limits),
-             polling: Map.get(snapshot, :polling)
-           }},
-          update_token_samples(token_samples, now_ms, total_tokens)
-        }
+  # `snapshot_payload/0` already shapes the orchestrator snapshot to the keys
+  # the renderer expects (`codex_totals` + `claude_totals` + friends); forward
+  # it as-is. The TPS sampler combines codex and claude totals so claude-only
+  # runs produce a non-zero throughput line in the CLI header.
+  defp do_snapshot_with_samples({:ok, snapshot}, token_samples, now_ms) do
+    {{:ok, snapshot}, update_token_samples(token_samples, now_ms, combined_total_tokens(snapshot))}
+  end
 
-      :error ->
-        {
-          :error,
-          prune_samples(token_samples, now_ms)
-        }
-    end
+  defp do_snapshot_with_samples(:error, token_samples, now_ms) do
+    {:error, prune_samples(token_samples, now_ms)}
+  end
+
+  defp combined_total_tokens(%{} = snapshot) do
+    codex = Map.get(snapshot, :codex_totals) || %{}
+    claude = Map.get(snapshot, :claude_totals) || %{}
+    Map.get(codex, :total_tokens, 0) + Map.get(claude, :total_tokens, 0)
   end
 
   defp format_snapshot_content(snapshot_data, tps, terminal_columns_override \\ nil) do
@@ -538,6 +535,16 @@ defmodule SymphonyElixir.StatusDashboard do
   @doc false
   @spec format_timestamp_for_test(DateTime.t()) :: String.t()
   def format_timestamp_for_test(%DateTime{} = datetime), do: format_timestamp(datetime)
+
+  @doc false
+  @spec snapshot_with_samples_for_test(term(), [{integer(), integer()}], integer()) ::
+          {term(), [{integer(), integer()}]}
+  def snapshot_with_samples_for_test(snapshot_payload_result, token_samples, now_ms),
+    do: do_snapshot_with_samples(snapshot_payload_result, token_samples, now_ms)
+
+  @doc false
+  @spec snapshot_total_tokens_for_test(term()) :: integer()
+  def snapshot_total_tokens_for_test(snapshot_data), do: snapshot_total_tokens(snapshot_data)
 
   @doc false
   @spec format_snapshot_content_for_test(term(), number()) :: String.t()
@@ -1077,10 +1084,7 @@ defmodule SymphonyElixir.StatusDashboard do
     colorize("●", color_code)
   end
 
-  defp snapshot_total_tokens({:ok, %{codex_totals: codex_totals}}) when is_map(codex_totals) do
-    Map.get(codex_totals, :total_tokens, 0)
-  end
-
+  defp snapshot_total_tokens({:ok, %{} = snapshot}), do: combined_total_tokens(snapshot)
   defp snapshot_total_tokens(_snapshot_data), do: 0
 
   defp format_timestamp(datetime) do

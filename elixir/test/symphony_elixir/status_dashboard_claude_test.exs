@@ -148,6 +148,93 @@ defmodule SymphonyElixir.StatusDashboardClaudeTest do
     assert rendered =~ "read 1,200"
   end
 
+  describe "snapshot pipeline (snapshot_with_samples + snapshot_total_tokens)" do
+    # Regression for IDE-66 rework: the inner snapshot wrapper used to drop
+    # `claude_totals` (and the TPS sampler used to ignore claude tokens), so
+    # the CLI header rendered `Tokens: in 0 | out 0 | total 0` even while
+    # `state.claude_totals` was non-zero — the rework feedback signal.
+    test "forwards claude_totals end-to-end so the header reflects a claude-only run" do
+      snapshot_payload_result =
+        {:ok,
+         %{
+           running: [claude_running_entry(%{})],
+           retrying: [],
+           codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+           claude_totals: %{
+             input_tokens: 4_000,
+             output_tokens: 1_500,
+             total_tokens: 5_500,
+             cache_creation_input_tokens: 800,
+             cache_read_input_tokens: 1_200,
+             seconds_running: 90
+           },
+           rate_limits: nil,
+           polling: nil
+         }}
+
+      {snapshot_data, _samples} =
+        StatusDashboard.snapshot_with_samples_for_test(snapshot_payload_result, [], 1_000)
+
+      rendered = StatusDashboard.format_snapshot_content_for_test(snapshot_data, 0.0, @terminal_columns)
+
+      assert rendered =~ "in 4,000",
+             "claude input tokens should reach the header: #{inspect(rendered)}"
+
+      assert rendered =~ "out 1,500"
+      assert rendered =~ "total 5,500"
+      assert rendered =~ "Cache:"
+      assert rendered =~ "created 800"
+      assert rendered =~ "read 1,200"
+    end
+
+    test "TPS sampler combines codex + claude total tokens" do
+      snapshot_payload_result =
+        {:ok,
+         %{
+           running: [],
+           retrying: [],
+           codex_totals: %{input_tokens: 700, output_tokens: 300, total_tokens: 1_000, seconds_running: 0},
+           claude_totals: %{
+             input_tokens: 400,
+             output_tokens: 100,
+             total_tokens: 500,
+             cache_creation_input_tokens: 0,
+             cache_read_input_tokens: 0,
+             seconds_running: 0
+           },
+           rate_limits: nil,
+           polling: nil
+         }}
+
+      {_snapshot_data, samples} =
+        StatusDashboard.snapshot_with_samples_for_test(snapshot_payload_result, [], 5_000)
+
+      assert {5_000, 1_500} in samples,
+             "expected combined codex+claude total_tokens (1,000 + 500) sampled at now_ms: #{inspect(samples)}"
+    end
+
+    test "snapshot_total_tokens combines codex + claude totals" do
+      snapshot_data =
+        {:ok,
+         %{
+           codex_totals: %{total_tokens: 2_500},
+           claude_totals: %{total_tokens: 1_750}
+         }}
+
+      assert StatusDashboard.snapshot_total_tokens_for_test(snapshot_data) == 4_250
+    end
+
+    test "snapshot_total_tokens treats missing claude_totals as zero (codex-only path)" do
+      snapshot_data = {:ok, %{codex_totals: %{total_tokens: 9_000}}}
+
+      assert StatusDashboard.snapshot_total_tokens_for_test(snapshot_data) == 9_000
+    end
+
+    test "snapshot pipeline propagates :error without sampling tokens" do
+      assert {:error, []} = StatusDashboard.snapshot_with_samples_for_test(:error, [], 100)
+    end
+  end
+
   test "snapshot top panel omits cache sublabel when claude cache fields are all zero" do
     snapshot_data =
       {:ok,
