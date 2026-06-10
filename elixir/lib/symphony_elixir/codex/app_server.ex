@@ -109,7 +109,15 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata
         )
 
-        case await_turn_completion(port, on_message, tool_executor, auto_approve_requests, issue, session_id) do
+        turn_ctx = %{
+          on_message: on_message,
+          tool_executor: tool_executor,
+          auto_approve_requests: auto_approve_requests,
+          issue: issue,
+          session_id: session_id
+        }
+
+        case await_turn_completion(port, turn_ctx) do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -341,39 +349,21 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp await_turn_completion(port, on_message, tool_executor, auto_approve_requests, issue, session_id) do
-    receive_loop(
-      port,
-      on_message,
-      Config.settings!().codex.turn_timeout_ms,
-      "",
-      tool_executor,
-      auto_approve_requests,
-      issue,
-      session_id
-    )
+  defp await_turn_completion(port, ctx) do
+    receive_loop(port, ctx, Config.settings!().codex.turn_timeout_ms, "")
   end
 
   defp put_optional(map, _key, nil), do: map
   defp put_optional(map, key, value), do: Map.put(map, key, value)
 
-  defp receive_loop(port, on_message, timeout_ms, pending_line, tool_executor, auto_approve_requests, issue, session_id) do
+  defp receive_loop(port, ctx, timeout_ms, pending_line) do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         complete_line = pending_line <> to_string(chunk)
-        handle_incoming(port, on_message, complete_line, timeout_ms, tool_executor, auto_approve_requests, issue, session_id)
+        handle_incoming(port, ctx, complete_line, timeout_ms)
 
       {^port, {:data, {:noeol, chunk}}} ->
-        receive_loop(
-          port,
-          on_message,
-          timeout_ms,
-          pending_line <> to_string(chunk),
-          tool_executor,
-          auto_approve_requests,
-          issue,
-          session_id
-        )
+        receive_loop(port, ctx, timeout_ms, pending_line <> to_string(chunk))
 
       {^port, {:exit_status, status}} ->
         {:error, {:port_exit, status}}
@@ -383,17 +373,17 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp handle_incoming(port, on_message, data, timeout_ms, tool_executor, auto_approve_requests, issue, session_id) do
+  defp handle_incoming(port, ctx, data, timeout_ms) do
     payload_string = to_string(data)
 
     case Jason.decode(payload_string) do
       {:ok, %{"method" => "turn/completed"} = payload} ->
-        emit_turn_event(on_message, :turn_completed, payload, payload_string, port, payload)
+        emit_turn_event(ctx.on_message, :turn_completed, payload, payload_string, port, payload)
         {:ok, :turn_completed}
 
       {:ok, %{"method" => "turn/failed", "params" => params} = payload} ->
         emit_turn_event(
-          on_message,
+          ctx.on_message,
           :turn_failed,
           payload,
           payload_string,
@@ -406,7 +396,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       {:ok, %{"method" => "turn/cancelled", "params" => _} = payload} ->
         emit_turn_event(
-          on_message,
+          ctx.on_message,
           :turn_cancelled,
           payload,
           payload_string,
@@ -418,22 +408,11 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       {:ok, %{"method" => method} = payload}
       when is_binary(method) ->
-        handle_turn_method(
-          port,
-          on_message,
-          payload,
-          payload_string,
-          method,
-          timeout_ms,
-          tool_executor,
-          auto_approve_requests,
-          issue,
-          session_id
-        )
+        handle_turn_method(port, ctx, payload, payload_string, method, timeout_ms)
 
       {:ok, payload} ->
         emit_message(
-          on_message,
+          ctx.on_message,
           :other_message,
           %{
             payload: payload,
@@ -442,14 +421,14 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata_from_message(port, payload)
         )
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, issue, session_id)
+        receive_loop(port, ctx, timeout_ms, "")
 
       {:error, _reason} ->
-        log_non_json_stream_line(payload_string, "turn stream", issue, session_id)
+        log_non_json_stream_line(payload_string, "turn stream", ctx.issue, ctx.session_id)
 
         if protocol_message_candidate?(payload_string) do
           emit_message(
-            on_message,
+            ctx.on_message,
             :malformed,
             %{
               payload: payload_string,
@@ -459,7 +438,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
         end
 
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, issue, session_id)
+        receive_loop(port, ctx, timeout_ms, "")
     end
   end
 
@@ -476,18 +455,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     )
   end
 
-  defp handle_turn_method(
-         port,
-         on_message,
-         payload,
-         payload_string,
-         method,
-         timeout_ms,
-         tool_executor,
-         auto_approve_requests,
-         issue,
-         session_id
-       ) do
+  defp handle_turn_method(port, ctx, payload, payload_string, method, timeout_ms) do
     metadata = metadata_from_message(port, payload)
 
     case maybe_handle_approval_request(
@@ -495,14 +463,14 @@ defmodule SymphonyElixir.Codex.AppServer do
            method,
            payload,
            payload_string,
-           on_message,
+           ctx.on_message,
            metadata,
-           tool_executor,
-           auto_approve_requests
+           ctx.tool_executor,
+           ctx.auto_approve_requests
          ) do
       :input_required ->
         emit_message(
-          on_message,
+          ctx.on_message,
           :turn_input_required,
           %{payload: payload, raw: payload_string},
           metadata
@@ -511,11 +479,11 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:turn_input_required, payload}}
 
       :approved ->
-        receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, issue, session_id)
+        receive_loop(port, ctx, timeout_ms, "")
 
       :approval_required ->
         emit_message(
-          on_message,
+          ctx.on_message,
           :approval_required,
           %{payload: payload, raw: payload_string},
           metadata
@@ -527,7 +495,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         cond do
           codex_error_notification?(method) ->
             emit_message(
-              on_message,
+              ctx.on_message,
               :notification,
               %{
                 payload: payload,
@@ -538,12 +506,14 @@ defmodule SymphonyElixir.Codex.AppServer do
 
             error_payload = codex_error_payload(payload)
             code = classify_codex_error_code(error_payload)
-            Logger.warning("Codex error notification for #{issue_context(issue)} session_id=#{session_id}: #{inspect(error_payload)}")
+
+            Logger.warning("Codex error notification for #{issue_context(ctx.issue)} session_id=#{ctx.session_id}: #{inspect(error_payload)}")
+
             {:error, {:codex_error_notification, code, error_payload}}
 
           needs_input?(method, payload) ->
             emit_message(
-              on_message,
+              ctx.on_message,
               :turn_input_required,
               %{payload: payload, raw: payload_string},
               metadata
@@ -553,7 +523,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
           true ->
             emit_message(
-              on_message,
+              ctx.on_message,
               :notification,
               %{
                 payload: payload,
@@ -563,7 +533,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             )
 
             log_codex_notification(method)
-            receive_loop(port, on_message, timeout_ms, "", tool_executor, auto_approve_requests, issue, session_id)
+            receive_loop(port, ctx, timeout_ms, "")
         end
     end
   end
