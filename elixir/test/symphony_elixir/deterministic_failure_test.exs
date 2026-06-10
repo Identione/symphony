@@ -96,6 +96,10 @@ defmodule SymphonyElixir.DeterministicFailureTest do
       assert :invalid_request in codes
       assert :claude_sidecar_exit in codes
       assert :port_exit in codes
+      # IDE-74: max_turns_reached is a deterministic code so consecutive
+      # agent.max_turns cap-hits surface stuck issues through the same
+      # workpad-alert/escalation pipeline.
+      assert :max_turns_reached in codes
       refute :rate_limited in codes
       refute :overloaded in codes
       refute :unknown in codes

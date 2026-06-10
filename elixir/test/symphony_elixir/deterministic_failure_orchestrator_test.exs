@@ -343,6 +343,169 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
     assert :quota_exceeded in codes
   end
 
+  # ── IDE-74: max_turns_reached flows through the same surfacing pipeline ──
+  #
+  # `AgentRunner.run/3` exits with
+  # `{:agent_run_failed, :max_turns_reached, :max_turns_reached}` when the
+  # `agent.max_turns` cap is hit with the issue still active. The orchestrator
+  # must treat that as a deterministic code so the counter advances, post a
+  # workpad alert once `agent.deterministic_failure_alert_threshold` is
+  # crossed, and escalate the issue out of the active set once
+  # `agent.deterministic_failure_escalation_threshold` is crossed.
+  describe "max_turns_reached :DOWN (IDE-74)" do
+    test "a single :max_turns_reached :DOWN starts a streak and schedules a continuation retry",
+         %{issue: issue} do
+      Application.put_env(:symphony_elixir, :memory_tracker_comments, %{})
+      pid = start_orchestrator(:MaxTurnsSingleFailureOrchestrator)
+      ref = make_ref()
+      seed_running(pid, issue.id, running_entry(issue, ref))
+
+      send(
+        pid,
+        {:DOWN, ref, :process, self(),
+         {:agent_run_failed, :max_turns_reached, :max_turns_reached}}
+      )
+
+      wait_for_state(pid, fn s -> Map.has_key?(s.deterministic_failures, issue.id) end)
+      state = :sys.get_state(pid)
+
+      assert %{code: :max_turns_reached, count: 1, notified_alert?: false, notified_escalation?: false} =
+               state.deterministic_failures[issue.id]
+
+      refute_received {:memory_tracker_comment, _, _}
+      refute_received {:memory_tracker_state_update, _, _}
+
+      # Cadence matches the existing continuation 1s re-poll, set via the
+      # `RetryPolicy.built_in_for(:max_turns_reached, _)` clause.
+      assert %{attempt: 1, due_at_ms: due_at_ms} = state.retry_attempts[issue.id]
+      remaining = due_at_ms - System.monotonic_time(:millisecond)
+      assert remaining in 800..1_200, "expected ~1s cadence, got #{remaining}ms"
+    end
+
+    test "after N=3 consecutive cap-hits a workpad alert comment is posted",
+         %{issue: issue} do
+      Application.put_env(:symphony_elixir, :memory_tracker_comments, %{
+        issue.id => [
+          %{
+            id: "workpad-max-turns-alert",
+            body: "## Symphony Workpad\n\n### Plan\n\n- [ ] do",
+            resolved_at: nil
+          }
+        ]
+      })
+
+      pid = start_orchestrator(:MaxTurnsAlertOrchestrator)
+      ref = make_ref()
+      seed_running(pid, issue.id, running_entry(issue, ref))
+
+      # Pre-seed the counter at N-1 so a single DOWN crosses the alert
+      # threshold without spinning the GenServer through three full DOWN
+      # cycles (each would schedule a retry timer we'd then have to ignore).
+      seed_counter(pid, issue.id, %{
+        code: :max_turns_reached,
+        count: 2,
+        notified_alert?: false,
+        notified_escalation?: false
+      })
+
+      send(
+        pid,
+        {:DOWN, ref, :process, self(),
+         {:agent_run_failed, :max_turns_reached, :max_turns_reached}}
+      )
+
+      assert_receive {:memory_tracker_comment_update, "workpad-max-turns-alert", new_body}, 2_000
+      assert new_body =~ "Deterministic-failure alert"
+      assert new_body =~ "**3** consecutive failures"
+      assert new_body =~ "`max_turns_reached`"
+
+      # Alert does not move state; escalation happens at the higher threshold.
+      refute_received {:memory_tracker_state_update, _, _}
+
+      state = :sys.get_state(pid)
+
+      assert %{code: :max_turns_reached, count: 3, notified_alert?: true, notified_escalation?: false} =
+               state.deterministic_failures[issue.id]
+    end
+
+    test "after M=5 consecutive cap-hits the issue is escalated out of the active set",
+         %{issue: issue} do
+      Application.put_env(:symphony_elixir, :memory_tracker_comments, %{
+        issue.id => [
+          %{
+            id: "workpad-max-turns-escalate",
+            body: "## Symphony Workpad\n\n### Plan\n\n- [ ] do",
+            resolved_at: nil
+          }
+        ]
+      })
+
+      pid = start_orchestrator(:MaxTurnsEscalationOrchestrator)
+      ref = make_ref()
+      seed_running(pid, issue.id, running_entry(issue, ref))
+
+      seed_counter(pid, issue.id, %{
+        code: :max_turns_reached,
+        count: 4,
+        notified_alert?: true,
+        notified_escalation?: false
+      })
+
+      send(
+        pid,
+        {:DOWN, ref, :process, self(),
+         {:agent_run_failed, :max_turns_reached, :max_turns_reached}}
+      )
+
+      assert_receive {:memory_tracker_comment_update, "workpad-max-turns-escalate", body}, 2_000
+      assert body =~ "Deterministic-failure escalation"
+      assert body =~ "**5** consecutive failures"
+      assert body =~ "`max_turns_reached`"
+      assert_receive {:memory_tracker_state_update, "issue-det-orch", "Human Review"}, 2_000
+
+      state =
+        wait_for_state(pid, fn s ->
+          not MapSet.member?(s.claimed, issue.id) and
+            not Map.has_key?(s.pending_escalations, issue.id)
+        end)
+
+      refute Map.has_key?(state.running, issue.id)
+      refute Map.has_key?(state.retry_attempts, issue.id)
+      assert state.deterministic_failures[issue.id] == nil
+    end
+
+    test "an issue that moves out of active state mid-streak refuses to advance the counter",
+         %{issue: issue} do
+      # The cap-hit-then-issue-moves-out path is a clean `:ok` from
+      # `AgentRunner` (the orchestrator never sees `:max_turns_reached` —
+      # IDE-74 returns `:ok` from the `{:done, _}` arm). The `:normal` :DOWN
+      # therefore must clear the counter, matching the existing
+      # "a :normal exit clears any in-flight deterministic streak" test.
+      Application.put_env(:symphony_elixir, :memory_tracker_comments, %{})
+      pid = start_orchestrator(:MaxTurnsThenMovedOutOrchestrator)
+      ref = make_ref()
+      seed_running(pid, issue.id, running_entry(issue, ref))
+
+      seed_counter(pid, issue.id, %{
+        code: :max_turns_reached,
+        count: 2,
+        notified_alert?: false,
+        notified_escalation?: false
+      })
+
+      send(pid, {:DOWN, ref, :process, self(), :normal})
+
+      wait_for_state(pid, fn s -> not Map.has_key?(s.deterministic_failures, issue.id) end)
+      state = :sys.get_state(pid)
+
+      refute Map.has_key?(state.deterministic_failures, issue.id)
+      assert MapSet.member?(state.completed, issue.id)
+      refute_received {:memory_tracker_comment, _, _}
+      refute_received {:memory_tracker_comment_update, _, _}
+      refute_received {:memory_tracker_state_update, _, _}
+    end
+  end
+
   test "failed alert comment-update keeps notified_alert? clear so the next failure retries",
        %{issue: issue} do
     Application.put_env(:symphony_elixir, :memory_tracker_comments, %{

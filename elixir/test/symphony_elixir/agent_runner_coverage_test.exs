@@ -316,6 +316,50 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
       refute_received {:stub_run_turn, _other}
       assert_received :stub_stop_session
     end
+
+    test "exits with :max_turns_reached when the cap is hit while the issue is still active (IDE-74)" do
+      ctx = setup_workspace!()
+      # `max_turns: 1` guarantees the very first turn-continuation check is
+      # the cap-hit branch (`turn_number == max_turns`) so we don't have to
+      # script multiple turns to reach it.
+      write_stub_workflow!(ctx, max_turns: 1)
+
+      fetcher = fn ["issue-cov-1"] -> {:ok, [issue()]} end
+
+      reason =
+        catch_exit(
+          AgentRunner.run(issue(), nil,
+            adapter: StubAdapter,
+            issue_state_fetcher: fetcher
+          )
+        )
+
+      assert {:agent_run_failed, :max_turns_reached, :max_turns_reached} = reason
+
+      assert_received {:stub_run_turn, _prompt}
+      refute_received {:stub_run_turn, _other}
+      assert_received :stub_stop_session
+    end
+
+    test "returns :ok when the cap is hit but the issue has moved to a terminal state (IDE-74)" do
+      ctx = setup_workspace!()
+      write_stub_workflow!(ctx, max_turns: 1)
+
+      # max_turns exhausted AND issue moved out → `{:done, _}` arm wins over
+      # the `:max_turns_reached` arm: the cap-hit signal must not fire if the
+      # run organically wrapped up the issue.
+      fetcher = fn ["issue-cov-1"] -> {:ok, [%{issue() | state: "Done"}]} end
+
+      assert :ok =
+               AgentRunner.run(issue(), nil,
+                 adapter: StubAdapter,
+                 issue_state_fetcher: fetcher
+               )
+
+      assert_received {:stub_run_turn, _prompt}
+      refute_received {:stub_run_turn, _other}
+      assert_received :stub_stop_session
+    end
   end
 
   describe "selected_worker_host/2" do
