@@ -416,6 +416,13 @@ defmodule SymphonyElixir.Orchestrator do
     Application.get_env(:symphony_elixir, :deterministic_action_task_supervisor, SymphonyElixir.TaskSupervisor)
   end
 
+  # Test seam mirroring `deterministic_action_task_supervisor/0`: defaults to
+  # the real supervisor but is overridable so the agent-dispatch spawn-failure
+  # retry path can be exercised against a capped `Task.Supervisor`.
+  defp agent_task_supervisor do
+    Application.get_env(:symphony_elixir, :agent_task_supervisor, SymphonyElixir.TaskSupervisor)
+  end
+
   defp apply_deterministic_failure_result(state, issue_id, pending, action, result) do
     %{entry: entry, running_entry: running_entry, reason: reason} = pending
     session_id = running_entry_session_id(running_entry)
@@ -1223,7 +1230,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
-    case Task.Supervisor.start_child(SymphonyElixir.TaskSupervisor, fn ->
+    case Task.Supervisor.start_child(agent_task_supervisor(), fn ->
            AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
          end) do
       {:ok, pid} ->

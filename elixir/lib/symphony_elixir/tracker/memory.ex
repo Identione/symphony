@@ -9,30 +9,52 @@ defmodule SymphonyElixir.Tracker.Memory do
 
   @spec fetch_candidate_issues() :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_candidate_issues do
-    {:ok, issue_entries()}
+    # A full-response override (`{:ok, list}` or `{:error, reason}`) lets tests
+    # feed arbitrary candidate lists — including malformed/non-Issue elements —
+    # to exercise the orchestrator's defensive dispatch-filter clauses.
+    case Application.get_env(:symphony_elixir, :memory_tracker_fetch_candidate_issues_response) do
+      {:ok, _} = ok -> ok
+      {:error, _} = err -> err
+      _ -> {:ok, issue_entries()}
+    end
   end
 
   @spec fetch_issues_by_states([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issues_by_states(state_names) do
-    normalized_states =
-      state_names
-      |> Enum.map(&normalize_state/1)
-      |> MapSet.new()
+    with_injection(:memory_tracker_fetch_issues_by_states_response, fn ->
+      normalized_states =
+        state_names
+        |> Enum.map(&normalize_state/1)
+        |> MapSet.new()
 
-    {:ok,
-     Enum.filter(issue_entries(), fn %Issue{state: state} ->
-       MapSet.member?(normalized_states, normalize_state(state))
-     end)}
+      {:ok,
+       Enum.filter(issue_entries(), fn %Issue{state: state} ->
+         MapSet.member?(normalized_states, normalize_state(state))
+       end)}
+    end)
   end
 
   @spec fetch_issue_states_by_ids([String.t()]) :: {:ok, [Issue.t()]} | {:error, term()}
   def fetch_issue_states_by_ids(issue_ids) do
-    wanted_ids = MapSet.new(issue_ids)
+    # A full-response override (`{:ok, list}` or `{:error, reason}`) lets tests
+    # decouple the dispatch-revalidation fetch from the candidate fetch, e.g.
+    # to drive the orchestrator's "issue went missing/stale on refresh" skip
+    # branches without mutating the shared issue list.
+    case Application.get_env(:symphony_elixir, :memory_tracker_fetch_issue_states_by_ids_response) do
+      {:ok, _} = ok ->
+        ok
 
-    {:ok,
-     Enum.filter(issue_entries(), fn %Issue{id: id} ->
-       MapSet.member?(wanted_ids, id)
-     end)}
+      {:error, _} = err ->
+        err
+
+      _ ->
+        wanted_ids = MapSet.new(issue_ids)
+
+        {:ok,
+         Enum.filter(issue_entries(), fn %Issue{id: id} ->
+           MapSet.member?(wanted_ids, id)
+         end)}
+    end
   end
 
   @spec create_comment(String.t(), String.t()) :: :ok | {:error, term()}

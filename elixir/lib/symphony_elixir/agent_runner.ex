@@ -324,9 +324,14 @@ defmodule SymphonyElixir.AgentRunner do
 
   defp active_issue_state?(_state_name), do: false
 
-  defp selected_worker_host(nil, []), do: nil
+  # `@doc false` public seam so the coverage suite can exercise the
+  # host-selection branches (preferred vs. first-configured vs. none)
+  # directly, without standing up a real SSH workspace per branch.
+  @doc false
+  @spec selected_worker_host(worker_host(), [String.t()]) :: worker_host()
+  def selected_worker_host(nil, []), do: nil
 
-  defp selected_worker_host(preferred_host, configured_hosts) when is_list(configured_hosts) do
+  def selected_worker_host(preferred_host, configured_hosts) when is_list(configured_hosts) do
     hosts =
       configured_hosts
       |> Enum.map(&String.trim/1)
