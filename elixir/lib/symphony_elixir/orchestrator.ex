@@ -855,11 +855,19 @@ defmodule SymphonyElixir.Orchestrator do
        when is_binary(id) and is_binary(identifier) and is_binary(title) and is_binary(state_name) do
     issue_routable_to_worker?(issue) and
       issue_satisfies_label_filters?(issue) and
+      !parent_issue?(issue) and
       active_issue_state?(state_name, active_states) and
       !terminal_issue_state?(state_name, terminal_states)
   end
 
   defp candidate_issue?(_issue, _active_states, _terminal_states), do: false
+
+  # Parent/umbrella issues (those with sub-issues) are trackers, not work
+  # units — their work lives in the children. Claiming a parent makes the
+  # agent re-implement a sub-issue's scope and collide with the sub-issue's
+  # own PR, so they are never dispatch-eligible.
+  defp parent_issue?(%Issue{has_children: true}), do: true
+  defp parent_issue?(%Issue{}), do: false
 
   defp issue_routable_to_worker?(%Issue{assigned_to_worker: assigned_to_worker})
        when is_boolean(assigned_to_worker),
