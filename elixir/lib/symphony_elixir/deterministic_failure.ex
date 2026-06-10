@@ -19,6 +19,9 @@ defmodule SymphonyElixir.DeterministicFailure do
       :invalid_request           — request shape is permanently rejected
       :claude_sidecar_exit       — sidecar binary exited non-cleanly
       :port_exit                 — codex app-server port died
+      :max_turns_reached         — IDE-74: agent.max_turns budget exhausted
+                                   while the issue was still active (the
+                                   model is looping unproductively)
 
   Transient codes (`:rate_limited`, `:overloaded`, `:turn_timeout`,
   `:response_timeout`, `:unknown`) intentionally reset the counter so a brief
@@ -56,7 +59,7 @@ defmodule SymphonyElixir.DeterministicFailure do
           | {:alert, code :: atom(), count :: pos_integer()}
           | {:escalate, code :: atom(), count :: pos_integer()}
 
-  @deterministic_codes ~w(quota_exceeded context_window_exhausted invalid_request claude_sidecar_exit port_exit)a
+  @deterministic_codes ~w(quota_exceeded context_window_exhausted invalid_request claude_sidecar_exit port_exit max_turns_reached)a
 
   @doc """
   Returns the deterministic code set as a list. Exposed for tests/docs.

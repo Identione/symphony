@@ -97,6 +97,16 @@ defmodule SymphonyElixir.OrchestratorRetryPolicyTest do
       assert {:retry, 300_000} = RetryPolicy.decide(:unknown, 6, nil, nil)
     end
 
+    test "max_turns_reached uses a 1s constant cadence matching the :normal continuation re-poll (IDE-74)" do
+      # Constant 1s so the attempt counter has no effect, and the cadence
+      # matches the existing `delay_type: :continuation` re-poll for clean
+      # `:normal` exits.
+      assert {:retry, 1_000} = RetryPolicy.decide(:max_turns_reached, 1, nil, nil)
+      assert {:retry, 1_000} = RetryPolicy.decide(:max_turns_reached, 7, nil, nil)
+      # A `Retry-After` hint is meaningless for an orchestrator-side cap.
+      assert {:retry, 1_000} = RetryPolicy.decide(:max_turns_reached, 1, 30_000, nil)
+    end
+
     test "an unrecognized error code is treated as :unknown" do
       assert RetryPolicy.decide(:_does_not_exist, 1, nil, nil) ==
                RetryPolicy.decide(:unknown, 1, nil, nil)
@@ -276,6 +286,30 @@ defmodule SymphonyElixir.OrchestratorRetryPolicyTest do
       refute Map.has_key?(state.retry_attempts, issue_id)
       assert %{error: error} = state.blocked[issue_id]
       assert error =~ "quota_exceeded"
+    end
+
+    test "max_turns_reached DOWN schedules a 1s continuation-cadence retry (IDE-74)" do
+      pid = start_orchestrator!(:MaxTurnsReachedDownOrchestrator)
+      issue_id = "ide-74-max-turns"
+      ref = seed_running_entry!(pid, issue_id, "IDE-74-MT")
+
+      baseline_ms = System.monotonic_time(:millisecond)
+
+      send(
+        pid,
+        {:DOWN, ref, :process, self(), agent_run_failed_reason(:max_turns_reached, :max_turns_reached)}
+      )
+
+      Process.sleep(75)
+      state = :sys.get_state(pid)
+
+      assert %{attempt: 1, due_at_ms: due_at_ms, error: error} =
+               state.retry_attempts[issue_id]
+
+      remaining = due_at_ms - baseline_ms
+      assert remaining in 800..1_200, "expected ~1s continuation cadence, got #{remaining}"
+      assert error =~ "max_turns_reached"
+      refute Map.has_key?(state.blocked, issue_id)
     end
 
     test "missing classification (raw exit) falls back to the historical exponential backoff" do

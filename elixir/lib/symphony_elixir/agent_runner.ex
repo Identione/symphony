@@ -21,6 +21,14 @@ defmodule SymphonyElixir.AgentRunner do
       :ok ->
         :ok
 
+      # IDE-74: reuse the `{:agent_run_failed, code, reason}` exit shape so
+      # the orchestrator's existing `extract_error_code/1` + IDE-73
+      # deterministic-failure pipeline pick this up without a new exit tag.
+      :max_turns_reached ->
+        Logger.info("Agent run hit agent.max_turns for #{issue_context(issue)}; surfacing to orchestrator")
+
+        exit({:agent_run_failed, :max_turns_reached, :max_turns_reached})
+
       {:error, reason} ->
         # The adapter's session_id (Codex thread-turn pair / Claude SDK
         # session_id) is held inside the adapter session struct returned to
@@ -339,7 +347,7 @@ defmodule SymphonyElixir.AgentRunner do
             "returning control to orchestrator"
         )
 
-        :ok
+        :max_turns_reached
 
       {:done, _refreshed_issue} ->
         :ok

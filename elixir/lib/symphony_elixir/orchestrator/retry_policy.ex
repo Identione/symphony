@@ -30,6 +30,7 @@ defmodule SymphonyElixir.Orchestrator.RetryPolicy do
     context_window_exhausted
     quota_exceeded
     invalid_request
+    max_turns_reached
     unknown
   )a
 
@@ -94,6 +95,14 @@ defmodule SymphonyElixir.Orchestrator.RetryPolicy do
   defp built_in_for(code, _cap)
        when code in [:context_window_exhausted, :quota_exceeded, :invalid_request],
        do: %{strategy: :no_retry, base_ms: 0, max_ms: 0, honor_retry_after: false}
+
+  # IDE-74: max_turns_reached is the "ran out of agent.max_turns budget" signal.
+  # Match the existing `:normal`-exit continuation cadence (1s constant) so the
+  # follow-up run kicks off promptly while IDE-73's deterministic-failure
+  # counter advances on each consecutive cap-hit and posts the workpad alert /
+  # escalates the issue after the configured thresholds.
+  defp built_in_for(:max_turns_reached, _cap),
+    do: %{strategy: :backoff, base_ms: 1_000, max_ms: 1_000, honor_retry_after: false}
 
   defp built_in_for(_code, cap),
     do: %{strategy: :backoff, base_ms: 10_000, max_ms: cap, honor_retry_after: false}

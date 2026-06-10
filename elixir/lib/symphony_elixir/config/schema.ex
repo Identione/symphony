@@ -635,6 +635,7 @@ defmodule SymphonyElixir.Config.Schema do
     context_window_exhausted
     quota_exceeded
     invalid_request
+    max_turns_reached
     unknown
   )
   @retry_policy_keys ~w(strategy base_ms max_ms honor_retry_after)
