@@ -51,7 +51,9 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
 
   defp start_orchestrator(label) do
     name = Module.concat(__MODULE__, label)
-    {:ok, pid} = Orchestrator.start_link(name: name)
+    # Suppress the initial auto-poll so it can't race the post-start seed below
+    # and wipe running/claimed before our :DOWN event lands (IDE-131).
+    {:ok, pid} = Orchestrator.start_link(name: name, poll_on_start: false)
 
     on_exit(fn ->
       if Process.alive?(pid) do
@@ -755,14 +757,17 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
 
     # Pre-seed at N-1 so a single DOWN crosses the alert threshold and tries to
     # spawn the side effect — which then fails because the supervisor is full.
+    # `:port_exit` is deterministic (counter advances) AND retryable under the
+    # IDE-72 policy, so this test can assert the retry is still scheduled when
+    # the spawn fails; `:quota_exceeded` would block on first failure.
     seed_counter(pid, issue.id, %{
-      code: :quota_exceeded,
+      code: :port_exit,
       count: 2,
       notified_alert?: false,
       notified_escalation?: false
     })
 
-    send(pid, {:DOWN, ref, :process, self(), {:agent_run_failed, :quota_exceeded, :anything}})
+    send(pid, {:DOWN, ref, :process, self(), {:agent_run_failed, :port_exit, :anything}})
 
     state =
       wait_for_state(pid, fn s ->
@@ -772,7 +777,7 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
 
     # Counter advanced to 3 but both notification flags stay clear because the
     # side effect never ran (the spawn failed before `handle/3`).
-    assert %{code: :quota_exceeded, count: 3, notified_alert?: false, notified_escalation?: false} =
+    assert %{code: :port_exit, count: 3, notified_alert?: false, notified_escalation?: false} =
              state.deterministic_failures[issue.id]
 
     # No pending escalation entry is left behind — the spawn never succeeded.

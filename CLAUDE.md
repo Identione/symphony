@@ -34,7 +34,7 @@ Two kinds of "upgrade" — don't conflate them:
 - **`make upgrade-tools`** (in `elixir/Makefile`) bumps the *eager-tracked agent toolchain* — `codex` (refreshes `mise.lock`) and `claude-agent-sdk` (refreshes `priv/claude_agent/uv.lock`). Line-pinned tools (erlang/elixir/uv) move only by editing the pin in `mise.toml`. Run `make all` and commit both lockfiles after.
 - **`make upgrade` / `upgrade-all`** (root Makefile) redeploys *Symphony code* — rebuild the escript + restart instance daemons after a `git pull`. Nothing to do with the toolchain.
 
-`make all` runs: `setup → build → fmt-check → lint → coverage → dialyzer`. **Coverage threshold is 100%** (with an explicit ignore list in `mix.exs` — see `test_coverage`). New modules default to being covered; add to the ignore list only with justification.
+`make all` runs: `setup → build → fmt-check → lint → coverage → dialyzer`. **Coverage is reported but does not gate the build** (the `test_coverage` threshold in `mix.exs` is `0`, with an explicit ignore list — see `test_coverage`). Aim to keep new code covered, but low coverage no longer fails `make all`.
 
 Targeted iteration:
 

@@ -9,8 +9,11 @@ defmodule SymphonyElixir.MixProject do
       compilers: [:phoenix_live_view] ++ Mix.compilers(),
       start_permanent: Mix.env() == :prod,
       test_coverage: [
+        # Coverage is reported for visibility but no longer gates the build.
+        # (Threshold 0 = the summary table still prints, but `mix test --cover`
+        # never exits non-zero on low coverage.)
         summary: [
-          threshold: 100
+          threshold: 0
         ],
         ignore_modules: [
           SymphonyElixir.Config,

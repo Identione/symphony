@@ -55,7 +55,11 @@ defmodule SymphonyElixir.OrchestratorCoverageTest do
 
   defp start_orchestrator(label) do
     name = Module.concat(__MODULE__, label)
-    {:ok, pid} = Orchestrator.start_link(name: name)
+    # Suppress the initial auto-poll so its reconcile can't race the post-start
+    # seed and wipe running/claimed before the test drives its own event
+    # (IDE-131). Tests that exercise the poll cycle send :tick / :run_poll_cycle
+    # (or request_refresh) explicitly.
+    {:ok, pid} = Orchestrator.start_link(name: name, poll_on_start: false)
 
     on_exit(fn ->
       if Process.alive?(pid), do: Process.exit(pid, :kill)
@@ -880,15 +884,18 @@ defmodule SymphonyElixir.OrchestratorCoverageTest do
     iss = issue("iss-crash", "CR-1", state: "In Progress")
     ref = make_ref()
 
+    # `:port_exit` is deterministic (counter advances) AND retryable under the
+    # IDE-72 policy, so the retry below is actually scheduled; `:quota_exceeded`
+    # would block on first failure and never reach the retry path.
     seed(pid,
       running: %{iss.id => running_entry(iss, ref: ref)},
       claimed: MapSet.new([iss.id]),
       deterministic_failures: %{
-        iss.id => %{code: :quota_exceeded, count: 2, notified_alert?: false, notified_escalation?: false}
+        iss.id => %{code: :port_exit, count: 2, notified_alert?: false, notified_escalation?: false}
       }
     )
 
-    send(pid, {:DOWN, ref, :process, self(), {:agent_run_failed, :quota_exceeded, :anything}})
+    send(pid, {:DOWN, ref, :process, self(), {:agent_run_failed, :port_exit, :anything}})
 
     # The crash surfaces as an :error result → flags stay clear and a retry is
     # scheduled (IDE-73 retry contract preserved across the async hop).
