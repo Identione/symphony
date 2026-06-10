@@ -197,9 +197,12 @@ ensure-trust:
 
 # Mix refuses to build with unfetched hex deps and dumps a wall of
 # "package … not available" errors. Detect the empty deps/ dir up front and
-# run `mix setup` so `make build` is self-healing on a fresh checkout.
+# fetch deps so `make build` is self-healing on a fresh checkout. Call
+# `mix deps.get` directly rather than the `mix setup` alias so future additions
+# to that alias (ecto.create, asset pipelines, post-install hooks) cannot
+# silently become part of `make build` via a `mix.exs` edit.
 ensure-deps: ensure-trust
 	@if [ ! -d $(ELIXIR_DIR)/deps ] || [ -z "$$(ls -A $(ELIXIR_DIR)/deps 2>/dev/null)" ]; then \
-		echo "$(YELLOW)deps not fetched$(RESET); running '$(CYAN)mix setup$(RESET)' first..."; \
-		cd $(ELIXIR_DIR) && mise exec -- mix setup; \
+		echo "$(YELLOW)deps not fetched$(RESET); running '$(CYAN)mix deps.get$(RESET)' first..."; \
+		cd $(ELIXIR_DIR) && mise exec -- mix deps.get; \
 	fi
