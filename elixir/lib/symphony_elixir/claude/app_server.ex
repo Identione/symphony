@@ -106,7 +106,10 @@ defmodule SymphonyElixir.Claude.AppServer do
       |> log_run_turn_outcome(issue_log)
     else
       {:error, reason} ->
-        Logger.error("Claude session failed for #{issue_log}: #{inspect(reason)}")
+        # The pre-collect failure path can only fire before `system_init`, so
+        # `session.session_id` is always `nil` here in practice — emit the
+        # IDE-75 fallback so log parsers still see a `session_id=` field.
+        Logger.error("Claude session failed for #{issue_log} session_id=#{session.session_id || "unknown"}: #{inspect(reason)}")
         {:error, reason}
     end
   end
@@ -116,9 +119,13 @@ defmodule SymphonyElixir.Claude.AppServer do
     result
   end
 
-  defp log_run_turn_outcome({:error, reason} = result, issue_log) do
-    Logger.warning("Claude session ended with error for #{issue_log}: #{inspect(reason)}")
-    result
+  # `do_collect` carries the latest captured session_id alongside any error so
+  # the warning can include it when `system_init` already arrived; we strip
+  # the trailing element before returning so callers keep the documented
+  # `{:error, term()}` shape.
+  defp log_run_turn_outcome({:error, reason, sid}, issue_log) do
+    Logger.warning("Claude session ended with error for #{issue_log} session_id=#{sid || "unknown"}: #{inspect(reason)}")
+    {:error, reason}
   end
 
   defp session_log_suffix(sid) when is_binary(sid), do: " session_id=#{sid}"
@@ -385,7 +392,7 @@ defmodule SymphonyElixir.Claude.AppServer do
     read_timeout_ms = min(session.read_timeout_ms, remaining)
 
     if remaining == 0 do
-      {:error, :turn_timeout}
+      {:error, :turn_timeout, session.session_id}
     else
       session.port
       |> receive_one_envelope(buffer, read_timeout_ms)
@@ -398,9 +405,9 @@ defmodule SymphonyElixir.Claude.AppServer do
     {:ok, build_turn_result(session, env)}
   end
 
-  defp handle_envelope({:ok, %{type: :error, error: msg} = env, _leftover}, _session, _context, _buffer) do
+  defp handle_envelope({:ok, %{type: :error, error: msg} = env, _leftover}, session, _context, _buffer) do
     code = to_error_code(Map.get(env, :error_code))
-    {:error, {:claude_sdk_error, code, msg}}
+    {:error, {:claude_sdk_error, code, msg}, session.session_id}
   end
 
   defp handle_envelope({:ok, %{type: :tool_call} = env, leftover}, session, context, _buffer) do
@@ -410,7 +417,7 @@ defmodule SymphonyElixir.Claude.AppServer do
         do_collect(session, context, leftover)
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, reason, session.session_id}
     end
   end
 
@@ -421,7 +428,7 @@ defmodule SymphonyElixir.Claude.AppServer do
         do_collect(session, context, leftover)
 
       {:error, reason} ->
-        {:error, reason}
+        {:error, reason, session.session_id}
     end
   end
 
@@ -448,8 +455,8 @@ defmodule SymphonyElixir.Claude.AppServer do
     do_collect(session, context, buffer)
   end
 
-  defp handle_envelope({:error, reason}, _session, _context, _buffer) do
-    {:error, reason}
+  defp handle_envelope({:error, reason}, session, _context, _buffer) do
+    {:error, reason, session.session_id}
   end
 
   defp to_error_code("context_window_exhausted"), do: :context_window_exhausted

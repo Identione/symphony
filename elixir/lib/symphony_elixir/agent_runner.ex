@@ -22,7 +22,12 @@ defmodule SymphonyElixir.AgentRunner do
         :ok
 
       {:error, reason} ->
-        Logger.error("Agent run failed for #{issue_context(issue)}: #{inspect(reason)}")
+        # The adapter's session_id (Codex thread-turn pair / Claude SDK
+        # session_id) is held inside the adapter session struct returned to
+        # `do_run_codex_turns`, but failed runs lose that handle before they
+        # bubble up here. Emit the IDE-75 fallback so log parsers always see
+        # a `session_id=` field.
+        Logger.error("Agent run failed for #{issue_context(issue)} session_id=unknown: #{inspect(reason)}")
         # Carry the classified `error_code` (IDE-71 taxonomy) through the
         # process exit so the orchestrator's :DOWN handler can branch on it
         # without re-parsing `inspect(reason)`. The previous `raise

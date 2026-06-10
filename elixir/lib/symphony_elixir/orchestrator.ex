@@ -166,10 +166,11 @@ defmodule SymphonyElixir.Orchestrator do
         {running_entry, state} = pop_running_entry(state, issue_id)
         state = record_session_completion_totals(state, running_entry)
         session_id = running_entry_session_id(running_entry)
+        identifier = running_entry_identifier(running_entry, issue_id)
 
         state = handle_agent_down(reason, state, issue_id, running_entry, session_id)
 
-        Logger.info("Agent task finished for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}")
+        Logger.info("Agent task finished for issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} reason=#{inspect(reason)}")
 
         notify_dashboard()
         {:noreply, state}
@@ -251,13 +252,14 @@ defmodule SymphonyElixir.Orchestrator do
     if input_required_blocker?(running_entry) do
       block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
     else
-      Logger.info("Agent task completed for issue_id=#{issue_id} session_id=#{session_id}; scheduling active-state continuation check")
+      Logger.info("Agent task completed for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}; scheduling active-state continuation check")
 
       state
       |> clear_deterministic_failure(issue_id)
       |> complete_issue(issue_id)
       |> schedule_issue_retry(issue_id, 1, %{
         identifier: running_entry.identifier,
+        session_id: session_id,
         delay_type: :continuation,
         worker_host: Map.get(running_entry, :worker_host),
         workspace_path: Map.get(running_entry, :workspace_path)
@@ -304,12 +306,13 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:retry, delay_ms} ->
         Logger.warning(
-          "Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)} " <>
+          "Agent task exited for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id} reason=#{inspect(reason)} " <>
             "error_code=#{error_code}; scheduling retry in #{delay_ms}ms (attempt #{next_attempt})"
         )
 
         schedule_issue_retry(state, issue_id, next_attempt, %{
           identifier: running_entry.identifier,
+          session_id: session_id,
           error: "agent exited: #{inspect(reason)} (#{error_code})",
           worker_host: Map.get(running_entry, :worker_host),
           workspace_path: Map.get(running_entry, :workspace_path),
@@ -919,6 +922,7 @@ defmodule SymphonyElixir.Orchestrator do
         |> terminate_running_issue(issue_id, false)
         |> schedule_issue_retry(issue_id, next_attempt, %{
           identifier: identifier,
+          session_id: session_id,
           error: "stalled for #{elapsed_ms}ms without codex activity"
         })
       end
@@ -1371,6 +1375,7 @@ defmodule SymphonyElixir.Orchestrator do
     error = pick_retry_error(previous_retry, metadata)
     worker_host = pick_retry_worker_host(previous_retry, metadata)
     workspace_path = pick_retry_workspace_path(previous_retry, metadata)
+    session_id = pick_retry_session_id(previous_retry, metadata)
 
     if is_reference(old_timer) do
       Process.cancel_timer(old_timer)
@@ -1380,7 +1385,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     error_suffix = if is_binary(error), do: " error=#{error}", else: ""
 
-    Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
+    Logger.warning("Retrying issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id} in #{delay_ms}ms (attempt #{next_attempt})#{error_suffix}")
 
     %{
       state
@@ -1391,6 +1396,7 @@ defmodule SymphonyElixir.Orchestrator do
             retry_token: retry_token,
             due_at_ms: due_at_ms,
             identifier: identifier,
+            session_id: session_id,
             error: error,
             worker_host: worker_host,
             workspace_path: workspace_path
@@ -1403,6 +1409,7 @@ defmodule SymphonyElixir.Orchestrator do
       %{attempt: attempt, retry_token: ^retry_token} = retry_entry ->
         metadata = %{
           identifier: Map.get(retry_entry, :identifier),
+          session_id: Map.get(retry_entry, :session_id),
           error: Map.get(retry_entry, :error),
           worker_host: Map.get(retry_entry, :worker_host),
           workspace_path: Map.get(retry_entry, :workspace_path)
@@ -1434,7 +1441,7 @@ defmodule SymphonyElixir.Orchestrator do
          )}
 
       {:error, reason} ->
-        Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id}: #{inspect(reason)}")
+        Logger.warning("Retry poll failed for issue_id=#{issue_id} issue_identifier=#{metadata[:identifier] || issue_id} session_id=#{metadata[:session_id] || "unknown"}: #{inspect(reason)}")
 
         {:noreply,
          schedule_issue_retry(
@@ -1585,6 +1592,10 @@ defmodule SymphonyElixir.Orchestrator do
     metadata[:workspace_path] || Map.get(previous_retry, :workspace_path)
   end
 
+  defp pick_retry_session_id(previous_retry, metadata) do
+    metadata[:session_id] || Map.get(previous_retry, :session_id) || "unknown"
+  end
+
   defp maybe_put_runtime_value(running_entry, _key, nil), do: running_entry
 
   defp maybe_put_runtime_value(running_entry, key, value) when is_map(running_entry) do
@@ -1674,6 +1685,11 @@ defmodule SymphonyElixir.Orchestrator do
     do: session_id
 
   defp running_entry_session_id(_running_entry), do: "n/a"
+
+  defp running_entry_identifier(%{identifier: identifier}, _issue_id) when is_binary(identifier),
+    do: identifier
+
+  defp running_entry_identifier(_running_entry, issue_id), do: issue_id
 
   defp issue_context(%Issue{id: issue_id, identifier: identifier}) do
     "issue_id=#{issue_id} issue_identifier=#{identifier}"
