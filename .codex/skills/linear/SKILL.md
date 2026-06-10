@@ -295,6 +295,15 @@ mutation AttachURL($issueId: String!, $url: String!, $title: String) {
 }
 ```
 
+> **Do not wrap these arguments in an input object.** `attachmentLinkURL` and
+> `attachmentLinkGitHubPR` take their arguments as top-level scalars
+> (`$issueId: String!`, `$url: String!`, `$title: String`) exactly as shown
+> above. There is **no** `AttachmentLinkURLInput` / `AttachmentLinkGitHubPRInput`
+> type — passing `input: { ... }` (or declaring `$input: AttachmentLinkURLInput!`)
+> fails with `Unknown type "AttachmentLinkURLInput"`. The `input: { ... }` shape
+> applies only to `attachmentCreate`/`attachmentUpdate`, not to these
+> link-helper mutations.
+
 ### Introspection patterns used during schema discovery
 
 Use these when the exact field or mutation shape is unclear:
