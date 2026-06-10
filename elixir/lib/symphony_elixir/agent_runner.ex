@@ -43,6 +43,68 @@ defmodule SymphonyElixir.AgentRunner do
   def classify_error_code({:claude_sidecar_exit, _status}), do: :claude_sidecar_exit
   def classify_error_code(_reason), do: :unknown
 
+  @doc """
+  Best-effort `Retry-After` hint (ms) extracted from a classified failure
+  reason. IDE-72 retry policy consumes this when the upstream error carries
+  an explicit hint (Codex puts the value in `params.error.headers`/
+  `params.error.retry_after`; Claude only carries rendered exception text,
+  so we fall back to a bounded regex over `inspect/2` of the payload). Returns
+  `nil` when no hint is present or the value isn't a positive integer.
+  """
+  @spec extract_retry_after_ms(term()) :: pos_integer() | nil
+  def extract_retry_after_ms({tag, _code, body})
+      when tag in [:claude_sdk_error, :turn_failed, :codex_error_notification],
+      do: parse_retry_after(body)
+
+  def extract_retry_after_ms(_other), do: nil
+
+  defp parse_retry_after(payload) when is_map(payload) do
+    parse_retry_after_from_map(payload) ||
+      parse_retry_after(inspect(payload, limit: 50, printable_limit: 512))
+  end
+
+  defp parse_retry_after(text) when is_binary(text) do
+    case Regex.run(~r/retry[\s_-]?after[^\d]{0,8}(\d+)/i, text) do
+      [_match, seconds] ->
+        case Integer.parse(seconds) do
+          {n, _} when n > 0 -> n * 1_000
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp parse_retry_after(_other), do: nil
+
+  defp parse_retry_after_from_map(%{"error" => %{"headers" => headers}}) when is_map(headers) do
+    headers
+    |> Enum.find_value(fn {k, v} ->
+      if is_binary(k) and String.downcase(k) == "retry-after", do: v
+    end)
+    |> retry_after_value_to_ms()
+  end
+
+  defp parse_retry_after_from_map(%{"retry_after" => value}), do: retry_after_value_to_ms(value)
+  defp parse_retry_after_from_map(%{"retryAfter" => value}), do: retry_after_value_to_ms(value)
+
+  defp parse_retry_after_from_map(%{"error" => %{"retry_after" => value}}),
+    do: retry_after_value_to_ms(value)
+
+  defp parse_retry_after_from_map(_payload), do: nil
+
+  defp retry_after_value_to_ms(value) when is_integer(value) and value > 0, do: value * 1_000
+
+  defp retry_after_value_to_ms(value) when is_binary(value) do
+    case Integer.parse(value) do
+      {n, _} when n > 0 -> n * 1_000
+      _ -> nil
+    end
+  end
+
+  defp retry_after_value_to_ms(_value), do: nil
+
   defp run_on_worker_host(issue, codex_update_recipient, opts, worker_host) do
     Logger.info("Starting worker attempt for #{issue_context(issue)} worker_host=#{worker_host_for_log(worker_host)}")
 

@@ -9,6 +9,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   alias SymphonyElixir.{AgentRunner, Config, DeterministicFailure, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.Orchestrator.RetryPolicy
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
@@ -282,16 +283,39 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_agent_down(state, issue_id, running_entry, session_id, reason) do
-    Logger.warning("Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)}; scheduling retry")
+    error_code = extract_error_code(reason) || :unknown
+    retry_after_ms = AgentRunner.extract_retry_after_ms(extract_inner_reason(reason))
+    next_attempt = next_retry_attempt_from_running(running_entry) || 1
 
-    next_attempt = next_retry_attempt_from_running(running_entry)
+    case RetryPolicy.decide(error_code, next_attempt, retry_after_ms, Config.settings!()) do
+      :no_retry ->
+        block_for_no_retry(state, issue_id, running_entry, session_id, reason, error_code)
 
-    schedule_issue_retry(state, issue_id, next_attempt, %{
-      identifier: running_entry.identifier,
-      error: "agent exited: #{inspect(reason)}",
-      worker_host: Map.get(running_entry, :worker_host),
-      workspace_path: Map.get(running_entry, :workspace_path)
-    })
+      {:retry, delay_ms} ->
+        Logger.warning(
+          "Agent task exited for issue_id=#{issue_id} session_id=#{session_id} reason=#{inspect(reason)} " <>
+            "error_code=#{error_code}; scheduling retry in #{delay_ms}ms (attempt #{next_attempt})"
+        )
+
+        schedule_issue_retry(state, issue_id, next_attempt, %{
+          identifier: running_entry.identifier,
+          error: "agent exited: #{inspect(reason)} (#{error_code})",
+          worker_host: Map.get(running_entry, :worker_host),
+          workspace_path: Map.get(running_entry, :workspace_path),
+          delay_ms_override: delay_ms
+        })
+    end
+  end
+
+  defp block_for_no_retry(state, issue_id, running_entry, session_id, reason, error_code) do
+    error = "no retry for #{error_code}: #{inspect(reason)}"
+
+    Logger.warning(
+      "Agent task halted for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} " <>
+        "session_id=#{session_id} error_code=#{error_code}: #{error}"
+    )
+
+    block_issue_from_entry(state, issue_id, running_entry, error)
   end
 
   # `reason` here is the process exit reason from the `:DOWN` handler. When
@@ -494,6 +518,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp extract_error_code({:agent_run_failed, code, _reason}) when is_atom(code), do: code
   defp extract_error_code(_reason), do: nil
+
+  defp extract_inner_reason({:agent_run_failed, _code, inner}), do: inner
+  defp extract_inner_reason(reason), do: reason
 
   defp running_entry_issue_fallback(running_entry, issue_id) do
     %Issue{
@@ -1504,10 +1531,15 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do
-    if metadata[:delay_type] == :continuation and attempt == 1 do
-      @continuation_retry_delay_ms
-    else
-      failure_retry_delay(attempt)
+    cond do
+      metadata[:delay_type] == :continuation and attempt == 1 ->
+        @continuation_retry_delay_ms
+
+      is_integer(metadata[:delay_ms_override]) and metadata[:delay_ms_override] > 0 ->
+        metadata[:delay_ms_override]
+
+      true ->
+        failure_retry_delay(attempt)
     end
   end
 

@@ -116,12 +116,17 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
     ref = make_ref()
     seed_running(pid, issue.id, running_entry(issue, ref))
 
-    send(pid, {:DOWN, ref, :process, self(), {:agent_run_failed, :quota_exceeded, :anything}})
+    # `:port_exit` is deterministic (IDE-73 counter advances) AND retryable
+    # under IDE-72's policy (falls through to the `:unknown` bucket), so this
+    # test exercises the streak-without-comment path while still letting the
+    # orchestrator schedule a retry. `:quota_exceeded` would block immediately
+    # under IDE-72 — see `OrchestratorRetryPolicyTest` for that coverage.
+    send(pid, {:DOWN, ref, :process, self(), {:agent_run_failed, :port_exit, :anything}})
 
     wait_for_state(pid, fn s -> Map.has_key?(s.deterministic_failures, issue.id) end)
     state = :sys.get_state(pid)
 
-    assert %{code: :quota_exceeded, count: 1, notified_alert?: false, notified_escalation?: false} =
+    assert %{code: :port_exit, count: 1, notified_alert?: false, notified_escalation?: false} =
              state.deterministic_failures[issue.id]
 
     refute_received {:memory_tracker_comment, _, _}
@@ -441,14 +446,18 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
     ref = make_ref()
     seed_running(pid, issue.id, running_entry(issue, ref))
 
+    # `:port_exit` is the test stand-in for a deterministic code that IDE-72
+    # still allows the orchestrator to retry (`:quota_exceeded` blocks on
+    # first failure under the IDE-72 policy and would short-circuit the retry
+    # rescheduling this test wants to exercise).
     seed_counter(pid, issue.id, %{
-      code: :quota_exceeded,
+      code: :port_exit,
       count: 4,
       notified_alert?: true,
       notified_escalation?: false
     })
 
-    send(pid, {:DOWN, ref, :process, self(), {:agent_run_failed, :quota_exceeded, :anything}})
+    send(pid, {:DOWN, ref, :process, self(), {:agent_run_failed, :port_exit, :anything}})
 
     # Comment posts (sentinel-bounded; subsequent failures will replace it),
     # but the state move failed → both flags must stay in the state where the
@@ -473,10 +482,10 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
     # because notified_escalation? is still false.
     settings = SymphonyElixir.Config.settings!()
 
-    assert {%{count: 6}, {:escalate, :quota_exceeded, 6}} =
+    assert {%{count: 6}, {:escalate, :port_exit, 6}} =
              DeterministicFailure.decide(
                state.deterministic_failures[issue.id],
-               :quota_exceeded,
+               :port_exit,
                settings
              )
 
@@ -675,12 +684,15 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
     ref = make_ref()
     seed_running(pid, issue.id, running_entry(issue, ref))
 
+    # `:port_exit` is deterministic (IDE-73) AND still retryable under the
+    # IDE-72 policy. Picking `:quota_exceeded` here would block the issue
+    # before the retry rescheduling this test asserts.
     pending = %{
       token: make_ref(),
-      action: {:alert, :quota_exceeded, 3},
-      entry: %{code: :quota_exceeded, count: 3, notified_alert?: false, notified_escalation?: false},
+      action: {:alert, :port_exit, 3},
+      entry: %{code: :port_exit, count: 3, notified_alert?: false, notified_escalation?: false},
       running_entry: running_entry(issue, ref),
-      reason: {:agent_run_failed, :quota_exceeded, :anything}
+      reason: {:agent_run_failed, :port_exit, :anything}
     }
 
     :sys.replace_state(pid, fn state ->
@@ -703,7 +715,7 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
 
     # Flags stay clear so the next same-code :DOWN re-fires the alert path
     # via `decide/3` (IDE-73 retry contract preserved across the async hop).
-    assert %{code: :quota_exceeded, count: 3, notified_alert?: false, notified_escalation?: false} =
+    assert %{code: :port_exit, count: 3, notified_alert?: false, notified_escalation?: false} =
              state.deterministic_failures[issue.id]
 
     refute Map.has_key?(state.pending_escalations, issue.id)

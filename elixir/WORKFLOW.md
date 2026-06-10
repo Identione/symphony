@@ -29,6 +29,31 @@ hooks:
 agent:
   max_concurrent_agents: 10
   max_turns: 20
+  # Per-failure-code retry policy (IDE-72). Each entry overrides the built-in
+  # default for the matching error code from the adapter taxonomy
+  # (IDE-71). Recognized codes: `rate_limited`, `overloaded`,
+  # `context_window_exhausted`, `quota_exceeded`, `invalid_request`,
+  # `unknown`. Entry keys:
+  #
+  #   strategy:          `backoff` (default) or `no_retry`
+  #   base_ms:           initial delay for `backoff`; per-attempt doubling
+  #   max_ms:            hard cap for `backoff`
+  #   honor_retry_after: when true, the orchestrator uses any upstream
+  #                      `Retry-After` hint (clamped to max_ms)
+  #
+  # Omit the section entirely to keep the built-in policy:
+  #   rate_limited / overloaded         → 30s base, honors Retry-After
+  #   context_window_exhausted          → no_retry (issue routed to blocked)
+  #   quota_exceeded / invalid_request  → no_retry
+  #   unknown                           → 10s base (legacy exponential backoff)
+  # retry_policy:
+  #   rate_limited:
+  #     strategy: backoff
+  #     base_ms: 60000
+  #     max_ms: 900000
+  #     honor_retry_after: true
+  #   unknown:
+  #     strategy: no_retry
   # Deterministic-failure escalation (IDE-73). After N consecutive failures
   # carrying the same structured `error_code` (IDE-71 taxonomy:
   # quota_exceeded / context_window_exhausted / invalid_request / port_exit /

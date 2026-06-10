@@ -331,6 +331,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
       field(:max_concurrent_agents_by_state, :map, default: %{})
+      field(:retry_policy, :map, default: %{})
       field(:kind, :string, default: "codex")
       # Deterministic-failure escalation (IDE-73). Tracks consecutive failures
       # carrying the same structured `error_code` (IDE-71 taxonomy) — quota
@@ -357,6 +358,7 @@ defmodule SymphonyElixir.Config.Schema do
           :max_turns,
           :max_retry_backoff_ms,
           :max_concurrent_agents_by_state,
+          :retry_policy,
           :kind,
           :deterministic_failure_alert_threshold,
           :deterministic_failure_escalation_threshold,
@@ -375,6 +377,8 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_thresholds_order()
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
+      |> update_change(:retry_policy, &Schema.normalize_retry_policy/1)
+      |> Schema.validate_retry_policy(:retry_policy)
     end
 
     defp validate_thresholds_order(changeset) do
@@ -620,6 +624,82 @@ defmodule SymphonyElixir.Config.Schema do
       end)
     end)
   end
+
+  # Per-error-code retry policy overrides; see WORKFLOW.md `agent.retry_policy`
+  # for the operator-facing surface and `Orchestrator.RetryPolicy` for the
+  # built-in defaults.
+  @retry_policy_strategies ~w(backoff no_retry)
+  @retry_policy_codes ~w(
+    rate_limited
+    overloaded
+    context_window_exhausted
+    quota_exceeded
+    invalid_request
+    unknown
+  )
+  @retry_policy_keys ~w(strategy base_ms max_ms honor_retry_after)
+
+  @doc false
+  @spec normalize_retry_policy(nil | map()) :: map()
+  def normalize_retry_policy(nil), do: %{}
+
+  def normalize_retry_policy(policy) when is_map(policy) do
+    Enum.reduce(policy, %{}, fn {code, settings}, acc ->
+      Map.put(acc, to_string(code), normalize_retry_policy_entry(settings))
+    end)
+  end
+
+  defp normalize_retry_policy_entry(settings) when is_map(settings) do
+    Enum.reduce(settings, %{}, fn {key, value}, acc ->
+      Map.put(acc, to_string(key), value)
+    end)
+  end
+
+  defp normalize_retry_policy_entry(settings), do: settings
+
+  @doc false
+  @spec validate_retry_policy(Ecto.Changeset.t(), atom()) :: Ecto.Changeset.t()
+  def validate_retry_policy(changeset, field) do
+    validate_change(changeset, field, fn ^field, policy ->
+      Enum.flat_map(policy, fn {code, settings} -> retry_policy_errors(field, code, settings) end)
+    end)
+  end
+
+  defp retry_policy_errors(field, code, _settings) when code not in @retry_policy_codes do
+    [{field, "unknown error code: #{inspect(code)}"}]
+  end
+
+  defp retry_policy_errors(field, _code, settings) when not is_map(settings) do
+    [{field, "policy entry must be a map, got: #{inspect(settings)}"}]
+  end
+
+  defp retry_policy_errors(field, _code, settings) do
+    Enum.flat_map(settings, fn {key, value} -> retry_policy_field_errors(field, key, value) end)
+  end
+
+  defp retry_policy_field_errors(field, key, _value) when key not in @retry_policy_keys do
+    [{field, "unknown policy key: #{inspect(key)}"}]
+  end
+
+  defp retry_policy_field_errors(field, "strategy", value)
+       when value not in @retry_policy_strategies do
+    [{field, "strategy must be one of #{Enum.join(@retry_policy_strategies, ", ")}"}]
+  end
+
+  defp retry_policy_field_errors(field, key, value) when key in ["base_ms", "max_ms"] do
+    if is_integer(value) and value > 0 do
+      []
+    else
+      [{field, "#{key} must be a positive integer, got: #{inspect(value)}"}]
+    end
+  end
+
+  defp retry_policy_field_errors(field, "honor_retry_after", value)
+       when not is_boolean(value) do
+    [{field, "honor_retry_after must be a boolean, got: #{inspect(value)}"}]
+  end
+
+  defp retry_policy_field_errors(_field, _key, _value), do: []
 
   defp changeset(attrs) do
     %__MODULE__{}

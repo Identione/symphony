@@ -593,8 +593,12 @@ defmodule SymphonyElixir.CoreTest do
     Process.sleep(50)
     state = :sys.get_state(pid)
 
-    assert %{attempt: 3, due_at_ms: due_at_ms, identifier: "MT-559", error: "agent exited: :boom"} =
-             state.retry_attempts[issue_id]
+    assert %{
+             attempt: 3,
+             due_at_ms: due_at_ms,
+             identifier: "MT-559",
+             error: "agent exited: :boom (unknown)"
+           } = state.retry_attempts[issue_id]
 
     # Attempt 3 backoff is ~40s.
     assert_due_in_range(due_at_ms, baseline_ms, 40_000)
@@ -634,8 +638,12 @@ defmodule SymphonyElixir.CoreTest do
     Process.sleep(50)
     state = :sys.get_state(pid)
 
-    assert %{attempt: 1, due_at_ms: due_at_ms, identifier: "MT-560", error: "agent exited: :boom"} =
-             state.retry_attempts[issue_id]
+    assert %{
+             attempt: 1,
+             due_at_ms: due_at_ms,
+             identifier: "MT-560",
+             error: "agent exited: :boom (unknown)"
+           } = state.retry_attempts[issue_id]
 
     # First abnormal-exit retry is scheduled ~10s out.
     assert_due_in_range(due_at_ms, baseline_ms, 10_000, 750)
