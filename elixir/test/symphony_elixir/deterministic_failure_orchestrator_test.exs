@@ -362,8 +362,7 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
 
       send(
         pid,
-        {:DOWN, ref, :process, self(),
-         {:agent_run_failed, :max_turns_reached, :max_turns_reached}}
+        {:DOWN, ref, :process, self(), {:agent_run_failed, :max_turns_reached, :max_turns_reached}}
       )
 
       wait_for_state(pid, fn s -> Map.has_key?(s.deterministic_failures, issue.id) end)
@@ -410,8 +409,7 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
 
       send(
         pid,
-        {:DOWN, ref, :process, self(),
-         {:agent_run_failed, :max_turns_reached, :max_turns_reached}}
+        {:DOWN, ref, :process, self(), {:agent_run_failed, :max_turns_reached, :max_turns_reached}}
       )
 
       assert_receive {:memory_tracker_comment_update, "workpad-max-turns-alert", new_body}, 2_000
@@ -453,8 +451,7 @@ defmodule SymphonyElixir.DeterministicFailureOrchestratorTest do
 
       send(
         pid,
-        {:DOWN, ref, :process, self(),
-         {:agent_run_failed, :max_turns_reached, :max_turns_reached}}
+        {:DOWN, ref, :process, self(), {:agent_run_failed, :max_turns_reached, :max_turns_reached}}
       )
 
       assert_receive {:memory_tracker_comment_update, "workpad-max-turns-escalate", body}, 2_000

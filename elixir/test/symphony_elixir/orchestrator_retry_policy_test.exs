@@ -297,8 +297,7 @@ defmodule SymphonyElixir.OrchestratorRetryPolicyTest do
 
       send(
         pid,
-        {:DOWN, ref, :process, self(),
-         agent_run_failed_reason(:max_turns_reached, :max_turns_reached)}
+        {:DOWN, ref, :process, self(), agent_run_failed_reason(:max_turns_reached, :max_turns_reached)}
       )
 
       Process.sleep(75)

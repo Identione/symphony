@@ -1625,9 +1625,7 @@ defmodule SymphonyElixir.CoreTest do
       }
 
       assert {:agent_run_failed, :max_turns_reached, :max_turns_reached} =
-               catch_exit(
-                 AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher)
-               )
+               catch_exit(AgentRunner.run(issue, nil, issue_state_fetcher: state_fetcher))
 
       trace = File.read!(trace_file)
       assert length(String.split(trace, "RUN", trim: true)) == 1

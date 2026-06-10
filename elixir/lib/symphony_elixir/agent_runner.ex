@@ -25,9 +25,7 @@ defmodule SymphonyElixir.AgentRunner do
       # the orchestrator's existing `extract_error_code/1` + IDE-73
       # deterministic-failure pipeline pick this up without a new exit tag.
       :max_turns_reached ->
-        Logger.info(
-          "Agent run hit agent.max_turns for #{issue_context(issue)}; surfacing to orchestrator"
-        )
+        Logger.info("Agent run hit agent.max_turns for #{issue_context(issue)}; surfacing to orchestrator")
 
         exit({:agent_run_failed, :max_turns_reached, :max_turns_reached})
 
