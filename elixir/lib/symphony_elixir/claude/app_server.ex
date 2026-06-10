@@ -192,7 +192,14 @@ defmodule SymphonyElixir.Claude.AppServer do
       :use_stdio,
       {:line, @port_line_bytes},
       {:cd, workspace},
-      {:args, ["-lc", command]},
+      # Non-login shell on purpose: the daemon is launched via `mise exec`, so the
+      # sidecar inherits a PATH that already carries the activated toolchain (uv runs
+      # the Claude SDK). A login shell (`-lc`) sources /etc/profile, which on Debian
+      # *assigns* PATH (not appends), clobbering the mise dirs and leaving the bare
+      # system default (`uv: command not found`, exit 127). The general rule: a login
+      # shell is only safe at the bottom of a process tree; spawning one here — nested
+      # under the env mise already built — is the anti-pattern. Don't reintroduce `-l`.
+      {:args, ["-c", command]},
       {:env, env_charlists}
     ]
 
