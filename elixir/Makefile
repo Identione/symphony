@@ -28,11 +28,14 @@ deps:
 
 # Self-heal `make build` when deps haven't been fetched yet (e.g. fresh
 # checkout). Without this, mix dumps a wall of "package … not available"
-# errors and exits non-zero.
+# errors and exits non-zero. Call `mix deps.get` directly rather than the
+# `mix setup` alias so future additions to that alias (ecto.create, asset
+# pipelines, post-install hooks) cannot silently become part of `make build`
+# via a `mix.exs` edit.
 ensure-deps:
 	@if [ ! -d deps ] || [ -z "$$(ls -A deps 2>/dev/null)" ]; then \
-	  echo "deps not fetched; running 'mix setup' first..."; \
-	  $(MIX) setup; \
+	  echo "deps not fetched; running 'mix deps.get' first..."; \
+	  $(MIX) deps.get; \
 	fi
 
 build: ensure-deps
