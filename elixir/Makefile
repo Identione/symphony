@@ -51,17 +51,16 @@ fmt:
 fmt-check:
 	$(MIX) format --check-formatted
 
-lint:
+lint: ensure-deps
 	$(MIX) lint
 
-coverage:
+coverage: ensure-deps
 	$(MIX) test --cover
 
-test:
+test: ensure-deps
 	$(MIX) test
 
-dialyzer:
-	$(MIX) deps.get
+dialyzer: ensure-deps
 	$(MIX) dialyzer --format short
 
 e2e:
