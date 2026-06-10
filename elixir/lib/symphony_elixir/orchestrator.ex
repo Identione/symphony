@@ -75,7 +75,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   @impl true
-  def init(_opts) do
+  def init(opts) do
     now_ms = System.monotonic_time(:millisecond)
     config = Config.settings!()
 
@@ -92,7 +92,18 @@ defmodule SymphonyElixir.Orchestrator do
     }
 
     run_terminal_workspace_cleanup()
-    state = schedule_tick(state, 0)
+
+    # The initial tick fires a poll cycle whose reconcile clears running/claimed
+    # entries absent from the tracker's current view. Tests that seed orchestrator
+    # state *after* start_link (via :sys.replace_state) and then drive a specific
+    # event need to opt out of that auto-poll so it can't race and wipe the seed
+    # (IDE-131). Production always polls on start.
+    state =
+      if Keyword.get(opts, :poll_on_start, true) do
+        schedule_tick(state, 0)
+      else
+        state
+      end
 
     {:ok, state}
   end
