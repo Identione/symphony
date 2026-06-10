@@ -386,7 +386,10 @@ defmodule SymphonyElixir.ClaudeAppServerTest do
         end)
 
       assert log =~ "[warning]"
-      assert log =~ "Claude session ended with error for issue_id=issue-1 issue_identifier=MT-1"
+
+      assert log =~
+               "Claude session ended with error for issue_id=issue-1 issue_identifier=MT-1 session_id=s-life-err"
+
       assert log =~ "kaboom"
 
       AppServer.stop_session(session)
