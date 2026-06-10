@@ -204,7 +204,14 @@ defmodule SymphonyElixir.Codex.AppServer do
             :binary,
             :exit_status,
             :stderr_to_stdout,
-            args: [~c"-lc", String.to_charlist(Config.settings!().codex.command)],
+            # Non-login shell on purpose: the daemon is launched via `mise exec`, so the
+            # agent command inherits a PATH carrying the activated toolchain. A login
+            # shell (`-lc`) sources /etc/profile, which on Debian *assigns* PATH (not
+            # appends), clobbering the mise dirs and leaving the bare system default
+            # (e.g. `uv`/`codex` not found, exit 127). The general rule: a login shell is
+            # only safe at the bottom of a process tree; spawning one here — nested under
+            # the env mise already built — is the anti-pattern. Don't reintroduce `-l`.
+            args: [~c"-c", String.to_charlist(Config.settings!().codex.command)],
             cd: String.to_charlist(workspace),
             line: @port_line_bytes
           ]

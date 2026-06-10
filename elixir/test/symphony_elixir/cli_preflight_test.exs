@@ -437,6 +437,119 @@ defmodule SymphonyElixir.CLI.PreflightTest do
     refute_received {:system_cmd, "git", _}
   end
 
+  test "fails when gh is the GitHub credential helper but gh is not on PATH" do
+    project_slug = "symphony-2e32f5d86d8c"
+    repo_url = "git@github.com:org/repo.git"
+
+    workflow_file =
+      tmp_workflow!("gh-missing",
+        tracker_api_token: "secret",
+        tracker_project_slug: project_slug,
+        repo_url: repo_url,
+        server_port: nil
+      )
+
+    deps =
+      build_deps(%{
+        graphql: graphql_responses(project_slug, 0),
+        system_cmd: %{
+          {"git", ["config", "--get-urlmatch", "credential.helper", "https://github.com"]} => {"!gh auth git-credential\n", 0}
+        },
+        # gh deliberately absent; git/codex present so other checks pass.
+        find_executable: %{"git" => "/usr/bin/git", "codex" => "/usr/bin/codex"}
+      })
+
+    assert {:error, :silent_failure} = Preflight.run([workflow_file], deps)
+
+    fails = collect_puts_err()
+    assert Enum.any?(fails, &String.contains?(&1, "GitHub credential helper"))
+    assert Enum.any?(fails, &String.contains?(&1, "exit 128"))
+  end
+
+  test "fails when gh is present but not authenticated" do
+    project_slug = "symphony-2e32f5d86d8c"
+    repo_url = "git@github.com:org/repo.git"
+
+    workflow_file =
+      tmp_workflow!("gh-unauth",
+        tracker_api_token: "secret",
+        tracker_project_slug: project_slug,
+        repo_url: repo_url,
+        server_port: nil
+      )
+
+    deps =
+      build_deps(%{
+        graphql: graphql_responses(project_slug, 0),
+        system_cmd: %{
+          {"git", ["config", "--get-urlmatch", "credential.helper", "https://github.com"]} => {"!gh auth git-credential\n", 0},
+          {"gh", ["auth", "status"]} => {"You are not logged into any GitHub hosts.", 1}
+        }
+      })
+
+    assert {:error, :silent_failure} = Preflight.run([workflow_file], deps)
+
+    fails = collect_puts_err()
+    assert Enum.any?(fails, &String.contains?(&1, "GitHub credential helper"))
+    assert Enum.any?(fails, &String.contains?(&1, "gh auth status exited 1"))
+  end
+
+  test "passes when gh is the GitHub credential helper and is authenticated" do
+    project_slug = "symphony-2e32f5d86d8c"
+    repo_url = "git@github.com:org/repo.git"
+
+    workflow_file =
+      tmp_workflow!("gh-ok",
+        tracker_api_token: "secret",
+        tracker_project_slug: project_slug,
+        repo_url: repo_url,
+        server_port: 0
+      )
+
+    deps =
+      build_deps(%{
+        graphql: graphql_responses(project_slug, 0),
+        system_cmd: %{
+          {"git", ["config", "--get-urlmatch", "credential.helper", "https://github.com"]} => {"!gh auth git-credential\n", 0},
+          {"gh", ["auth", "status"]} => {"Logged in to github.com as tester", 0}
+        }
+      })
+
+    assert :ok = Preflight.run([workflow_file], deps)
+
+    msgs = collect_puts()
+    full = Enum.join(msgs, "\n")
+    assert full =~ "[ok]   GitHub credential helper — gh authenticated for GitHub"
+  end
+
+  test "skips the gh auth check when a non-gh credential helper is configured" do
+    project_slug = "symphony-2e32f5d86d8c"
+    repo_url = "git@github.com:org/repo.git"
+
+    workflow_file =
+      tmp_workflow!("gh-other-helper",
+        tracker_api_token: "secret",
+        tracker_project_slug: project_slug,
+        repo_url: repo_url,
+        server_port: 0
+      )
+
+    deps =
+      build_deps(%{
+        graphql: graphql_responses(project_slug, 0),
+        system_cmd: %{
+          {"git", ["config", "--get-urlmatch", "credential.helper", "https://github.com"]} => {"store\n", 0}
+        }
+      })
+
+    assert :ok = Preflight.run([workflow_file], deps)
+
+    msgs = collect_puts()
+    full = Enum.join(msgs, "\n")
+    assert full =~ "[ok]   GitHub credential helper"
+    assert full =~ "(not gh); skipping gh auth check"
+  end
+
   test "warns when project resolution fails but missing-state coverage falls back gracefully" do
     project_slug = "symphony-2e32f5d86d8c"
 

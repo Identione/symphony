@@ -350,7 +350,15 @@ defmodule SymphonyElixir.Workspace do
 
     task =
       Task.async(fn ->
-        System.cmd("sh", ["-lc", command], cd: workspace, stderr_to_stdout: true)
+        # Non-login shell on purpose: the daemon is launched via `mise exec`, so its
+        # inherited PATH already carries the activated toolchain (codex/uv/gh). A login
+        # shell (`-lc`) sources /etc/profile, which on Debian *assigns* PATH (not
+        # appends), clobbering the mise dirs and leaving the bare system default — which
+        # breaks hooks that shell out to those tools (e.g. a clone whose git credential
+        # helper is `gh auth git-credential`). The general rule: a login shell is only
+        # safe at the bottom of a process tree; spawning one here — nested under the env
+        # mise already built — is the anti-pattern. Don't reintroduce `-l`.
+        System.cmd("sh", ["-c", command], cd: workspace, stderr_to_stdout: true)
       end)
 
     case Task.yield(task, timeout_ms) do

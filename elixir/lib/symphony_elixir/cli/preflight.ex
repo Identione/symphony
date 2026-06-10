@@ -213,6 +213,7 @@ defmodule SymphonyElixir.CLI.Preflight do
       {"Linear project resolution", check_project(settings, deps)},
       {"Linear state coverage", check_states(settings, deps)},
       {"Repo clone access", check_repo_url(settings, deps)},
+      {"GitHub credential helper", check_gh_credential(settings, deps)},
       {"Agent availability", check_agent(settings, deps)},
       {"Workspace root writability", check_workspace_root(settings, deps)},
       {"Dashboard port", check_dashboard_port(settings, deps)}
@@ -362,6 +363,81 @@ defmodule SymphonyElixir.CLI.Preflight do
       {output, status} ->
         trimmed = output |> to_string() |> String.trim()
         {:error, "git ls-remote exited #{status}: #{trimmed}"}
+    end
+  end
+
+  # The clone hook authenticates GitHub over HTTPS via git's credential helper,
+  # which on Symphony hosts is typically `!gh auth git-credential`. If `gh` is
+  # missing from the daemon's PATH the clone dies with a cryptic
+  # `gh: not found` / `could not read Username` and `after_create` exits 128 —
+  # the daemon then retries on exponential backoff indefinitely. Surface that
+  # here as a single clear failure. Gated on a GitHub `repo.url` so we never
+  # shell out to git when the URL is absent (legacy hardcoded-hook workflows)
+  # or when the remote is SSH-key-only on a non-GitHub host.
+  defp check_gh_credential(settings, deps) do
+    case settings.repo.url do
+      url when is_binary(url) ->
+        if github_url?(url) do
+          check_gh_for_github(deps)
+        else
+          {:warn, "repo.url #{inspect(url)} is not a github.com remote; skipping gh credential-helper check"}
+        end
+
+      _ ->
+        {:warn, "repo.url not set; skipping gh credential-helper check"}
+    end
+  end
+
+  defp github_url?(url) when is_binary(url), do: String.contains?(url, "github.com")
+
+  defp check_gh_for_github(deps) do
+    case github_credential_helper(deps) do
+      {:ok, helper} ->
+        if String.contains?(helper, "gh") do
+          verify_gh_cli(deps)
+        else
+          {:ok_with_detail, "GitHub uses credential helper #{inspect(helper)} (not gh); skipping gh auth check"}
+        end
+
+      :none ->
+        {:warn, "no GitHub HTTPS credential helper configured; clones must use an SSH key or another auth method"}
+    end
+  end
+
+  # `git config --get-urlmatch credential.helper https://github.com` resolves the
+  # helper git would actually use for GitHub HTTPS — exactly the value the clone
+  # hook relies on. Empty output (or a non-zero exit, which git returns when no
+  # value matches) means no HTTPS helper is configured.
+  defp github_credential_helper(deps) do
+    case deps.system_cmd.(
+           "git",
+           ["config", "--get-urlmatch", "credential.helper", "https://github.com"],
+           stderr_to_stdout: true
+         ) do
+      {output, 0} ->
+        case output |> to_string() |> String.trim() do
+          "" -> :none
+          helper -> {:ok, helper}
+        end
+
+      _ ->
+        :none
+    end
+  end
+
+  defp verify_gh_cli(deps) do
+    case deps.system_find_executable.("gh") do
+      nil ->
+        {:error, "git uses gh as its GitHub credential helper, but gh is not on PATH — clones will fail with exit 128 (gh: not found). Install gh or ensure the daemon's mise PATH includes it."}
+
+      _ ->
+        case deps.system_cmd.("gh", ["auth", "status"], stderr_to_stdout: true) do
+          {_output, 0} ->
+            {:ok_with_detail, "gh authenticated for GitHub"}
+
+          {output, status} ->
+            {:error, "gh auth status exited #{status}: #{output |> to_string() |> String.trim()}"}
+        end
     end
   end
 

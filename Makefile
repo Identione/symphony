@@ -32,7 +32,7 @@ RESET  := $(shell tput sgr0)
 endif
 
 .DEFAULT_GOAL := help
-.PHONY: help init init-all build clean upgrade upgrade-all check-built ensure-deps ensure-trust validate-instance
+.PHONY: help init init-all build clean upgrade upgrade-all start start-all stop stop-all check-built ensure-deps ensure-trust validate-instance
 
 help: ## Show this help.
 	@printf '$(BOLD)Symphony$(RESET)  $(DIM)— Linear-driven Codex orchestrator$(RESET)\n'
@@ -137,6 +137,43 @@ validate-instance:
 			exit 1; \
 		;; \
 	esac
+# --- Start -----------------------------------------------------------------
+##@ Start
+start: start-all ## Alias for start-all: start every instance daemon.
+
+start-all: ## Start every instance daemon (serial; skips ones already running).
+	@dirs=$$(find $(INSTANCES_DIR) -mindepth 1 -maxdepth 1 -type d 2>/dev/null); \
+	if [ -z "$$dirs" ]; then \
+		echo "$(DIM)no instances to start$(RESET)"; \
+		exit 0; \
+	fi; \
+	for dir in $$dirs; do \
+		[ -f $$dir/Makefile ] || continue; \
+		printf '$(BOLD)==> %s$(RESET)\n' "$$(basename $$dir)"; \
+		pid_file=$$dir/run/symphony.pid; \
+		if [ -f $$pid_file ] && kill -0 $$(cat $$pid_file) 2>/dev/null; then \
+			echo "$(DIM)already running (pid $$(cat $$pid_file)) — skipping$(RESET)"; \
+			continue; \
+		fi; \
+		$(MAKE) -C $$dir --no-print-directory start || true; \
+	done
+
+# --- Stop ------------------------------------------------------------------
+##@ Stop
+stop: stop-all ## Alias for stop-all: stop every instance daemon.
+
+stop-all: ## Stop every instance daemon (serial; skips ones already stopped).
+	@dirs=$$(find $(INSTANCES_DIR) -mindepth 1 -maxdepth 1 -type d 2>/dev/null); \
+	if [ -z "$$dirs" ]; then \
+		echo "$(DIM)no instances to stop$(RESET)"; \
+		exit 0; \
+	fi; \
+	for dir in $$dirs; do \
+		[ -f $$dir/Makefile ] || continue; \
+		printf '$(BOLD)==> %s$(RESET)\n' "$$(basename $$dir)"; \
+		$(MAKE) -C $$dir --no-print-directory stop; \
+	done
+
 # --- Build / clean ---------------------------------------------------------
 ##@ Build
 build: ensure-deps ## Rebuild elixir/bin/symphony (mix build).
