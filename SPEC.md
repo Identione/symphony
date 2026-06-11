@@ -164,6 +164,11 @@ Fields:
   - Lower numbers are higher priority in dispatch sorting.
 - `state` (string)
   - Current tracker state name.
+- `state_type` (string or null)
+  - Tracker workflow-state *type* (for Linear: `triage | backlog | unstarted | started | completed |
+    canceled`). State names are operator-customizable; `state_type` is the stable bucket downstream
+    consumers (dashboards, icon mappings) SHOULD key off when they need to act on the lifecycle
+    stage rather than the display name.
 - `branch_name` (string or null)
   - Tracker-provided branch metadata if available.
 - `url` (string or null)
@@ -286,6 +291,18 @@ Fields:
   dispatch until reconciliation observes a Linear state change. In-memory only; cleared on restart.
   Surfaced by the Codex adapter only — the Claude sidecar runs unattended and does not report
   input-required blockers.)
+- `dependency_blocked` (map `issue_id -> dependency-blocked entry`; observability-only mirror of
+  active candidates currently held back by the §8.2 Todo-blocker rule — a Todo issue whose
+  `blocked_by` list still contains a non-terminal blocker. Dispatch never consults this map; it is
+  rebuilt wholesale on every successful candidate fetch so it self-heals once the upstream blocker
+  reaches a terminal state. Last-known-good is kept on candidate-fetch failure / rate limit.
+  In-memory only; cleared on restart.)
+- `dependency_graph` (map `issue_id -> graph node projection`; observability-only node set for the
+  dashboard dependency graph — active candidates plus their transitive blockers (`blockers of
+  blockers`). Rebuilt per successful candidate fetch with last-known-good retained on failure.
+  Expansion is bounded by a per-refresh round cap and a hard node cap so a deep blocker chain
+  cannot drive unbounded Linear API usage; truncated ids surface as placeholder nodes. Never
+  consulted by dispatch.)
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
 - `agent_totals` (aggregate tokens + runtime seconds; tracked per active adapter — codex totals
   and claude totals are stored separately so adapter-specific cache fields stay typed correctly)
@@ -906,7 +923,9 @@ An issue is dispatch-eligible only if all are true:
 - Global concurrency slots are available.
 - Per-state concurrency slots are available.
 - Blocker rule for `Todo` state passes:
-  - If the issue state is `Todo`, do not dispatch when any blocker is non-terminal.
+  - If the issue state is `Todo`, do not dispatch when any blocker is non-terminal. Issues that
+    fail *only* this rule SHOULD be recorded in `dependency_blocked` (§4.1.8) so dashboards can
+    surface them; the rule itself remains the source of truth for dispatch eligibility.
 
 Sorting order (stable intent):
 
@@ -1549,6 +1568,8 @@ Additional normalization details:
 - `blocked_by` -> derived from inverse relations where relation type is `blocks`
 - `has_children` -> true when the issue's `children` connection has at least one node
 - `priority` -> integer only (non-integers become null)
+- `state` -> `state.name` from the tracker payload (operator-facing label, may be customized)
+- `state_type` -> `state.type` from the tracker payload (stable workflow-state bucket; see §4.1.1)
 - `created_at` and `updated_at` -> parse ISO-8601 timestamps
 
 ### 11.4 Error Handling Contract
@@ -1766,7 +1787,8 @@ Enablement (extension):
 
 - Host a human-readable dashboard at `/`.
 - The returned document SHOULD depict the current state of the system (for example active sessions,
-  retry delays, token consumption, runtime totals, recent events, and health/error indicators).
+  retry delays, token consumption, runtime totals, recent events, a dependency graph of active
+  candidates and their transitive blockers, and health/error indicators).
 - It is up to the implementation whether this is server-generated HTML or a client-side app that
   consumes the JSON API below.
 
@@ -1790,7 +1812,9 @@ Minimum endpoints:
       "linear_project": "my-project",
       "counts": {
         "running": 2,
-        "retrying": 1
+        "retrying": 1,
+        "blocked": 0,
+        "dependency_blocked": 1
       },
       "running": [
         {
@@ -1822,6 +1846,51 @@ Minimum endpoints:
           "error": "no available orchestrator slots"
         }
       ],
+      "dependency_blocked": [
+        {
+          "issue_id": "ghi789",
+          "issue_identifier": "MT-651",
+          "title": "Wire up the audit log",
+          "state": "Todo",
+          "blocked_by": [
+            {"issue_id": "abc123", "issue_identifier": "MT-649", "state": "In Progress"}
+          ],
+          "observed_at": "2026-02-24T20:11:42Z"
+        }
+      ],
+      "dependency_graph": {
+        "nodes": [
+          {
+            "id": "ghi789",
+            "issue_identifier": "MT-651",
+            "title": "Wire up the audit log",
+            "state": "Todo",
+            "state_type": "unstarted",
+            "priority": 3,
+            "priority_label": "Medium",
+            "url": "https://linear.app/example/issue/MT-651",
+            "placeholder": false,
+            "symphony_status": "waiting_on_blockers",
+            "symphony_status_label": "Waiting on blockers"
+          },
+          {
+            "id": "abc123",
+            "issue_identifier": "MT-649",
+            "title": "Surface session metadata",
+            "state": "In Progress",
+            "state_type": "started",
+            "priority": 2,
+            "priority_label": "High",
+            "url": "https://linear.app/example/issue/MT-649",
+            "placeholder": false,
+            "symphony_status": "running",
+            "symphony_status_label": "Running"
+          }
+        ],
+        "edges": [
+          {"source": "abc123", "target": "ghi789"}
+        ]
+      },
       "agent_totals": {
         "input_tokens": 5000,
         "output_tokens": 2400,

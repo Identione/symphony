@@ -15,6 +15,9 @@ defmodule SymphonyElixir.Orchestrator do
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
+  # Caps bound Linear API usage when crawling transitive blockers.
+  @graph_expansion_max_rounds 3
+  @graph_max_nodes 200
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -49,6 +52,8 @@ defmodule SymphonyElixir.Orchestrator do
       completed: MapSet.new(),
       claimed: MapSet.new(),
       blocked: %{},
+      dependency_blocked: %{},
+      dependency_graph: %{},
       retry_attempts: %{},
       # Per-issue counter of consecutive same-code adapter failures, used to
       # surface stuck issues to Linear after N alerts and escalate them to a
@@ -552,9 +557,13 @@ defmodule SymphonyElixir.Orchestrator do
       |> reconcile_blocked_issues()
 
     with :ok <- Config.validate!(),
-         {:ok, issues} <- Tracker.fetch_candidate_issues(),
-         true <- available_slots(state) > 0 do
-      choose_issues(issues, state)
+         {:ok, issues} <- Tracker.fetch_candidate_issues() do
+      state =
+        state
+        |> refresh_dependency_blocked(issues)
+        |> refresh_dependency_graph(issues)
+
+      if available_slots(state) > 0, do: choose_issues(issues, state), else: state
     else
       {:error, :missing_linear_api_token} ->
         Logger.error("Linear API token missing in WORKFLOW.md")
@@ -605,9 +614,6 @@ defmodule SymphonyElixir.Orchestrator do
 
       {:error, reason} ->
         Logger.error("Failed to fetch from Linear: #{inspect(reason)}")
-        state
-
-      false ->
         state
     end
   end
@@ -1089,6 +1095,175 @@ defmodule SymphonyElixir.Orchestrator do
       _ ->
         {priority_rank(nil), issue_created_at_sort_key(nil), ""}
     end)
+  end
+
+  # Observability mirror only — dispatch keeps re-evaluating the predicate
+  # itself. `observed_at` is preserved across polls so the dashboard can show
+  # a stable "since" timestamp.
+  defp refresh_dependency_blocked(%State{} = state, issues) when is_list(issues) do
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
+    previous = state.dependency_blocked
+    now = DateTime.utc_now()
+
+    next =
+      issues
+      |> Enum.filter(fn issue ->
+        dependency_blocked_candidate?(issue, state, active_states, terminal_states)
+      end)
+      |> Enum.into(%{}, fn %Issue{} = issue ->
+        observed_at =
+          case Map.get(previous, issue.id) do
+            %{observed_at: %DateTime{} = stored} -> stored
+            _ -> now
+          end
+
+        {issue.id,
+         %{
+           identifier: issue.identifier,
+           title: issue.title,
+           state: issue.state,
+           blocked_by: issue.blocked_by,
+           observed_at: observed_at
+         }}
+      end)
+
+    log_new_dependency_blocked(previous, next)
+    %{state | dependency_blocked: next}
+  end
+
+  defp dependency_blocked_candidate?(%Issue{} = issue, %State{} = state, active_states, terminal_states) do
+    candidate_issue?(issue, active_states, terminal_states) and
+      todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
+      not MapSet.member?(state.claimed, issue.id) and
+      not Map.has_key?(state.running, issue.id) and
+      not Map.has_key?(state.blocked, issue.id)
+  end
+
+  defp dependency_blocked_candidate?(_issue, _state, _active_states, _terminal_states), do: false
+
+  defp log_new_dependency_blocked(previous, next) when is_map(previous) and is_map(next) do
+    Enum.each(next, fn {issue_id, %{identifier: identifier}} ->
+      unless Map.has_key?(previous, issue_id) do
+        Logger.debug("Issue waiting on blockers: issue_id=#{issue_id} issue_identifier=#{identifier}")
+      end
+    end)
+  end
+
+  defp refresh_dependency_graph(%State{} = state, issues) when is_list(issues) do
+    known =
+      issues
+      |> Enum.flat_map(fn
+        %Issue{id: id} = issue when is_binary(id) -> [{id, node_projection(issue)}]
+        _ -> []
+      end)
+      |> Map.new()
+
+    refs = blocker_refs_index(issues)
+    frontier = frontier_for(known, refs)
+
+    {known, refs} = expand_graph(known, frontier, refs, 0)
+
+    %{state | dependency_graph: finalize_dependency_graph(known, refs)}
+  end
+
+  defp expand_graph(known, [], refs, _round), do: {known, refs}
+
+  defp expand_graph(known, _frontier, refs, round)
+       when round >= @graph_expansion_max_rounds or map_size(known) >= @graph_max_nodes do
+    Logger.debug("Dependency graph expansion capped: rounds=#{round} nodes=#{map_size(known)} max_rounds=#{@graph_expansion_max_rounds} max_nodes=#{@graph_max_nodes}")
+
+    {known, refs}
+  end
+
+  defp expand_graph(known, frontier, refs, round) do
+    case Tracker.fetch_issue_states_by_ids(frontier) do
+      {:ok, fetched} ->
+        {merged_known, new_refs} =
+          Enum.reduce(fetched, {known, refs}, fn
+            %Issue{id: id} = issue, {acc_known, acc_refs} when is_binary(id) ->
+              acc_known = Map.put(acc_known, id, node_projection(issue))
+              acc_refs = Map.merge(acc_refs, refs_from_issue(issue))
+              {acc_known, acc_refs}
+
+            _, acc ->
+              acc
+          end)
+
+        next_frontier = frontier_for(merged_known, new_refs)
+        expand_graph(merged_known, next_frontier, new_refs, round + 1)
+
+      {:error, reason} ->
+        Logger.debug("Dependency graph expansion fetch failed: #{inspect(reason)}; using last-known refs as placeholders")
+        {known, refs}
+    end
+  end
+
+  defp finalize_dependency_graph(known, refs) when is_map(known) and is_map(refs) do
+    Enum.reduce(refs, known, fn {ref_id, ref_meta}, acc ->
+      if Map.has_key?(acc, ref_id) or map_size(acc) >= @graph_max_nodes do
+        acc
+      else
+        Map.put(acc, ref_id, placeholder_node(ref_id, ref_meta))
+      end
+    end)
+  end
+
+  defp node_projection(%Issue{} = issue) do
+    %{
+      id: issue.id,
+      identifier: issue.identifier,
+      title: issue.title,
+      state: issue.state,
+      state_type: issue.state_type,
+      priority: issue.priority,
+      url: issue.url,
+      blocked_by: issue.blocked_by || [],
+      placeholder: false
+    }
+  end
+
+  defp placeholder_node(ref_id, ref_meta) do
+    %{
+      id: ref_id,
+      identifier: Map.get(ref_meta, :identifier),
+      title: nil,
+      state: Map.get(ref_meta, :state),
+      state_type: nil,
+      priority: nil,
+      url: nil,
+      blocked_by: [],
+      placeholder: true
+    }
+  end
+
+  defp blocker_refs_index(issues) when is_list(issues) do
+    Enum.reduce(issues, %{}, fn
+      %Issue{} = issue, acc -> Map.merge(acc, refs_from_issue(issue))
+      _, acc -> acc
+    end)
+  end
+
+  defp refs_from_issue(%Issue{blocked_by: blockers}) when is_list(blockers) do
+    Enum.reduce(blockers, %{}, fn
+      %{id: id} = ref, acc when is_binary(id) ->
+        Map.put(acc, id, %{
+          identifier: Map.get(ref, :identifier),
+          state: Map.get(ref, :state)
+        })
+
+      _, acc ->
+        acc
+    end)
+  end
+
+  defp refs_from_issue(_issue), do: %{}
+
+  defp frontier_for(known, refs) when is_map(known) and is_map(refs) do
+    refs
+    |> Map.keys()
+    |> Enum.reject(fn id -> is_nil(id) or Map.has_key?(known, id) end)
+    |> Enum.uniq()
   end
 
   defp priority_rank(priority) when is_integer(priority) and priority in 1..4, do: priority
@@ -1711,6 +1886,18 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
+  # Re-derived at snapshot time so the status reflects live state-map
+  # membership rather than what was true at the last successful poll.
+  defp derive_symphony_status(%State{} = state, issue_id) do
+    cond do
+      Map.has_key?(state.running, issue_id) -> :running
+      Map.has_key?(state.retry_attempts, issue_id) -> :retrying
+      Map.has_key?(state.blocked, issue_id) -> :blocked
+      Map.has_key?(Map.get(state, :dependency_blocked, %{}), issue_id) -> :waiting_on_blockers
+      true -> nil
+    end
+  end
+
   @spec request_refresh() :: map() | :unavailable
   def request_refresh do
     request_refresh(__MODULE__)
@@ -1810,11 +1997,35 @@ defmodule SymphonyElixir.Orchestrator do
         }
       end)
 
+    dependency_blocked_map = Map.get(state, :dependency_blocked, %{})
+    dependency_graph_map = Map.get(state, :dependency_graph, %{})
+
+    dependency_blocked =
+      Enum.map(dependency_blocked_map, fn {issue_id, metadata} ->
+        %{
+          issue_id: issue_id,
+          identifier: Map.get(metadata, :identifier),
+          title: Map.get(metadata, :title),
+          state: Map.get(metadata, :state),
+          blocked_by: Map.get(metadata, :blocked_by, []),
+          observed_at: Map.get(metadata, :observed_at)
+        }
+      end)
+
+    dependency_graph =
+      Enum.map(dependency_graph_map, fn {issue_id, node} ->
+        node
+        |> Map.put(:issue_id, issue_id)
+        |> Map.put(:symphony_status, derive_symphony_status(state, issue_id))
+      end)
+
     {:reply,
      %{
        running: running,
        retrying: retrying,
        blocked: blocked,
+       dependency_blocked: dependency_blocked,
+       dependency_graph: dependency_graph,
        codex_totals: state.codex_totals,
        claude_totals: state.claude_totals,
        rate_limits: Map.get(state, :codex_rate_limits),

@@ -131,6 +131,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
 
           <article class="metric-card">
+            <p class="metric-label">Waiting on blockers</p>
+            <p class="metric-value numeric"><%= @payload.counts.dependency_blocked %></p>
+            <p class="metric-detail">Issues paused while a blocking issue is still open.</p>
+          </article>
+
+          <article class="metric-card">
             <p class="metric-label">Total tokens</p>
             <p class="metric-value numeric"><%= format_int(active_totals(@payload).total_tokens) %></p>
             <p class="metric-detail numeric">
@@ -323,6 +329,27 @@ defmodule SymphonyElixirWeb.DashboardLive do
                   </tr>
                 </tbody>
               </table>
+            </div>
+          <% end %>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Dependency graph</h2>
+              <p class="section-copy">Blocking relationships across active issues and their transitive blockers.</p>
+            </div>
+          </div>
+
+          <%= if @payload.dependency_graph.nodes == [] do %>
+            <p class="empty-state">No dependency relationships found.</p>
+          <% else %>
+            <div
+              id="dependency-graph"
+              phx-hook="DependencyGraph"
+              data-graph={Jason.encode!(@payload.dependency_graph)}
+            >
+              <div id="dependency-graph-canvas" phx-update="ignore" class="graph-canvas"></div>
             </div>
           <% end %>
         </section>

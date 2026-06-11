@@ -2309,6 +2309,115 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     {tokens, [{timestamp, tokens} | samples]}
   end
 
+  test "orchestrator snapshot annotates dependency_graph nodes with current symphony_status" do
+    orchestrator_name = Module.concat(__MODULE__, :SymphonyStatusAnnotation)
+    {:ok, pid} = Orchestrator.start_link(name: orchestrator_name, poll_on_start: false)
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    issue_id = "iss-graph-status"
+
+    graph_node = %{
+      id: issue_id,
+      identifier: "GS-1",
+      title: "graph annotation issue",
+      state: "In Progress",
+      state_type: "started",
+      priority: 2,
+      url: "https://linear.app/example/GS-1",
+      blocked_by: [],
+      placeholder: false
+    }
+
+    seed_graph = fn extra ->
+      base = %{
+        running: %{},
+        retry_attempts: %{},
+        blocked: %{},
+        dependency_blocked: %{},
+        dependency_graph: %{issue_id => graph_node}
+      }
+
+      merged = Map.merge(base, extra)
+
+      :sys.replace_state(pid, fn state ->
+        Enum.reduce(merged, state, fn {k, v}, acc -> Map.put(acc, k, v) end)
+      end)
+    end
+
+    seed_graph.(%{
+      running: %{
+        issue_id => %{
+          pid: self(),
+          ref: make_ref(),
+          identifier: "GS-1",
+          issue: %Issue{id: issue_id, identifier: "GS-1", state: "In Progress"},
+          worker_host: nil,
+          workspace_path: nil,
+          session_id: "session-gs",
+          agent_kind: :codex,
+          last_codex_message: nil,
+          last_codex_timestamp: nil,
+          last_codex_event: nil,
+          started_at: DateTime.utc_now()
+        }
+      }
+    })
+
+    assert %{dependency_graph: [%{issue_id: ^issue_id, symphony_status: :running}]} =
+             GenServer.call(pid, :snapshot)
+
+    seed_graph.(%{
+      retry_attempts: %{
+        issue_id => %{
+          attempt: 1,
+          timer_ref: nil,
+          due_at_ms: System.monotonic_time(:millisecond) + 5_000,
+          identifier: "GS-1",
+          error: nil
+        }
+      }
+    })
+
+    assert %{dependency_graph: [%{issue_id: ^issue_id, symphony_status: :retrying}]} =
+             GenServer.call(pid, :snapshot)
+
+    seed_graph.(%{
+      blocked: %{
+        issue_id => %{
+          identifier: "GS-1",
+          state: "In Progress",
+          blocked_at: DateTime.utc_now()
+        }
+      }
+    })
+
+    assert %{dependency_graph: [%{issue_id: ^issue_id, symphony_status: :blocked}]} =
+             GenServer.call(pid, :snapshot)
+
+    seed_graph.(%{
+      dependency_blocked: %{
+        issue_id => %{
+          identifier: "GS-1",
+          title: "graph annotation issue",
+          state: "Todo",
+          blocked_by: [],
+          observed_at: DateTime.utc_now()
+        }
+      }
+    })
+
+    assert %{dependency_graph: [%{issue_id: ^issue_id, symphony_status: :waiting_on_blockers}]} =
+             GenServer.call(pid, :snapshot)
+
+    seed_graph.(%{})
+
+    assert %{dependency_graph: [%{issue_id: ^issue_id, symphony_status: nil}]} =
+             GenServer.call(pid, :snapshot)
+  end
+
   defp graph_samples_for_stability_test(now_ms) do
     rates_per_bucket = Enum.map(1..24, &(&1 * 5))
     bucket_ms = 25_000
