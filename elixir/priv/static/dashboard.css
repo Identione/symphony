@@ -424,6 +424,15 @@ pre,
   font-size: 0.9rem;
 }
 
+.graph-canvas {
+  margin-top: 1rem;
+  height: 32rem;
+  width: 100%;
+  border-radius: 18px;
+  background: #f5f5f7;
+  border: 1px solid var(--line);
+}
+
 .empty-state {
   margin: 1rem 0 0;
   color: var(--muted);

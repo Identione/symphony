@@ -23,6 +23,9 @@ defmodule SymphonyElixirWeb.Presenter do
       %{} = snapshot ->
         project = linear_project()
 
+        dependency_blocked = Map.get(snapshot, :dependency_blocked, [])
+        dependency_graph_nodes = Map.get(snapshot, :dependency_graph, [])
+
         %{
           generated_at: generated_at,
           agent_kind: active_agent_kind(),
@@ -31,11 +34,14 @@ defmodule SymphonyElixirWeb.Presenter do
           counts: %{
             running: length(snapshot.running),
             retrying: length(snapshot.retrying),
-            blocked: length(Map.get(snapshot, :blocked, []))
+            blocked: length(Map.get(snapshot, :blocked, [])),
+            dependency_blocked: length(dependency_blocked)
           },
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
+          dependency_blocked: Enum.map(dependency_blocked, &dependency_blocked_entry_payload/1),
+          dependency_graph: dependency_graph_payload(dependency_graph_nodes),
           codex_totals: snapshot.codex_totals,
           claude_totals: Map.get(snapshot, :claude_totals) || @empty_claude_totals,
           rate_limits: snapshot.rate_limits
@@ -160,6 +166,96 @@ defmodule SymphonyElixirWeb.Presenter do
       last_event_at: iso8601(entry.last_codex_timestamp)
     }
   end
+
+  defp dependency_blocked_entry_payload(entry) do
+    %{
+      issue_id: Map.get(entry, :issue_id),
+      issue_identifier: Map.get(entry, :identifier),
+      title: Map.get(entry, :title),
+      state: Map.get(entry, :state),
+      blocked_by: Enum.map(Map.get(entry, :blocked_by, []), &blocker_ref_payload/1),
+      observed_at: iso8601(Map.get(entry, :observed_at))
+    }
+  end
+
+  defp blocker_ref_payload(%{} = ref) do
+    %{
+      issue_id: Map.get(ref, :id),
+      issue_identifier: Map.get(ref, :identifier),
+      state: Map.get(ref, :state)
+    }
+  end
+
+  # Non-map blocker refs (e.g. a stray atom in a malformed Linear inverse
+  # relation) still indicate an upstream block exists; surface them as nil-only
+  # placeholders rather than crashing the snapshot serialization.
+  defp blocker_ref_payload(_other) do
+    %{issue_id: nil, issue_identifier: nil, state: nil}
+  end
+
+  defp dependency_graph_payload(nodes) when is_list(nodes) do
+    node_payloads = Enum.map(nodes, &dependency_graph_node_payload/1)
+    known_ids = MapSet.new(node_payloads, & &1.id)
+    edges = Enum.flat_map(nodes, &edges_for_node(&1, known_ids))
+    %{nodes: node_payloads, edges: edges}
+  end
+
+  defp dependency_graph_payload(_nodes), do: %{nodes: [], edges: []}
+
+  defp edges_for_node(node, known_ids) do
+    target_id = Map.get(node, :id) || Map.get(node, :issue_id)
+
+    node
+    |> Map.get(:blocked_by, [])
+    |> Enum.flat_map(&edge_from_blocker(&1, target_id, known_ids))
+  end
+
+  defp edge_from_blocker(%{id: source_id}, target_id, known_ids) when is_binary(source_id) do
+    if MapSet.member?(known_ids, source_id) do
+      [%{source: source_id, target: target_id}]
+    else
+      []
+    end
+  end
+
+  defp edge_from_blocker(_blocker, _target_id, _known_ids), do: []
+
+  defp dependency_graph_node_payload(node) do
+    priority = Map.get(node, :priority)
+    status = Map.get(node, :symphony_status)
+
+    %{
+      id: Map.get(node, :id) || Map.get(node, :issue_id),
+      issue_identifier: Map.get(node, :identifier),
+      title: Map.get(node, :title),
+      state: Map.get(node, :state),
+      state_type: Map.get(node, :state_type),
+      priority: priority,
+      priority_label: priority_label(priority),
+      url: Map.get(node, :url),
+      placeholder: Map.get(node, :placeholder, false) == true,
+      symphony_status: symphony_status_string(status),
+      symphony_status_label: symphony_status_label(status)
+    }
+  end
+
+  defp priority_label(1), do: "Urgent"
+  defp priority_label(2), do: "High"
+  defp priority_label(3), do: "Medium"
+  defp priority_label(4), do: "Low"
+  defp priority_label(_priority), do: "No priority"
+
+  defp symphony_status_string(:running), do: "running"
+  defp symphony_status_string(:retrying), do: "retrying"
+  defp symphony_status_string(:blocked), do: "blocked"
+  defp symphony_status_string(:waiting_on_blockers), do: "waiting_on_blockers"
+  defp symphony_status_string(_status), do: nil
+
+  defp symphony_status_label(:running), do: "Running"
+  defp symphony_status_label(:retrying), do: "Retrying"
+  defp symphony_status_label(:blocked), do: "Blocked"
+  defp symphony_status_label(:waiting_on_blockers), do: "Waiting on blockers"
+  defp symphony_status_label(_status), do: nil
 
   defp running_issue_payload(running) do
     %{

@@ -11,6 +11,9 @@ defmodule SymphonyElixirWeb.StaticAssetController do
   @spec dashboard_css(Conn.t(), map()) :: Conn.t()
   def dashboard_css(conn, _params), do: serve(conn, "/dashboard.css")
 
+  @spec dashboard_js(Conn.t(), map()) :: Conn.t()
+  def dashboard_js(conn, _params), do: serve(conn, "/dashboard.js")
+
   @spec phoenix_html_js(Conn.t(), map()) :: Conn.t()
   def phoenix_html_js(conn, _params), do: serve(conn, "/vendor/phoenix_html/phoenix_html.js")
 
@@ -19,6 +22,15 @@ defmodule SymphonyElixirWeb.StaticAssetController do
 
   @spec phoenix_live_view_js(Conn.t(), map()) :: Conn.t()
   def phoenix_live_view_js(conn, _params), do: serve(conn, "/vendor/phoenix_live_view/phoenix_live_view.js")
+
+  @spec cytoscape_js(Conn.t(), map()) :: Conn.t()
+  def cytoscape_js(conn, _params), do: serve(conn, "/vendor/cytoscape/cytoscape.min.js")
+
+  @spec dagre_js(Conn.t(), map()) :: Conn.t()
+  def dagre_js(conn, _params), do: serve(conn, "/vendor/dagre/dagre.min.js")
+
+  @spec cytoscape_dagre_js(Conn.t(), map()) :: Conn.t()
+  def cytoscape_dagre_js(conn, _params), do: serve(conn, "/vendor/cytoscape-dagre/cytoscape-dagre.js")
 
   defp serve(conn, path) do
     case StaticAssets.fetch(path) do

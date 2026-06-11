@@ -637,7 +637,12 @@ defmodule SymphonyElixir.ExtensionsTest do
              "agent_kind" => "codex",
              "linear_project" => "project",
              "hero_tint" => state_payload["hero_tint"],
-             "counts" => %{"running" => 1, "retrying" => 1, "blocked" => 1},
+             "counts" => %{
+               "running" => 1,
+               "retrying" => 1,
+               "blocked" => 1,
+               "dependency_blocked" => 1
+             },
              "running" => [
                %{
                  "issue_id" => "issue-http",
@@ -681,6 +686,55 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "last_event_at" => state_payload["blocked"] |> List.first() |> Map.fetch!("last_event_at")
                }
              ],
+             "dependency_blocked" => [
+               %{
+                 "issue_id" => "issue-dep",
+                 "issue_identifier" => "MT-DEP",
+                 "title" => "Waiting on the upstream migration",
+                 "state" => "Todo",
+                 "blocked_by" => [
+                   %{
+                     "issue_id" => "issue-upstream",
+                     "issue_identifier" => "MT-UP",
+                     "state" => "In Progress"
+                   }
+                 ],
+                 "observed_at" => state_payload["dependency_blocked"] |> List.first() |> Map.fetch!("observed_at")
+               }
+             ],
+             "dependency_graph" => %{
+               "nodes" => [
+                 %{
+                   "id" => "issue-dep",
+                   "issue_identifier" => "MT-DEP",
+                   "title" => "Waiting on the upstream migration",
+                   "state" => "Todo",
+                   "state_type" => "unstarted",
+                   "priority" => 3,
+                   "priority_label" => "Medium",
+                   "url" => "https://linear.app/example/MT-DEP",
+                   "placeholder" => false,
+                   "symphony_status" => "waiting_on_blockers",
+                   "symphony_status_label" => "Waiting on blockers"
+                 },
+                 %{
+                   "id" => "issue-upstream",
+                   "issue_identifier" => "MT-UP",
+                   "title" => "Upstream migration",
+                   "state" => "In Progress",
+                   "state_type" => "started",
+                   "priority" => 2,
+                   "priority_label" => "High",
+                   "url" => "https://linear.app/example/MT-UP",
+                   "placeholder" => false,
+                   "symphony_status" => nil,
+                   "symphony_status_label" => nil
+                 }
+               ],
+               "edges" => [
+                 %{"source" => "issue-upstream", "target" => "issue-dep"}
+               ]
+             },
              "codex_totals" => %{
                "input_tokens" => 4,
                "output_tokens" => 8,
@@ -924,9 +978,13 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     html = html_response(get(build_conn(), "/"), 200)
     assert html =~ "/dashboard.css"
+    assert html =~ "/dashboard.js"
     assert html =~ "/vendor/phoenix_html/phoenix_html.js"
     assert html =~ "/vendor/phoenix/phoenix.js"
     assert html =~ "/vendor/phoenix_live_view/phoenix_live_view.js"
+    assert html =~ "/vendor/cytoscape/cytoscape.min.js"
+    assert html =~ "/vendor/dagre/dagre.min.js"
+    assert html =~ "/vendor/cytoscape-dagre/cytoscape-dagre.js"
     refute html =~ "/assets/app.js"
     refute html =~ "<style>"
 
@@ -935,6 +993,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert dashboard_css =~ ".status-badge-live"
     assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-live"
     assert dashboard_css =~ "[data-phx-main].phx-connected .status-badge-offline"
+    assert dashboard_css =~ ".graph-canvas"
 
     phoenix_html_js = response(get(build_conn(), "/vendor/phoenix_html/phoenix_html.js"), 200)
     assert phoenix_html_js =~ "phoenix.link.click"
@@ -946,6 +1005,23 @@ defmodule SymphonyElixir.ExtensionsTest do
       response(get(build_conn(), "/vendor/phoenix_live_view/phoenix_live_view.js"), 200)
 
     assert live_view_js =~ "var LiveView = (() => {"
+
+    for path <- [
+          "/dashboard.js",
+          "/vendor/cytoscape/cytoscape.min.js",
+          "/vendor/dagre/dagre.min.js",
+          "/vendor/cytoscape-dagre/cytoscape-dagre.js"
+        ] do
+      conn = get(build_conn(), path)
+      assert conn.status == 200, "expected 200 for #{path}, got #{conn.status}"
+
+      assert conn |> Plug.Conn.get_resp_header("content-type") |> List.first() =~ "application/javascript",
+             "expected application/javascript content-type for #{path}"
+    end
+
+    dashboard_js = response(get(build_conn(), "/dashboard.js"), 200)
+    assert dashboard_js =~ "SymphonyHooks"
+    assert dashboard_js =~ "DependencyGraph"
   end
 
   test "dashboard liveview renders and refreshes over pubsub" do
@@ -980,6 +1056,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Offline"
     assert html =~ "Copy ID"
     assert html =~ "Agent update"
+    assert html =~ "Waiting on blockers"
+    assert html =~ "Dependency graph"
+    assert html =~ "MT-DEP"
     refute html =~ "data-runtime-clock="
     refute html =~ "setInterval(refreshRuntimeClocks"
     refute html =~ "Refresh now"
@@ -1073,7 +1152,13 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     response = Req.get!("http://127.0.0.1:#{port}/api/v1/state")
     assert response.status == 200
-    assert response.body["counts"] == %{"running" => 1, "retrying" => 1, "blocked" => 1}
+
+    assert response.body["counts"] == %{
+             "running" => 1,
+             "retrying" => 1,
+             "blocked" => 1,
+             "dependency_blocked" => 1
+           }
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")
     assert dashboard_css.status == 200
@@ -1116,6 +1201,8 @@ defmodule SymphonyElixir.ExtensionsTest do
   end
 
   defp static_snapshot do
+    observed_at = DateTime.utc_now()
+
     %{
       running: [
         %{
@@ -1160,6 +1247,48 @@ defmodule SymphonyElixir.ExtensionsTest do
             timestamp: DateTime.utc_now()
           },
           last_codex_timestamp: DateTime.utc_now()
+        }
+      ],
+      dependency_blocked: [
+        %{
+          issue_id: "issue-dep",
+          identifier: "MT-DEP",
+          title: "Waiting on the upstream migration",
+          state: "Todo",
+          blocked_by: [
+            %{id: "issue-upstream", identifier: "MT-UP", state: "In Progress"}
+          ],
+          observed_at: observed_at
+        }
+      ],
+      dependency_graph: [
+        %{
+          issue_id: "issue-dep",
+          id: "issue-dep",
+          identifier: "MT-DEP",
+          title: "Waiting on the upstream migration",
+          state: "Todo",
+          state_type: "unstarted",
+          priority: 3,
+          url: "https://linear.app/example/MT-DEP",
+          blocked_by: [
+            %{id: "issue-upstream", identifier: "MT-UP", state: "In Progress"}
+          ],
+          placeholder: false,
+          symphony_status: :waiting_on_blockers
+        },
+        %{
+          issue_id: "issue-upstream",
+          id: "issue-upstream",
+          identifier: "MT-UP",
+          title: "Upstream migration",
+          state: "In Progress",
+          state_type: "started",
+          priority: 2,
+          url: "https://linear.app/example/MT-UP",
+          blocked_by: [],
+          placeholder: false,
+          symphony_status: nil
         }
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},

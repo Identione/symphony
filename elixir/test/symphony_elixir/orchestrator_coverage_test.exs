@@ -1061,4 +1061,324 @@ defmodule SymphonyElixir.OrchestratorCoverageTest do
   end
 
   # ── todo_issue_blocked_by_non_terminal? with a non-list blocked_by ────────
+
+  # ── dependency_blocked + dependency_graph observability ───────────────────
+
+  test "dependency_blocked records Todo issues held back by a non-terminal blocker" do
+    use_memory_tracker()
+    pid = start_orchestrator(:DependencyBlockedTodo)
+
+    blocker_ref = %{id: "iss-blocker", identifier: "BLK-1", state: "In Progress"}
+    todo = issue("iss-todo-1", "TODO-1", state: "Todo", blocked_by: [blocker_ref])
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_candidate_issues_response,
+      {:ok, [todo]}
+    )
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_issue_states_by_ids_response,
+      {:ok, []}
+    )
+
+    send(pid, :run_poll_cycle)
+    state = wait_for_state(pid, fn s -> map_size(s.dependency_blocked) > 0 end, 2_000)
+
+    assert Map.has_key?(state.dependency_blocked, todo.id)
+    refute MapSet.member?(state.claimed, todo.id)
+    refute Map.has_key?(state.running, todo.id)
+
+    entry = state.dependency_blocked[todo.id]
+    assert entry.identifier == "TODO-1"
+    assert entry.title =~ "TODO-1"
+    assert entry.blocked_by == [blocker_ref]
+    assert %DateTime{} = entry.observed_at
+
+    snapshot = GenServer.call(pid, :snapshot)
+    assert [%{issue_id: "iss-todo-1", identifier: "TODO-1"}] = snapshot.dependency_blocked
+  end
+
+  test "dependency_blocked excludes Todo issues whose blocker is already terminal" do
+    use_memory_tracker()
+    pid = start_orchestrator(:DependencyTerminalBlocker)
+
+    blocker_ref = %{id: "iss-done", identifier: "DONE-1", state: "Done"}
+    todo = issue("iss-todo-ok", "TODO-OK", state: "Todo", blocked_by: [blocker_ref])
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_candidate_issues_response,
+      {:ok, [todo]}
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [todo])
+
+    send(pid, :run_poll_cycle)
+    state = wait_for_state(pid, fn s -> s.poll_check_in_progress == false end, 2_000)
+
+    assert state.dependency_blocked == %{}
+  end
+
+  test "dependency_blocked self-heals when an upstream blocker flips terminal between polls" do
+    use_memory_tracker()
+    pid = start_orchestrator(:DependencySelfHeal)
+
+    open_blocker = %{id: "iss-blk-flip", identifier: "BLK-FLIP", state: "In Progress"}
+    todo = issue("iss-todo-flip", "TODO-FLIP", state: "Todo", blocked_by: [open_blocker])
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_candidate_issues_response,
+      {:ok, [todo]}
+    )
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_issue_states_by_ids_response,
+      {:ok, []}
+    )
+
+    send(pid, :run_poll_cycle)
+    wait_for_state(pid, fn s -> Map.has_key?(s.dependency_blocked, todo.id) end, 2_000)
+
+    done_blocker = %{open_blocker | state: "Done"}
+    healed = %{todo | blocked_by: [done_blocker]}
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_candidate_issues_response,
+      {:ok, [healed]}
+    )
+
+    send(pid, :run_poll_cycle)
+    state = wait_for_state(pid, fn s -> s.dependency_blocked == %{} end, 2_000)
+    assert state.dependency_blocked == %{}
+  end
+
+  test "dependency_blocked never counts a non-Todo issue with an open blocker" do
+    use_memory_tracker()
+    pid = start_orchestrator(:DependencyNonTodo)
+
+    open_blocker = %{id: "iss-blk-ip", identifier: "BLK-IP", state: "In Progress"}
+    in_progress = issue("iss-ip-1", "IP-1", state: "In Progress", blocked_by: [open_blocker])
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_candidate_issues_response,
+      {:ok, [in_progress]}
+    )
+
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [in_progress])
+
+    send(pid, :run_poll_cycle)
+    state = wait_for_state(pid, fn s -> s.poll_check_in_progress == false end, 2_000)
+
+    assert state.dependency_blocked == %{}
+  end
+
+  test "dependency_blocked excludes issues already claimed or operator-blocked" do
+    use_memory_tracker()
+    pid = start_orchestrator(:DependencyAlreadyClaimed)
+
+    blocker_ref = %{id: "iss-blk-claimed", identifier: "BLK-CL", state: "In Progress"}
+    todo = issue("iss-todo-claim", "TODO-CLAIM", state: "Todo", blocked_by: [blocker_ref])
+
+    seed(pid, claimed: MapSet.new([todo.id]))
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_candidate_issues_response,
+      {:ok, [todo]}
+    )
+
+    send(pid, :run_poll_cycle)
+    state = wait_for_state(pid, fn s -> s.poll_check_in_progress == false end, 2_000)
+    assert state.dependency_blocked == %{}
+  end
+
+  test "dependency_blocked still refreshes when all dispatch slots are taken" do
+    use_memory_tracker(max_concurrent_agents: 1)
+    pid = start_orchestrator(:DependencyAtCap)
+
+    running = issue("iss-running-cap", "RUN-CAP", state: "In Progress")
+
+    seed(pid,
+      running: %{running.id => running_entry(running, ref: make_ref())},
+      claimed: MapSet.new([running.id])
+    )
+
+    blocker_ref = %{id: "iss-blk-cap", identifier: "BLK-CAP", state: "In Progress"}
+    todo = issue("iss-todo-cap", "TODO-CAP", state: "Todo", blocked_by: [blocker_ref])
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_candidate_issues_response,
+      {:ok, [todo]}
+    )
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_issue_states_by_ids_response,
+      {:ok, [running]}
+    )
+
+    send(pid, :run_poll_cycle)
+    state = wait_for_state(pid, fn s -> Map.has_key?(s.dependency_blocked, todo.id) end, 2_000)
+
+    assert Map.has_key?(state.dependency_blocked, todo.id)
+    assert map_size(state.running) == 1
+  end
+
+  test "dependency_blocked keeps last-known-good when the candidate fetch fails" do
+    use_memory_tracker()
+    pid = start_orchestrator(:DependencyLastKnownGood)
+
+    blocker_ref = %{id: "iss-blk-lg", identifier: "BLK-LG", state: "In Progress"}
+
+    seed(pid,
+      dependency_blocked: %{
+        "iss-todo-lg" => %{
+          identifier: "TODO-LG",
+          title: "stale entry",
+          state: "Todo",
+          blocked_by: [blocker_ref],
+          observed_at: DateTime.utc_now()
+        }
+      }
+    )
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_candidate_issues_response,
+      {:error, :rate_limited}
+    )
+
+    send(pid, :run_poll_cycle)
+    state = wait_for_state(pid, fn s -> s.poll_check_in_progress == false end, 2_000)
+    assert Map.has_key?(state.dependency_blocked, "iss-todo-lg")
+  end
+
+  test "dependency_blocked observed_at is stable across consecutive polls" do
+    use_memory_tracker()
+    pid = start_orchestrator(:DependencyStableObservedAt)
+
+    blocker_ref = %{id: "iss-blk-stable", identifier: "BLK-S", state: "In Progress"}
+    todo = issue("iss-todo-stable", "TODO-S", state: "Todo", blocked_by: [blocker_ref])
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_candidate_issues_response,
+      {:ok, [todo]}
+    )
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_issue_states_by_ids_response,
+      {:ok, []}
+    )
+
+    send(pid, :run_poll_cycle)
+    first = wait_for_state(pid, fn s -> Map.has_key?(s.dependency_blocked, todo.id) end, 2_000)
+    initial_observed_at = first.dependency_blocked[todo.id].observed_at
+
+    send(pid, :run_poll_cycle)
+    Process.sleep(20)
+    send(pid, :run_poll_cycle)
+    second = wait_for_state(pid, fn s -> s.poll_check_in_progress == false end, 2_000)
+
+    assert second.dependency_blocked[todo.id].observed_at == initial_observed_at
+  end
+
+  test "dependency_graph expands transitive blockers via fetch_issue_states_by_ids" do
+    use_memory_tracker()
+    pid = start_orchestrator(:DependencyGraphExpansion)
+
+    blocker_b_ref = %{id: "iss-b", identifier: "B-1", state: "In Progress"}
+    blocker_c_ref = %{id: "iss-c", identifier: "C-1", state: "Done"}
+    issue_a = issue("iss-a", "A-1", state: "Todo", blocked_by: [blocker_b_ref])
+    issue_b = issue("iss-b", "B-1", state: "In Progress", blocked_by: [blocker_c_ref])
+    issue_c = issue("iss-c", "C-1", state: "Done")
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_candidate_issues_response,
+      {:ok, [issue_a, issue_b]}
+    )
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_issue_states_by_ids_response,
+      {:ok, [issue_c]}
+    )
+
+    send(pid, :run_poll_cycle)
+    state = wait_for_state(pid, fn s -> Map.has_key?(s.dependency_graph, "iss-c") end, 2_000)
+
+    assert map_size(state.dependency_graph) == 3
+    assert state.dependency_graph["iss-a"].placeholder == false
+    assert state.dependency_graph["iss-b"].placeholder == false
+    assert state.dependency_graph["iss-c"].placeholder == false
+    assert state.dependency_graph["iss-c"].identifier == "C-1"
+  end
+
+  test "dependency_graph synthesizes a placeholder when expansion fetch errors" do
+    use_memory_tracker()
+    pid = start_orchestrator(:DependencyGraphFetchError)
+
+    blocker_b_ref = %{id: "iss-b-err", identifier: "B-ERR", state: "In Progress"}
+    blocker_c_ref = %{id: "iss-c-err", identifier: "C-ERR", state: "In Progress"}
+    issue_a = issue("iss-a-err", "A-ERR", state: "Todo", blocked_by: [blocker_b_ref])
+    issue_b = issue("iss-b-err", "B-ERR", state: "In Progress", blocked_by: [blocker_c_ref])
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_candidate_issues_response,
+      {:ok, [issue_a, issue_b]}
+    )
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_issue_states_by_ids_response,
+      {:error, :rate_limited}
+    )
+
+    send(pid, :run_poll_cycle)
+    state = wait_for_state(pid, fn s -> Map.has_key?(s.dependency_graph, "iss-c-err") end, 2_000)
+
+    placeholder = state.dependency_graph["iss-c-err"]
+    assert placeholder.placeholder == true
+    assert placeholder.identifier == "C-ERR"
+    assert placeholder.state == "In Progress"
+    assert placeholder.title == nil
+  end
+
+  test "dependency_graph expansion terminates on cycles" do
+    use_memory_tracker()
+    pid = start_orchestrator(:DependencyGraphCycle)
+
+    a_ref = %{id: "iss-cycle-a", identifier: "CYC-A", state: "Todo"}
+    b_ref = %{id: "iss-cycle-b", identifier: "CYC-B", state: "Todo"}
+    issue_a = issue("iss-cycle-a", "CYC-A", state: "Todo", blocked_by: [b_ref])
+    issue_b = issue("iss-cycle-b", "CYC-B", state: "Todo", blocked_by: [a_ref])
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_candidate_issues_response,
+      {:ok, [issue_a, issue_b]}
+    )
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_issue_states_by_ids_response,
+      {:ok, [issue_a, issue_b]}
+    )
+
+    send(pid, :run_poll_cycle)
+    state = wait_for_state(pid, fn s -> map_size(s.dependency_graph) >= 2 end, 2_000)
+
+    assert Map.has_key?(state.dependency_graph, "iss-cycle-a")
+    assert Map.has_key?(state.dependency_graph, "iss-cycle-b")
+  end
 end

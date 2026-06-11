@@ -16,9 +16,13 @@ defmodule SymphonyElixirWeb.Router do
 
   scope "/", SymphonyElixirWeb do
     get("/dashboard.css", StaticAssetController, :dashboard_css)
+    get("/dashboard.js", StaticAssetController, :dashboard_js)
     get("/vendor/phoenix_html/phoenix_html.js", StaticAssetController, :phoenix_html_js)
     get("/vendor/phoenix/phoenix.js", StaticAssetController, :phoenix_js)
     get("/vendor/phoenix_live_view/phoenix_live_view.js", StaticAssetController, :phoenix_live_view_js)
+    get("/vendor/cytoscape/cytoscape.min.js", StaticAssetController, :cytoscape_js)
+    get("/vendor/dagre/dagre.min.js", StaticAssetController, :dagre_js)
+    get("/vendor/cytoscape-dagre/cytoscape-dagre.js", StaticAssetController, :cytoscape_dagre_js)
   end
 
   scope "/", SymphonyElixirWeb do
