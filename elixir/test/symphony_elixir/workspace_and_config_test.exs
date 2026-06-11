@@ -388,6 +388,35 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert issue.state == "Todo"
     assert issue.assignee_id == "user-1"
     assert issue.assigned_to_worker
+    refute issue.has_children
+  end
+
+  test "linear client flags issues that have sub-issues as parents" do
+    raw_issue = %{
+      "id" => "parent-1",
+      "identifier" => "MT-100",
+      "title" => "Umbrella refactor",
+      "state" => %{"name" => "Todo"},
+      "children" => %{"nodes" => [%{"id" => "child-1"}]}
+    }
+
+    issue = Client.normalize_issue_for_test(raw_issue, "user-1")
+
+    assert issue.has_children
+  end
+
+  test "linear client treats issues without sub-issues as non-parents" do
+    raw_issue = %{
+      "id" => "leaf-1",
+      "identifier" => "MT-101",
+      "title" => "Leaf task",
+      "state" => %{"name" => "Todo"},
+      "children" => %{"nodes" => []}
+    }
+
+    issue = Client.normalize_issue_for_test(raw_issue, "user-1")
+
+    refute issue.has_children
   end
 
   test "linear client marks explicitly unassigned issues as not routed to worker" do
@@ -798,6 +827,26 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     refute Orchestrator.should_dispatch_issue_for_test(excluded, state)
     assert Orchestrator.should_dispatch_issue_for_test(clean, state)
+  end
+
+  test "parent issue with sub-issues is not dispatch-eligible" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "parent-1000",
+      identifier: "MT-1010",
+      title: "Umbrella tracker",
+      state: "Todo",
+      has_children: true
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
   end
 
   test "todo issue with terminal blockers remains dispatch-eligible" do

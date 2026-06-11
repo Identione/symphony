@@ -31,6 +31,11 @@ defmodule SymphonyElixir.Linear.Client do
             name
           }
         }
+        children(first: 1) {
+          nodes {
+            id
+          }
+        }
         inverseRelations(first: $relationFirst) {
           nodes {
             type
@@ -74,6 +79,11 @@ defmodule SymphonyElixir.Linear.Client do
         labels {
           nodes {
             name
+          }
+        }
+        children(first: 1) {
+          nodes {
+            id
           }
         }
         inverseRelations(first: $relationFirst) {
@@ -476,6 +486,7 @@ defmodule SymphonyElixir.Linear.Client do
       blocked_by: extract_blockers(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
+      has_children: extract_has_children(issue),
       created_at: parse_datetime(issue["createdAt"]),
       updated_at: parse_datetime(issue["updatedAt"])
     }
@@ -586,6 +597,9 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp extract_blockers(_), do: []
+
+  defp extract_has_children(%{"children" => %{"nodes" => nodes}}) when is_list(nodes), do: nodes != []
+  defp extract_has_children(_), do: false
 
   defp parse_datetime(nil), do: nil
 

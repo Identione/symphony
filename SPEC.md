@@ -174,6 +174,9 @@ Fields:
     - `id` (string or null)
     - `identifier` (string or null)
     - `state` (string or null)
+- `has_children` (boolean)
+  - True when the issue has sub-issues (children). Parent/umbrella issues are
+    excluded from candidate selection (see §8.2).
 - `created_at` (timestamp or null)
 - `updated_at` (timestamp or null)
 
@@ -893,6 +896,11 @@ An issue is dispatch-eligible only if all are true:
 - Its state is in `active_states` and not in `terminal_states`.
 - If `required_labels` is non-empty, it carries *all* of those labels (case-insensitive).
 - If `excluded_labels` is non-empty, it carries *none* of those labels (case-insensitive).
+- It is not a parent/umbrella issue:
+  - An issue that has sub-issues (children) is a tracker, not a work unit — its
+    work lives in the children. Parent issues are never dispatch-eligible,
+    regardless of state, so the agent cannot re-implement a sub-issue's scope and
+    collide with the sub-issue's own PR.
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.
@@ -1539,6 +1547,7 @@ Additional normalization details:
 
 - `labels` -> lowercase strings
 - `blocked_by` -> derived from inverse relations where relation type is `blocks`
+- `has_children` -> true when the issue's `children` connection has at least one node
 - `priority` -> integer only (non-integers become null)
 - `created_at` and `updated_at` -> parse ISO-8601 timestamps
 
