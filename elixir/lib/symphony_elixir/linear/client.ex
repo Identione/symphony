@@ -197,7 +197,7 @@ defmodule SymphonyElixir.Linear.Client do
       {:ok, response} ->
         body = Map.get(response, :body)
 
-        case RateLimit.maybe_record_response(body) do
+        case RateLimit.maybe_record_response(response.status, body) do
           :rate_limited ->
             {:error, :rate_limited}
 

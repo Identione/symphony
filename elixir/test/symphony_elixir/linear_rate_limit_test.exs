@@ -111,6 +111,102 @@ defmodule SymphonyElixir.LinearRateLimitTest do
     end)
   end
 
+  test "record_rate_limited never shortens an already-longer back-off" do
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert RateLimit.record_rate_limited(3_600_000) == 3_600_000
+      # A subsequent shorter arm (e.g. a bare 429 with no body duration) must
+      # not stomp the longer active window down to 60s.
+      assert RateLimit.record_rate_limited(60_000) == 3_600_000
+    end)
+
+    retry_after = RateLimit.retry_after_ms()
+    assert is_integer(retry_after) and retry_after > 1_000_000 and retry_after <= 3_600_000
+  end
+
+  test "maybe_record_response/2 on a bare 429 does not shorten an existing longer window" do
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert RateLimit.record_rate_limited(3_600_000) == 3_600_000
+      assert RateLimit.maybe_record_response(429, "Too Many Requests") == :rate_limited
+    end)
+
+    retry_after = RateLimit.retry_after_ms()
+    assert is_integer(retry_after) and retry_after > 1_000_000 and retry_after <= 3_600_000
+  end
+
+  test "record_rate_limited still extends the window when the new back-off is longer" do
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert RateLimit.record_rate_limited(1_000) == 1_000
+      assert RateLimit.record_rate_limited(3_600_000) == 3_600_000
+    end)
+
+    assert RateLimit.retry_after_ms() > 1_000_000
+  end
+
+  test "rate_limited_body? does not flag an unrelated body mentioning 'rate limit'" do
+    refute RateLimit.rate_limited_body?("GraphQL validation failed: rate limit must be an integer")
+    refute RateLimit.rate_limited_body?(%{"errors" => [%{"message" => "rate limit must be an integer"}]})
+  end
+
+  test "rate_limited_status? is true only for 429" do
+    assert RateLimit.rate_limited_status?(429)
+    refute RateLimit.rate_limited_status?(400)
+    refute RateLimit.rate_limited_status?(200)
+  end
+
+  test "maybe_record_response/2 arms the breaker on a 429 regardless of body shape" do
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert RateLimit.maybe_record_response(429, %{"unexpected" => "shape"}) == :rate_limited
+    end)
+
+    refute RateLimit.allowed?()
+  end
+
+  test "maybe_record_response/2 leaves the breaker closed for a 400 with an ordinary body" do
+    assert RateLimit.maybe_record_response(400, %{
+             "errors" => [%{"extensions" => %{"code" => "BAD_USER_INPUT"}}]
+           }) == :ok
+
+    assert RateLimit.allowed?()
+  end
+
+  test "maybe_record_response/2 mines the body duration even when armed by status" do
+    body = %{
+      "errors" => [
+        %{"extensions" => %{"code" => "RATELIMITED", "meta" => %{"rateLimitResult" => %{"duration" => 3_600_000}}}}
+      ]
+    }
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert RateLimit.maybe_record_response(429, body) == :rate_limited
+    end)
+
+    retry_after = RateLimit.retry_after_ms()
+    assert is_integer(retry_after) and retry_after > 1_000_000 and retry_after <= 3_600_000
+  end
+
+  test "rate_limited_body? detects RATELIMITED in an undecoded string body" do
+    assert RateLimit.rate_limited_body?(~s({"errors":[{"extensions":{"code":"RATELIMITED"}}]}))
+  end
+
+  test "rate_limited_body? detects a plain-text rate limit page" do
+    assert RateLimit.rate_limited_body?("429 Too Many Requests - rate limit exceeded")
+  end
+
+  test "rate_limited_body? returns false for an unrelated string body" do
+    refute RateLimit.rate_limited_body?("Internal Server Error")
+  end
+
+  test "maybe_record_response on a string RATELIMITED body falls back to the default throttle" do
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert RateLimit.maybe_record_response(~s({"errors":[{"extensions":{"code":"RATELIMITED"}}]})) ==
+               :rate_limited
+    end)
+
+    refute RateLimit.allowed?()
+    retry_after = RateLimit.retry_after_ms()
+    assert is_integer(retry_after) and retry_after > 0 and retry_after <= 60_000
+  end
+
   test "start_link/0 resolves to the already-running supervised instance" do
     assert {:error, {:already_started, pid}} = RateLimit.start_link()
     assert is_pid(pid)

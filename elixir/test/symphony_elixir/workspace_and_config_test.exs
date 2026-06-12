@@ -647,6 +647,54 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute RateLimit.allowed?()
   end
 
+  test "linear client arms the breaker on a bare 429 with no RATELIMITED envelope" do
+    RateLimit.clear()
+    on_exit(fn -> RateLimit.clear() end)
+
+    ExUnit.CaptureLog.capture_log(fn ->
+      assert {:error, :rate_limited} =
+               Client.graphql(
+                 "query Viewer { viewer { id } }",
+                 %{},
+                 request_fun: fn _payload, _headers ->
+                   {:ok, %{status: 429, body: "Too Many Requests"}}
+                 end
+               )
+    end)
+
+    refute RateLimit.allowed?()
+  end
+
+  test "rate-limited 400 logs the breaker-armed warning and not the generic request-failed error" do
+    RateLimit.clear()
+    on_exit(fn -> RateLimit.clear() end)
+
+    body = %{
+      "errors" => [
+        %{
+          "message" => "Rate limit exceeded.",
+          "extensions" => %{
+            "code" => "RATELIMITED",
+            "meta" => %{"rateLimitResult" => %{"remaining" => 0, "duration" => 3_600_000}}
+          }
+        }
+      ]
+    }
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, :rate_limited} =
+                 Client.graphql(
+                   "query Viewer { viewer { id } }",
+                   %{},
+                   request_fun: fn _payload, _headers -> {:ok, %{status: 400, body: body}} end
+                 )
+      end)
+
+    assert log =~ "Linear API RATELIMITED"
+    refute log =~ "Linear GraphQL request failed status="
+  end
+
   test "linear client successful response does not trip the rate-limit gate" do
     RateLimit.clear()
     on_exit(fn -> RateLimit.clear() end)
