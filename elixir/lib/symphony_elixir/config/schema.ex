@@ -159,10 +159,61 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Quota do
+    @moduledoc """
+    Per-provider account-quota tracking config, shared by `agent.codex.quota`
+    and `agent.claude.quota`.
+
+    `enabled`/`stale_after_ms`/`dispatch_pause_percent` apply to both providers.
+    The remaining fields (`endpoint`, `anthropic_beta`, `refresh_ms`,
+    `token_source`) drive the Claude OAuth usage poller only — Codex quota is
+    derived from the app-server rate-limit stream, so those fields are ignored
+    for `agent.codex.quota`.
+    """
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    @primary_key false
+    embedded_schema do
+      field(:enabled, :boolean, default: false)
+      field(:endpoint, :string, default: "https://api.anthropic.com/api/oauth/usage")
+      field(:anthropic_beta, :string, default: "oauth-2025-04-20")
+      field(:refresh_ms, :integer, default: 60_000)
+      field(:stale_after_ms, :integer, default: 180_000)
+      field(:dispatch_pause_percent, :float, default: 95.0)
+      field(:token_source, :string, default: "credentials_file")
+    end
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :enabled,
+          :endpoint,
+          :anthropic_beta,
+          :refresh_ms,
+          :stale_after_ms,
+          :dispatch_pause_percent,
+          :token_source
+        ],
+        empty_values: []
+      )
+      |> validate_required([:endpoint, :anthropic_beta, :token_source])
+      |> validate_number(:refresh_ms, greater_than: 0)
+      |> validate_number(:stale_after_ms, greater_than: 0)
+      |> validate_number(:dispatch_pause_percent, greater_than_or_equal_to: 0, less_than_or_equal_to: 100)
+      |> validate_inclusion(:token_source, ["credentials_file"])
+    end
+  end
+
   defmodule Codex do
     @moduledoc false
     use Ecto.Schema
     import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema.Quota
 
     @primary_key false
     embedded_schema do
@@ -184,6 +235,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       field(:read_timeout_ms, :integer, default: 5_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
+      embeds_one(:quota, Quota, on_replace: :update, defaults_to_struct: true)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
@@ -203,6 +255,7 @@ defmodule SymphonyElixir.Config.Schema do
         ],
         empty_values: []
       )
+      |> cast_embed(:quota, with: &Quota.changeset/2)
       |> validate_required([:command])
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
@@ -214,6 +267,8 @@ defmodule SymphonyElixir.Config.Schema do
     @moduledoc false
     use Ecto.Schema
     import Ecto.Changeset
+
+    alias SymphonyElixir.Config.Schema.Quota
 
     @permission_modes ~w(default acceptEdits plan dontAsk bypassPermissions)
     @system_prompt_presets ~w(claude_code minimal)
@@ -269,6 +324,7 @@ defmodule SymphonyElixir.Config.Schema do
       # Off by default — these streams together flood symphony.log and
       # drown out per-issue orchestration output during normal runs.
       field(:verbose_logging, :boolean, default: false)
+      embeds_one(:quota, Quota, on_replace: :update, defaults_to_struct: true)
     end
 
     @spec permission_modes() :: [String.t()]
@@ -305,6 +361,7 @@ defmodule SymphonyElixir.Config.Schema do
         ],
         empty_values: []
       )
+      |> cast_embed(:quota, with: &Quota.changeset/2)
       |> validate_required([:command])
       |> validate_inclusion(:permission_mode, @permission_modes)
       |> validate_inclusion(:system_prompt_preset, @system_prompt_presets)

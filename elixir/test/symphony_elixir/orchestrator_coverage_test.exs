@@ -30,6 +30,7 @@ defmodule SymphonyElixir.OrchestratorCoverageTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.Linear.Issue
+  alias SymphonyElixir.{Orchestrator, ProviderQuota}
 
   # ── helpers ───────────────────────────────────────────────────────────────
 
@@ -118,6 +119,115 @@ defmodule SymphonyElixir.OrchestratorCoverageTest do
   defp wait_for_state(pid, predicate, timeout_ms \\ 1_000) do
     deadline = System.monotonic_time(:millisecond) + timeout_ms
     do_wait_for_state(pid, predicate, deadline)
+  end
+
+  # ── provider quota dispatch gate ──────────────────────────────────────────
+
+  test "fresh exhausted Codex quota prevents new dispatch" do
+    use_memory_tracker(codex_quota: %{enabled: true})
+
+    now_ms = System.monotonic_time(:millisecond)
+
+    quota =
+      ProviderQuota.normalize_codex(
+        %{"limit_id" => "codex", "primary" => %{"usedPercent" => 96.0}},
+        now_ms: now_ms
+      )
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      max_concurrent_agents: 10,
+      provider_quotas: %{codex: quota, claude: nil}
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue("iss-quota", "QUOTA-1"), state)
+  end
+
+  test "exhausted quota does not gate dispatch when pausing is disabled (the default)" do
+    use_memory_tracker()
+
+    quota =
+      ProviderQuota.normalize_codex(
+        %{"limit_id" => "codex", "primary" => %{"usedPercent" => 99.0}},
+        now_ms: System.monotonic_time(:millisecond)
+      )
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      max_concurrent_agents: 10,
+      provider_quotas: %{codex: quota, claude: nil}
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue("iss-quota-off", "QUOTA-OFF"), state)
+  end
+
+  test "stale exhausted Codex quota does not prevent new dispatch" do
+    use_memory_tracker(codex_quota: %{enabled: true})
+
+    quota =
+      ProviderQuota.normalize_codex(
+        %{"limit_id" => "codex", "primary" => %{"usedPercent" => 100.0}},
+        now_ms: System.monotonic_time(:millisecond) - 1_000,
+        stale_after_ms: 10
+      )
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      max_concurrent_agents: 10,
+      provider_quotas: %{codex: quota, claude: nil}
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue("iss-quota-stale", "QUOTA-2"), state)
+  end
+
+  test "Claude quota only gates when Claude is the active provider" do
+    use_memory_tracker(agent_kind: "claude", claude_quota: %{enabled: true})
+
+    quota =
+      ProviderQuota.normalize_claude(
+        %{"five_hour" => %{"utilization" => 96.0}},
+        now_ms: System.monotonic_time(:millisecond)
+      )
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      max_concurrent_agents: 10,
+      provider_quotas: %{codex: nil, claude: quota}
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue("iss-claude-quota", "CQUOTA-1"), state)
+  end
+
+  test "Codex dispatch honors a configured codex.quota.dispatch_pause_percent threshold" do
+    use_memory_tracker(codex_quota: %{enabled: true, dispatch_pause_percent: 80})
+
+    now_ms = System.monotonic_time(:millisecond)
+
+    # 85% is over the configured 80% threshold but under the 95% default — it
+    # must gate only because the configured threshold was read.
+    quota =
+      ProviderQuota.normalize_codex(
+        %{"limit_id" => "codex", "primary" => %{"usedPercent" => 85.0}},
+        now_ms: now_ms
+      )
+
+    state = %Orchestrator.State{
+      running: %{},
+      claimed: MapSet.new(),
+      blocked: %{},
+      max_concurrent_agents: 10,
+      provider_quotas: %{codex: quota, claude: nil}
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue("iss-codex-cfg", "CFG-1"), state)
   end
 
   defp do_wait_for_state(pid, predicate, deadline) do
@@ -435,7 +545,7 @@ defmodule SymphonyElixir.OrchestratorCoverageTest do
   test "request_refresh on a live server queues a poll and coalesces when already in progress" do
     use_memory_tracker()
     name = Module.concat(__MODULE__, :RefreshLive)
-    {:ok, pid} = Orchestrator.start_link(name: name)
+    {:ok, pid} = Orchestrator.start_link(name: name, poll_on_start: false)
     on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
 
     # Force a not-in-progress, not-due state so the first refresh schedules a tick.
@@ -567,8 +677,12 @@ defmodule SymphonyElixir.OrchestratorCoverageTest do
        }}
     )
 
-    state = wait_for_state(pid, fn s -> s.codex_rate_limits == rate_limits end)
-    assert state.codex_rate_limits == rate_limits
+    state =
+      wait_for_state(pid, fn s ->
+        get_in(s.provider_quotas, [:codex, :raw]) == rate_limits
+      end)
+
+    assert get_in(state.provider_quotas, [:codex, :raw]) == rate_limits
   end
 
   # ── find_issue_by_id miss via retry path that finds the wrong issues ───────

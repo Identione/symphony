@@ -7,6 +7,74 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Linear.Pagination
   alias SymphonyElixir.Linear.RateLimit
 
+  test "claude quota config defaults to disabled and validates opt-in values" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "tracker" => %{"kind" => "memory"},
+               "agent" => %{
+                 "kind" => "claude",
+                 "claude" => %{
+                   "quota" => %{
+                     "enabled" => true,
+                     "refresh_ms" => 15_000,
+                     "stale_after_ms" => 45_000,
+                     "dispatch_pause_percent" => 90
+                   }
+                 }
+               }
+             })
+
+    assert settings.agent.claude.quota.enabled == true
+    assert settings.agent.claude.quota.refresh_ms == 15_000
+    assert settings.agent.claude.quota.stale_after_ms == 45_000
+    assert settings.agent.claude.quota.dispatch_pause_percent == 90.0
+    assert settings.agent.claude.quota.token_source == "credentials_file"
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "agent" => %{
+                 "claude" => %{
+                   "quota" => %{"dispatch_pause_percent" => 101}
+                 }
+               }
+             })
+
+    assert message =~ "agent.claude.quota.dispatch_pause_percent"
+  end
+
+  test "codex quota config defaults to disabled and mirrors onto agent.codex" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "tracker" => %{"kind" => "memory"},
+               "codex" => %{
+                 "quota" => %{
+                   "enabled" => true,
+                   "stale_after_ms" => 30_000,
+                   "dispatch_pause_percent" => 80
+                 }
+               }
+             })
+
+    # Canonical top-level codex block carries the quota...
+    assert settings.codex.quota.enabled == true
+    assert settings.codex.quota.stale_after_ms == 30_000
+    assert settings.codex.quota.dispatch_pause_percent == 80.0
+    # ...and the legacy alias keeps agent.codex in sync.
+    assert settings.agent.codex.quota.dispatch_pause_percent == 80.0
+
+    # Default (unset) quota is a disabled struct, not nil.
+    assert {:ok, defaults} = Schema.parse(%{"tracker" => %{"kind" => "memory"}})
+    assert defaults.codex.quota.enabled == false
+    assert defaults.codex.quota.dispatch_pause_percent == 95.0
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{
+               "codex" => %{"quota" => %{"dispatch_pause_percent" => -1}}
+             })
+
+    assert message =~ "codex.quota.dispatch_pause_percent"
+  end
+
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
       Path.join(
