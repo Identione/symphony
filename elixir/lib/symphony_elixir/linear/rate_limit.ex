@@ -77,7 +77,34 @@ defmodule SymphonyElixir.Linear.RateLimit do
       when is_integer(remaining) and remaining <= 0,
       do: true
 
+  # Defense against a proxy/CDN returning an undecoded JSON string or a plain
+  # text throttle page (content-type Req leaves as a binary). Linear itself
+  # always returns a decoded map, so this clause never fires for Linear proper.
+  #
+  # Match only the exact `RATELIMITED` code or narrow throttle-page wording.
+  # A loose "rate limit" substring would mis-flag ordinary error text such as
+  # "rate limit must be an integer" and needlessly pause all Linear traffic.
+  def rate_limited_body?(body) when is_binary(body) do
+    down = String.downcase(body)
+
+    String.contains?(down, "ratelimited") or
+      String.contains?(down, "rate limit exceeded") or
+      String.contains?(down, "too many requests") or
+      String.contains?(down, "429")
+  end
+
   def rate_limited_body?(_body), do: false
+
+  @doc """
+  Returns `true` when the HTTP status code itself signals rate limiting.
+
+  Restricted to `429` so the breaker does not arm on unrelated `400`/`5xx`
+  responses; Linear's `400`-envelope carrying a `RATELIMITED` code is already
+  caught by `rate_limited_body?/1`.
+  """
+  @spec rate_limited_status?(term()) :: boolean()
+  def rate_limited_status?(429), do: true
+  def rate_limited_status?(_status), do: false
 
   @doc """
   Inspect a Linear response body and record a back-off if it carries a
@@ -95,6 +122,23 @@ defmodule SymphonyElixir.Linear.RateLimit do
   end
 
   @doc """
+  Like `maybe_record_response/1` but also arms the back-off when the HTTP
+  status code alone signals rate limiting (a bare `429` whose body shape we
+  cannot rely on). The body is still passed to `record_rate_limited/1` so the
+  real `meta.rateLimitResult.duration` is used when present, falling back to
+  the default throttle otherwise.
+  """
+  @spec maybe_record_response(term(), term()) :: :rate_limited | :ok
+  def maybe_record_response(status, body) do
+    if rate_limited_status?(status) or rate_limited_body?(body) do
+      record_rate_limited(body)
+      :rate_limited
+    else
+      :ok
+    end
+  end
+
+  @doc """
   Record a rate-limit back-off. Accepts the parsed response body (in
   which case `meta.rateLimitResult.duration` is consulted), a raw
   duration in milliseconds, or `nil` to fall back to the default
@@ -102,13 +146,19 @@ defmodule SymphonyElixir.Linear.RateLimit do
   """
   @spec record_rate_limited(map() | non_neg_integer() | nil) :: non_neg_integer()
   def record_rate_limited(input) do
-    duration_ms = extract_duration_ms(input) || @default_throttle_ms
-    reset_at_ms = System.monotonic_time(:millisecond) + duration_ms
+    now = System.monotonic_time(:millisecond)
+    candidate_reset_at_ms = now + (extract_duration_ms(input) || @default_throttle_ms)
+
+    # Never shorten an already-longer back-off: a bare 429 (60s fallback)
+    # arriving after a one-hour window must not stomp the longer deadline.
+    # Keep the later of the two and report the effective remaining duration.
+    reset_at_ms = max(candidate_reset_at_ms, lookup_reset_at_ms() || now)
     :ets.insert(@table, {@reset_key, reset_at_ms})
 
-    Logger.warning("Linear API RATELIMITED; pausing Linear GraphQL traffic for #{duration_ms}ms")
+    effective_ms = reset_at_ms - now
+    Logger.warning("Linear API RATELIMITED; pausing Linear GraphQL traffic for #{effective_ms}ms")
 
-    duration_ms
+    effective_ms
   end
 
   @doc """
