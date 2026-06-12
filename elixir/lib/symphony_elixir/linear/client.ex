@@ -43,6 +43,22 @@ defmodule SymphonyElixir.Linear.Client do
             }
           }
         }
+        parent {
+          id
+          identifier
+          state {
+            name
+          }
+        }
+        children(first: $relationFirst) {
+          nodes {
+            id
+            identifier
+            state {
+              name
+            }
+          }
+        }
         createdAt
         updatedAt
       }
@@ -85,6 +101,22 @@ defmodule SymphonyElixir.Linear.Client do
               state {
                 name
               }
+            }
+          }
+        }
+        parent {
+          id
+          identifier
+          state {
+            name
+          }
+        }
+        children(first: $relationFirst) {
+          nodes {
+            id
+            identifier
+            state {
+              name
             }
           }
         }
@@ -474,6 +506,8 @@ defmodule SymphonyElixir.Linear.Client do
       url: issue["url"],
       assignee_id: assignee_field(assignee, "id"),
       blocked_by: extract_blockers(issue),
+      children: extract_children(issue),
+      parent: extract_parent(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
       created_at: parse_datetime(issue["createdAt"]),
@@ -586,6 +620,37 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp extract_blockers(_), do: []
+
+  defp extract_children(%{"children" => %{"nodes" => nodes}}) when is_list(nodes) do
+    Enum.flat_map(nodes, fn
+      %{"id" => _} = child ->
+        [
+          %{
+            id: child["id"],
+            identifier: child["identifier"],
+            state: get_in(child, ["state", "name"])
+          }
+        ]
+
+      _ ->
+        []
+    end)
+  end
+
+  defp extract_children(_), do: []
+
+  # Linear's parent/sub-issue hierarchy is exposed via the first-class `parent`/`children`
+  # fields, distinct from `inverseRelations` (which carry `blocks`/`relatesTo`/`duplicate`).
+  # `parent` is null in the response when the issue has no parent.
+  defp extract_parent(%{"parent" => parent}) when is_map(parent) do
+    %{
+      id: parent["id"],
+      identifier: parent["identifier"],
+      state: get_in(parent, ["state", "name"])
+    }
+  end
+
+  defp extract_parent(_), do: nil
 
   defp parse_datetime(nil), do: nil
 

@@ -14,11 +14,23 @@ defmodule SymphonyElixir.Linear.Issue do
     :url,
     :assignee_id,
     blocked_by: [],
+    children: [],
+    parent: nil,
     labels: [],
     assigned_to_worker: true,
     created_at: nil,
     updated_at: nil
   ]
+
+  @typedoc """
+  A lightweight reference to a related issue (blocker, sub-issue, or parent),
+  carrying just enough to evaluate dispatch eligibility.
+  """
+  @type issue_ref :: %{
+          id: String.t() | nil,
+          identifier: String.t() | nil,
+          state: String.t() | nil
+        }
 
   @type t :: %__MODULE__{
           id: String.t() | nil,
@@ -30,6 +42,9 @@ defmodule SymphonyElixir.Linear.Issue do
           branch_name: String.t() | nil,
           url: String.t() | nil,
           assignee_id: String.t() | nil,
+          blocked_by: [issue_ref()],
+          children: [issue_ref()],
+          parent: issue_ref() | nil,
           labels: [String.t()],
           assigned_to_worker: boolean(),
           created_at: DateTime.t() | nil,

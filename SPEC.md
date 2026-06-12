@@ -174,6 +174,16 @@ Fields:
     - `id` (string or null)
     - `identifier` (string or null)
     - `state` (string or null)
+- `children` (list of sub-issue refs)
+  - Derived from the issue's first-class `children` connection (the parent/sub-issue
+    hierarchy), not from issue relations.
+  - Each child ref contains:
+    - `id` (string or null)
+    - `identifier` (string or null)
+    - `state` (string or null)
+- `parent` (parent ref or null)
+  - Derived from the issue's first-class `parent` field; null when the issue has no parent.
+  - When present, contains `id`, `identifier`, and `state` (each string or null).
 - `created_at` (timestamp or null)
 - `updated_at` (timestamp or null)
 
@@ -899,6 +909,11 @@ An issue is dispatch-eligible only if all are true:
 - Per-state concurrency slots are available.
 - Blocker rule for `Todo` state passes:
   - If the issue state is `Todo`, do not dispatch when any blocker is non-terminal.
+- Sub-issue (parent) rule passes:
+  - Do not dispatch when the issue has any sub-issue (`children` entry) in a non-terminal
+    state. Unlike the blocker rule, this applies regardless of the issue's own state — a
+    parent is a container, not a unit of work, and is left alone until all its sub-issues
+    reach a terminal state.
 
 Sorting order (stable intent):
 
@@ -1539,6 +1554,9 @@ Additional normalization details:
 
 - `labels` -> lowercase strings
 - `blocked_by` -> derived from inverse relations where relation type is `blocks`
+- `children` -> derived from the issue's `children` connection (parent/sub-issue hierarchy),
+  not from issue relations
+- `parent` -> derived from the issue's `parent` field; null when absent
 - `priority` -> integer only (non-integers become null)
 - `created_at` and `updated_at` -> parse ISO-8601 timestamps
 
@@ -2385,6 +2403,8 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - Dispatch sort order is priority then oldest creation time
 - `Todo` issue with non-terminal blockers is not eligible
 - `Todo` issue with terminal blockers is eligible
+- Issue with a non-terminal sub-issue (child) is not eligible, regardless of its own state
+- Issue whose sub-issues are all terminal is eligible
 - Active-state issue refresh updates running entry state
 - Non-active state stops running agent without workspace cleanup
 - Terminal state stops running agent and cleans workspace

@@ -376,6 +376,20 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
           }
         ]
       },
+      "parent" => %{
+        "id" => "issue-0",
+        "identifier" => "MT-0",
+        "state" => %{"name" => "In Progress"}
+      },
+      "children" => %{
+        "nodes" => [
+          %{
+            "id" => "issue-4",
+            "identifier" => "MT-4",
+            "state" => %{"name" => "Todo"}
+          }
+        ]
+      },
       "createdAt" => "2026-01-01T00:00:00Z",
       "updatedAt" => "2026-01-02T00:00:00Z"
     }
@@ -383,11 +397,36 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     issue = Client.normalize_issue_for_test(raw_issue, "user-1")
 
     assert issue.blocked_by == [%{id: "issue-2", identifier: "MT-2", state: "In Progress"}]
+    assert issue.children == [%{id: "issue-4", identifier: "MT-4", state: "Todo"}]
+    assert issue.parent == %{id: "issue-0", identifier: "MT-0", state: "In Progress"}
     assert issue.labels == ["backend"]
     assert issue.priority == 2
     assert issue.state == "Todo"
     assert issue.assignee_id == "user-1"
     assert issue.assigned_to_worker
+  end
+
+  test "linear client defaults children to empty and parent to nil when absent" do
+    raw_issue = %{
+      "id" => "issue-1",
+      "identifier" => "MT-1",
+      "title" => "Leaf issue",
+      "description" => "No hierarchy",
+      "priority" => 2,
+      "state" => %{"name" => "Todo"},
+      "branchName" => "mt-1",
+      "url" => "https://example.org/issues/MT-1",
+      "assignee" => %{"id" => "user-1"},
+      "labels" => %{"nodes" => []},
+      "parent" => nil,
+      "createdAt" => "2026-01-01T00:00:00Z",
+      "updatedAt" => "2026-01-02T00:00:00Z"
+    }
+
+    issue = Client.normalize_issue_for_test(raw_issue, "user-1")
+
+    assert issue.children == []
+    assert issue.parent == nil
   end
 
   test "linear client marks explicitly unassigned issues as not routed to worker" do
@@ -844,6 +883,98 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert skipped_issue.identifier == "MT-1005"
     assert skipped_issue.blocked_by == [%{id: "blocker-3", identifier: "MT-1006", state: "In Progress"}]
+  end
+
+  test "issue with non-terminal sub-issue is not dispatch-eligible" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "parent-1",
+      identifier: "MT-2001",
+      title: "Parent with open child",
+      state: "Todo",
+      children: [%{id: "child-1", identifier: "MT-2002", state: "In Progress"}]
+    }
+
+    refute Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "issue whose sub-issues are all terminal remains dispatch-eligible" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    issue = %Issue{
+      id: "parent-2",
+      identifier: "MT-2003",
+      title: "Parent with finished children",
+      state: "Todo",
+      children: [%{id: "child-2", identifier: "MT-2004", state: "Done"}]
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(issue, state)
+  end
+
+  test "open sub-issue blocks dispatch regardless of the parent's own state" do
+    state = %Orchestrator.State{
+      max_concurrent_agents: 3,
+      running: %{},
+      claimed: MapSet.new(),
+      codex_totals: %{input_tokens: 0, output_tokens: 0, total_tokens: 0, seconds_running: 0},
+      retry_attempts: %{}
+    }
+
+    # The parent is in an active (non-Todo) state, so the gate is not the blocker rule
+    # (which only fires for Todo) — it is purely the open sub-issue.
+    base = %Issue{
+      id: "parent-3",
+      identifier: "MT-2005",
+      title: "Active parent",
+      state: "In Progress"
+    }
+
+    assert Orchestrator.should_dispatch_issue_for_test(base, state)
+
+    refute Orchestrator.should_dispatch_issue_for_test(
+             %Issue{base | children: [%{id: "child-3", identifier: "MT-2006", state: "Todo"}]},
+             state
+           )
+  end
+
+  test "dispatch revalidation skips stale issue once a non-terminal sub-issue appears" do
+    stale_issue = %Issue{
+      id: "parent-4",
+      identifier: "MT-2007",
+      title: "Stale parent",
+      state: "Todo",
+      children: []
+    }
+
+    refreshed_issue = %Issue{
+      id: "parent-4",
+      identifier: "MT-2007",
+      title: "Stale parent",
+      state: "Todo",
+      children: [%{id: "child-4", identifier: "MT-2008", state: "In Progress"}]
+    }
+
+    fetcher = fn ["parent-4"] -> {:ok, [refreshed_issue]} end
+
+    assert {:skip, %Issue{} = skipped_issue} =
+             Orchestrator.revalidate_issue_for_dispatch_for_test(stale_issue, fetcher)
+
+    assert skipped_issue.identifier == "MT-2007"
+    assert skipped_issue.children == [%{id: "child-4", identifier: "MT-2008", state: "In Progress"}]
   end
 
   test "dispatch revalidation surfaces rate_limited errors without classifying as skip" do

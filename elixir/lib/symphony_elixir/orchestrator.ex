@@ -1108,7 +1108,7 @@ defmodule SymphonyElixir.Orchestrator do
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
+      !issue_dependencies_block_dispatch?(issue, terminal_states) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       !Map.has_key?(blocked, issue.id) and
@@ -1173,6 +1173,14 @@ defmodule SymphonyElixir.Orchestrator do
       MapSet.disjoint?(excluded_label_set(), present)
   end
 
+  # Cross-issue gating that must clear before dispatch: an unsatisfied blocker (Todo only)
+  # or an open sub-issue (any parent state). Folded into one predicate so the dispatch checks
+  # stay readable and share a single gate.
+  defp issue_dependencies_block_dispatch?(%Issue{} = issue, terminal_states) do
+    todo_issue_blocked_by_non_terminal?(issue, terminal_states) or
+      issue_has_open_children?(issue, terminal_states)
+  end
+
   defp todo_issue_blocked_by_non_terminal?(
          %Issue{state: issue_state, blocked_by: blockers},
          terminal_states
@@ -1189,6 +1197,22 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp todo_issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
+
+  # A parent issue is a container, not a unit of work: never dispatch an issue that still
+  # has an open (non-terminal) sub-issue. Unlike the blocker rule, this is not gated on the
+  # parent's own state — a parent with open children is skipped regardless of its state.
+  defp issue_has_open_children?(%Issue{children: children}, terminal_states)
+       when is_list(children) do
+    Enum.any?(children, fn
+      %{state: child_state} when is_binary(child_state) ->
+        !terminal_issue_state?(child_state, terminal_states)
+
+      _ ->
+        true
+    end)
+  end
+
+  defp issue_has_open_children?(_issue, _terminal_states), do: false
 
   defp terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do
     MapSet.member?(terminal_states, normalize_issue_state(state_name))
@@ -1243,7 +1267,9 @@ defmodule SymphonyElixir.Orchestrator do
         state
 
       {:skip, %Issue{} = refreshed_issue} ->
-        Logger.info("Skipping stale dispatch after issue refresh: #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)} blocked_by=#{length(refreshed_issue.blocked_by)}")
+        Logger.info(
+          "Skipping stale dispatch after issue refresh: #{issue_context(refreshed_issue)} state=#{inspect(refreshed_issue.state)} blocked_by=#{length(refreshed_issue.blocked_by)} children=#{length(refreshed_issue.children)}"
+        )
 
         state
 
@@ -2154,7 +2180,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
     candidate_issue?(issue, active_state_set(), terminal_states) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states)
+      !issue_dependencies_block_dispatch?(issue, terminal_states)
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
