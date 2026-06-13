@@ -7,7 +7,7 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, DeterministicFailure, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{AgentRunner, Config, DeterministicFailure, ProviderQuota, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Orchestrator.RetryPolicy
 
@@ -69,7 +69,7 @@ defmodule SymphonyElixir.Orchestrator do
       pending_escalations: %{},
       codex_totals: nil,
       claude_totals: nil,
-      codex_rate_limits: nil
+      provider_quotas: %{}
     ]
   end
 
@@ -93,7 +93,7 @@ defmodule SymphonyElixir.Orchestrator do
       tick_token: nil,
       codex_totals: @empty_codex_totals,
       claude_totals: @empty_claude_totals,
-      codex_rate_limits: nil
+      provider_quotas: %{codex: nil, claude: nil}
     }
 
     run_terminal_workspace_cleanup()
@@ -216,6 +216,17 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   def handle_info({:codex_worker_update, _issue_id, _update}, state), do: {:noreply, state}
+
+  def handle_info({:provider_quota_snapshot, provider, snapshot}, state)
+      when provider in [:codex, :claude] and is_map(snapshot) do
+    provider_quotas =
+      state.provider_quotas
+      |> ensure_provider_quotas()
+      |> Map.put(provider, snapshot)
+
+    notify_dashboard()
+    {:noreply, %{state | provider_quotas: provider_quotas}}
+  end
 
   def handle_info({:retry_issue, issue_id, retry_token}, state) do
     result =
@@ -1289,7 +1300,8 @@ defmodule SymphonyElixir.Orchestrator do
       !Map.has_key?(blocked, issue.id) and
       available_slots(state) > 0 and
       state_slots_available?(issue, running) and
-      worker_slots_available?(state)
+      worker_slots_available?(state) and
+      active_provider_quota_allows_dispatch(state) == :ok
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
@@ -1419,7 +1431,14 @@ defmodule SymphonyElixir.Orchestrator do
   defp dispatch_issue(%State{} = state, issue, attempt \\ nil, preferred_worker_host \\ nil) do
     case revalidate_issue_for_dispatch(issue, &Tracker.fetch_issue_states_by_ids/1, terminal_state_set()) do
       {:ok, %Issue{} = refreshed_issue} ->
-        do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
+        case active_provider_quota_allows_dispatch(state) do
+          :ok ->
+            do_dispatch_issue(state, refreshed_issue, attempt, preferred_worker_host)
+
+          {:paused, provider, threshold} ->
+            Logger.info("Skipping dispatch; #{provider} quota is at or above #{threshold}%")
+            state
+        end
 
       {:skip, :missing} ->
         Logger.info("Skipping dispatch; issue no longer active or visible: #{issue_context(issue)}")
@@ -2028,7 +2047,8 @@ defmodule SymphonyElixir.Orchestrator do
        dependency_graph: dependency_graph,
        codex_totals: state.codex_totals,
        claude_totals: state.claude_totals,
-       rate_limits: Map.get(state, :codex_rate_limits),
+       rate_limits: codex_raw_rate_limits(state.provider_quotas),
+       provider_quotas: ensure_provider_quotas(state.provider_quotas),
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
@@ -2377,8 +2397,50 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
-    available_slots(state) > 0 and state_slots_available?(issue, state.running)
+    available_slots(state) > 0 and state_slots_available?(issue, state.running) and
+      active_provider_quota_allows_dispatch(state) == :ok
   end
+
+  defp active_provider_quota_allows_dispatch(%State{} = state) do
+    config = Config.settings!()
+    provider = active_provider(config)
+    quota = provider_quota_config(config, provider)
+
+    # The pause gate is opt-in per provider (`quota.enabled`). Quota tracking and
+    # dashboard display stay on regardless — only the dispatch-pause action is
+    # gated, so enabling it never changes how usage is surfaced.
+    if quota_pause_enabled?(quota) do
+      threshold = dispatch_pause_percent(quota)
+      snapshot = state.provider_quotas |> ensure_provider_quotas() |> Map.get(provider)
+      now_ms = System.monotonic_time(:millisecond)
+
+      if ProviderQuota.active_quota_exhausted?(snapshot, threshold, now_ms) do
+        {:paused, provider, threshold}
+      else
+        :ok
+      end
+    else
+      :ok
+    end
+  end
+
+  defp quota_pause_enabled?(%{enabled: true}), do: true
+  defp quota_pause_enabled?(_quota), do: false
+
+  defp active_provider(%{agent: %{kind: "claude"}}), do: :claude
+  defp active_provider(_config), do: :codex
+
+  @default_dispatch_pause_percent 95.0
+
+  defp dispatch_pause_percent(%{dispatch_pause_percent: value}) when is_number(value), do: value
+  defp dispatch_pause_percent(_quota), do: @default_dispatch_pause_percent
+
+  # Codex quota lives at the canonical top-level `codex` block (kept in sync
+  # with `agent.codex` by the schema's legacy alias); Claude quota lives under
+  # `agent.claude`.
+  defp provider_quota_config(%{codex: %{quota: %{} = quota}}, :codex), do: quota
+  defp provider_quota_config(%{agent: %{claude: %{quota: %{} = quota}}}, :claude), do: quota
+  defp provider_quota_config(_config, _provider), do: nil
 
   defp apply_codex_token_delta(
          %{codex_totals: codex_totals} = state,
@@ -2412,7 +2474,14 @@ defmodule SymphonyElixir.Orchestrator do
   defp apply_codex_rate_limits(%State{} = state, update) when is_map(update) do
     case extract_rate_limits(update) do
       %{} = rate_limits ->
-        %{state | codex_rate_limits: rate_limits}
+        snapshot = ProviderQuota.normalize_codex(rate_limits, stale_after_ms: codex_quota_stale_after_ms())
+
+        provider_quotas =
+          state.provider_quotas
+          |> ensure_provider_quotas()
+          |> Map.put(:codex, snapshot)
+
+        %{state | provider_quotas: provider_quotas}
 
       _ ->
         state
@@ -2420,6 +2489,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp apply_codex_rate_limits(state, _update), do: state
+
+  defp codex_quota_stale_after_ms do
+    case provider_quota_config(Config.settings!(), :codex) do
+      %{stale_after_ms: ms} when is_integer(ms) and ms > 0 -> ms
+      _ -> 180_000
+    end
+  end
 
   defp apply_token_delta(codex_totals, token_delta) do
     input_tokens = Map.get(codex_totals, :input_tokens, 0) + token_delta.input_tokens
@@ -2559,6 +2635,23 @@ defmodule SymphonyElixir.Orchestrator do
       rate_limits_from_payload(update)
   end
 
+  defp ensure_provider_quotas(%{} = provider_quotas) do
+    provider_quotas
+    |> Map.put_new(:codex, nil)
+    |> Map.put_new(:claude, nil)
+  end
+
+  defp ensure_provider_quotas(_provider_quotas), do: %{codex: nil, claude: nil}
+
+  # The Codex rate-limit view exposed in the status snapshot is the raw payload
+  # carried on the normalized Codex quota snapshot, so the two can't drift.
+  defp codex_raw_rate_limits(provider_quotas) do
+    case provider_quotas |> ensure_provider_quotas() |> Map.get(:codex) do
+      %{raw: %{} = raw} -> raw
+      _ -> nil
+    end
+  end
+
   defp absolute_token_usage_from_payload(payload) when is_map(payload) do
     absolute_paths = [
       ["params", "msg", "payload", "info", "total_token_usage"],
@@ -2596,6 +2689,12 @@ defmodule SymphonyElixir.Orchestrator do
     direct = Map.get(payload, "rate_limits") || Map.get(payload, :rate_limits)
 
     cond do
+      codex_rate_limits_response_map?(payload) ->
+        payload
+
+      codex_rate_limits_response_map?(direct) ->
+        direct
+
       rate_limits_map?(direct) ->
         direct
 
@@ -2612,6 +2711,13 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp rate_limits_from_payload(_payload), do: nil
+
+  defp codex_rate_limits_response_map?(payload) when is_map(payload) do
+    is_map(Map.get(payload, "rateLimitsByLimitId")) or is_map(Map.get(payload, :rateLimitsByLimitId)) or
+      is_map(Map.get(payload, "rateLimits")) or is_map(Map.get(payload, :rateLimits))
+  end
+
+  defp codex_rate_limits_response_map?(_payload), do: false
 
   defp rate_limit_payloads(payload) when is_map(payload) do
     Map.values(payload)

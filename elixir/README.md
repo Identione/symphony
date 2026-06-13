@@ -185,6 +185,17 @@ repo:
   known good workflow.
 - `agent.max_turns` caps continuation turns per agent invocation when the
   issue stays in an active state after a turn ends normally. Default: `20`.
+- `agent.codex.quota` / `agent.claude.quota` (both OPTIONAL, disabled by
+  default) add account-quota-aware dispatch pausing: when `enabled`, Symphony
+  stops dispatching *new* issues while the active provider's usage is at/above
+  `dispatch_pause_percent` (default `95.0`); running agents are unaffected.
+  Codex usage comes free from the app-server rate-limit stream; Claude polls
+  the OAuth usage endpoint every `refresh_ms`. Quota is always tracked and
+  shown on the dashboard — only the pause action is gated. See SPEC.md §5.3.5.3.
+  For Claude, `agent.claude.quota.token_source: claude_cli_refresh` keeps an
+  idle daemon's OAuth token alive by running a zero-inference `claude` startup
+  (which refreshes the token in place) when it nears expiry — handy if you
+  don't use a long-lived `CLAUDE_CODE_OAUTH_TOKEN` from `claude setup-token`.
 - If the Markdown body is blank, Symphony uses a default prompt template
   that includes the issue identifier, title, and body.
 - To wrap the agent in [jai](https://jai.scs.stanford.edu/) as an outer

@@ -749,6 +749,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                "cache_read_input_tokens" => 0,
                "seconds_running" => 0
              },
+             "provider_quotas" => %{},
              "rate_limits" => %{"primary" => %{"remaining" => 11}}
            }
 

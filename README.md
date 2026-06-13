@@ -12,6 +12,8 @@ Symphony's coding-agent runtime is pluggable (SPEC.md §10). Two adapters ship w
 - **Codex App-Server** (`agent.kind: codex`, default) — runs OpenAI Codex via its app-server protocol.
 - **Claude Agent SDK** (`agent.kind: claude`) — launches a Python sidecar that hosts `claude-agent-sdk`. Sandbox-by-default: `permission_mode: dontAsk` + an explicit `allowed_tools` whitelist + workspace-`cwd` boundary, so the agent runs unattended without ever pausing for human input.
 
+Either adapter can opt into account-quota-aware dispatch pausing (`agent.<provider>.quota`, off by default): Symphony surfaces provider usage on the dashboard and, when enabled, stops dispatching new work while usage is near the account limit — see SPEC.md §5.3.5.3.
+
 > [!WARNING]
 > Symphony is a low-key engineering preview for testing in trusted environments.
 

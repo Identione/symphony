@@ -128,6 +128,25 @@ agent:
     # stderr forwarded as `log` envelopes, and Symphony's per-envelope
     # `claude tool_call` / `assistant_message` / `turn_completed` log lines.
     verbose_logging: false
+    # Account-quota-aware dispatch pausing (SPEC.md §5.3.5.3, §8.3). Disabled by
+    # default. When `enabled`, Symphony polls the Claude OAuth usage endpoint
+    # every `refresh_ms` and stops dispatching NEW issues whenever any usage
+    # window is at/above `dispatch_pause_percent` (running agents keep going).
+    # The OAuth token is read from $CLAUDE_CODE_OAUTH_TOKEN, else
+    # <config_dir>/.credentials.json. Quota is still tracked/displayed when
+    # disabled — only the pause action is gated.
+    # quota:
+    #   enabled: true
+    #   dispatch_pause_percent: 95.0
+    #   refresh_ms: 60000
+    #   stale_after_ms: 180000
+    #   # token_source: claude_cli_refresh keeps the OAuth token alive on an
+    #   # idle daemon by running a zero-inference `claude` startup (it performs
+    #   # the OAuth refresh in place) when the cached token nears expiry. Leave
+    #   # as `credentials_file` if you instead use a long-lived
+    #   # CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`).
+    #   token_source: claude_cli_refresh
+    #   cli_refresh_margin_ms: 300000
   codex:
     # ── command: pick ONE of (A) or (B) ──
     # Both variants run with `use_configured_permissions: true`, which makes
@@ -151,6 +170,12 @@ agent:
       writableRoots:
         - /home/hniska/code/.symphony-mirrors
       networkAccess: true
+    # Codex quota usage is derived from the app-server rate-limit stream (no
+    # polling), so only `enabled` / `dispatch_pause_percent` / `stale_after_ms`
+    # apply here. Disabled by default; see SPEC.md §5.3.5.3, §8.3.
+    # quota:
+    #   enabled: true
+    #   dispatch_pause_percent: 95.0
 server:
   port: 3453
 ---

@@ -307,7 +307,12 @@ Fields:
 - `agent_totals` (aggregate tokens + runtime seconds; tracked per active adapter — codex totals
   and claude totals are stored separately so adapter-specific cache fields stay typed correctly)
 - `agent_rate_limits` (latest rate-limit snapshot from agent events; MAY be `null` for adapters that
-  do not surface rate-limit data — Claude does not surface them today)
+  do not surface rate-limit data — the Claude adapter does not surface in-band rate limits)
+- `provider_quotas` (latest normalized account-quota snapshot per provider, keyed `codex` and
+  `claude`; see §5.3.5.3 and §8.3). Each entry MAY be `null` when no snapshot has been collected
+  yet. The `codex` entry is derived from the app-server rate-limit stream; the `claude` entry comes
+  from the OPTIONAL OAuth usage poller. Used for dashboard display and, when
+  `agent.<provider>.quota.enabled`, the dispatch-pause gate.
 
 ### 4.2 Stable Identifiers and Normalization Rules
 
@@ -519,6 +524,10 @@ fields locally if they want stricter startup checks.
 - `stall_timeout_ms` (integer)
   - Default: `300000` (5 minutes)
   - If `<= 0`, stall detection is disabled.
+- `quota` (object, OPTIONAL)
+  - Account-quota tracking + dispatch-pause config; see §5.3.5.3. For Codex the snapshot is derived
+    from the app-server rate-limit stream (no polling), so only `enabled`, `stale_after_ms`, and
+    `dispatch_pause_percent` are meaningful; the Claude OAuth poller fields are ignored.
 
 ##### 5.3.5.2 `agent.claude` (object)
 
@@ -578,6 +587,10 @@ protocol to Symphony shaped like the Codex app-server client.
 - `stall_timeout_ms` (integer)
   - Default: `300000` (5 minutes).
   - If `<= 0`, stall detection is disabled.
+- `quota` (object, OPTIONAL)
+  - Account-quota tracking + dispatch-pause config; see §5.3.5.3. For Claude, when `enabled` the
+    runtime polls the OAuth usage endpoint (`endpoint`, `anthropic_beta`, `refresh_ms`,
+    `token_source`) to populate the snapshot.
 
 Authentication note:
 
@@ -588,6 +601,55 @@ Authentication note:
   Foundry) — are forwarded to the sidecar when present in the host environment so deployments can
   run against an alternative provider without touching Symphony config. Provider credentials
   (e.g. AWS / GCP / Azure auth) are forwarded the same way.
+
+##### 5.3.5.3 `agent.<provider>.quota` (object, OPTIONAL)
+
+Account-level quota tracking and an OPTIONAL quota-aware dispatch-pause gate. The same object shape
+is accepted under both `agent.codex.quota` and `agent.claude.quota` (Codex config may equivalently
+be placed at the canonical top-level `codex.quota`, which the runtime keeps in sync with
+`agent.codex.quota`). Quota *tracking and display* are independent of `enabled` — only the
+dispatch-pause action is gated — so turning the gate on never changes how usage is surfaced.
+
+When `enabled` and the active provider's freshest (non-stale) snapshot reports any bucket at or
+above `dispatch_pause_percent`, the orchestrator stops dispatching *new* work for that tick (running
+agents and reconciliation are unaffected); see §8.3. Bucket usage is a 0–100 percentage for both
+providers (Codex `usedPercent`, Claude `utilization`).
+
+Fields:
+
+- `enabled` (boolean)
+  - Default: `false`. Opt in to the dispatch-pause gate for this provider. For Claude this also
+    starts the OAuth usage poller (without it there is no Claude snapshot to gate on).
+- `dispatch_pause_percent` (number, 0–100)
+  - Default: `95.0`. Pause new dispatch when any bucket's usage is `>=` this value.
+- `stale_after_ms` (integer > 0)
+  - Default: `180000` (3 minutes). Snapshots older than this are ignored by the gate (fail-open:
+    when usage is unknown, dispatch is allowed).
+- `endpoint` (string) — Claude only
+  - Default: `https://api.anthropic.com/api/oauth/usage`.
+- `anthropic_beta` (string) — Claude only
+  - Default: `oauth-2025-04-20`. Value sent in the `anthropic-beta` request header.
+- `refresh_ms` (integer > 0) — Claude only
+  - Default: `60000` (1 minute). Poll cadence for the OAuth usage endpoint.
+- `token_source` (enum) — Claude only
+  - Allowed values: `credentials_file`, `claude_cli_refresh`. Default: `credentials_file`. The OAuth
+    token is read from `$CLAUDE_CODE_OAUTH_TOKEN` when set, otherwise from
+    `<config_dir>/.credentials.json` (`agent.claude.config_dir`, else `$CLAUDE_CONFIG_DIR`, else
+    `~/.claude`).
+  - `claude_cli_refresh` additionally renews the cached OAuth access token in place: when it is
+    within `cli_refresh_margin_ms` of expiry, the poller runs `cli_refresh_command` — a
+    zero-inference `claude` CLI startup that performs the OAuth refresh-token grant and rewrites the
+    credentials file — before reading the token. This keeps an otherwise-idle deployment's token
+    alive without re-implementing OAuth. Only the credentials-file path is eligible; a set
+    `$CLAUDE_CODE_OAUTH_TOKEN` (or API-key/cloud-provider auth) skips it. Refresh failures are
+    non-fatal (the poller falls back to the on-disk token).
+- `cli_refresh_command` (string) — Claude only
+  - Default: `claude -p /exit`. The command run (via `bash -lc`, from a scratch cwd, with
+    `CLAUDE_CONFIG_DIR` pinned to the resolved credentials dir) to trigger a CLI-side token refresh.
+    Only used when `token_source == claude_cli_refresh`.
+- `cli_refresh_margin_ms` (integer > 0) — Claude only
+  - Default: `300000` (5 minutes). Run `cli_refresh_command` only when the cached token expires
+    within this window (so it fires roughly once per token lifetime, not every poll).
 
 #### 5.3.6 `repo` (object, OPTIONAL)
 
@@ -759,6 +821,8 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.codex.turn_timeout_ms`: integer, default `3600000`
 - `agent.codex.read_timeout_ms`: integer, default `5000`
 - `agent.codex.stall_timeout_ms`: integer, default `300000`
+- `agent.codex.quota`: object, OPTIONAL — see §5.3.5.3 (Codex honors `enabled`, `stale_after_ms`,
+  `dispatch_pause_percent`)
 - `agent.claude.command`: shell command string, default
   `jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent`
   (see §10.8 for the `jai` default and the `SYMPHONY_CLAUDE_PRIV_DIR` env-var indirection)
@@ -784,6 +848,8 @@ not require recognizing or validating extension fields unless that extension is 
   orchestrator's per-envelope `tool_call`/`assistant_message`/`turn_completed`/
   `permission_request`/`system_init` log lines). Off by default so normal
   operation stays quiet — see §10.8.
+- `agent.claude.quota`: object, OPTIONAL — see §5.3.5.3 (Claude additionally polls the OAuth usage
+  endpoint via `endpoint`, `anthropic_beta`, `refresh_ms`, `token_source` when `enabled`)
 
 ## 7. Orchestration State Machine
 
@@ -945,6 +1011,15 @@ Per-state limit:
 - otherwise fallback to global limit
 
 The runtime counts issues by their current tracked state in the `running` map.
+
+Provider-quota pause gate (OPTIONAL):
+
+- When `agent.<active-provider>.quota.enabled` is set, new dispatch is additionally gated on account
+  quota. If the active provider's freshest non-stale snapshot reports any bucket at or above
+  `dispatch_pause_percent`, the orchestrator dispatches no new work for that tick and logs the pause.
+- The gate is fail-open: a missing, `null`, or stale (`> stale_after_ms`) snapshot never pauses
+  dispatch. It applies only to *new* dispatch — running agents, retries, and reconciliation continue.
+- Disabled by default, so it never changes dispatch behavior unless an operator opts in. See §5.3.5.3.
 
 ### 8.4 Retry and Backoff
 
@@ -1683,6 +1758,8 @@ SHOULD return:
   - `seconds_running` (aggregate runtime seconds as of snapshot time, including active sessions)
 - `rate_limits` (latest coding-agent rate limit payload, if available; MAY be `null` when the
   active adapter does not surface rate-limit data — the Claude adapter does not surface them today)
+- `provider_quotas` (per-provider normalized account-quota snapshots, keyed `codex`/`claude`; see
+  §4.1.8 and §5.3.5.3. MAY be `null`/empty when no snapshot has been collected.)
 
 RECOMMENDED snapshot error modes:
 
@@ -1897,7 +1974,8 @@ Minimum endpoints:
         "total_tokens": 7400,
         "seconds_running": 1834.2
       },
-      "rate_limits": null
+      "rate_limits": null,
+      "provider_quotas": { "codex": null, "claude": null }
     }
     ```
 

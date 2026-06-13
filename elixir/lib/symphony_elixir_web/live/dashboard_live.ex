@@ -159,12 +159,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
         <section class="section-card">
           <div class="section-header">
             <div>
-              <h2 class="section-title">Rate limits</h2>
-              <p class="section-copy">Latest upstream rate-limit snapshot, when available.</p>
+              <h2 class="section-title">Provider quotas</h2>
+              <p class="section-copy">Latest upstream quota snapshots, when available.</p>
             </div>
           </div>
 
-          <pre class="code-panel"><%= pretty_value(@payload.rate_limits) %></pre>
+          <pre class="code-panel"><%= pretty_value(Map.get(@payload, :provider_quotas, %{})) %></pre>
         </section>
 
         <section class="section-card">

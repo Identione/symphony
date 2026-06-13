@@ -7,6 +7,7 @@ defmodule SymphonyElixir.StatusDashboard do
   require Logger
 
   alias SymphonyElixir.{Config, HttpServer}
+  alias SymphonyElixir.MapAccess
   alias SymphonyElixir.Orchestrator
   alias SymphonyElixirWeb.ObservabilityPubSub
 
@@ -332,6 +333,7 @@ defmodule SymphonyElixir.StatusDashboard do
       {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
         claude_totals = Map.get(snapshot, :claude_totals) || %{}
         rate_limits = Map.get(snapshot, :rate_limits)
+        provider_quotas = Map.get(snapshot, :provider_quotas)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
         input_tokens = Map.get(codex_totals, :input_tokens, 0) + Map.get(claude_totals, :input_tokens, 0)
@@ -365,7 +367,7 @@ defmodule SymphonyElixir.StatusDashboard do
              colorize(" | ", @ansi_gray) <>
              colorize("total #{format_count(total_tokens)}", @ansi_yellow),
            cache_line,
-           colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
+           format_quota_line(provider_quotas, rate_limits),
            project_link_lines,
            project_refresh_line,
            colorize("├─ Running", @ansi_bold),
@@ -577,6 +579,7 @@ defmodule SymphonyElixir.StatusDashboard do
              codex_totals: codex_totals,
              claude_totals: Map.get(snapshot, :claude_totals),
              rate_limits: Map.get(snapshot, :rate_limits),
+             provider_quotas: Map.get(snapshot, :provider_quotas),
              polling: Map.get(snapshot, :polling)
            }}
 
@@ -959,6 +962,94 @@ defmodule SymphonyElixir.StatusDashboard do
   defp in_bucket?(timestamp, bucket_start, bucket_end, false),
     do: timestamp >= bucket_start and timestamp < bucket_end
 
+  # Prefer the normalized per-provider quota view; fall back to the legacy raw
+  # rate-limit rendering only when no provider has a quota snapshot yet (e.g. a
+  # snapshot that carries `rate_limits` but no `provider_quotas`).
+  defp format_quota_line(provider_quotas, rate_limits) do
+    if provider_quota_data?(provider_quotas) do
+      colorize("│ Quotas: ", @ansi_bold) <> format_provider_quotas(provider_quotas)
+    else
+      colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits)
+    end
+  end
+
+  defp provider_quota_data?(provider_quotas) when is_map(provider_quotas) do
+    Enum.any?([:codex, :claude], fn provider ->
+      not is_nil(Map.get(provider_quotas, provider) || Map.get(provider_quotas, Atom.to_string(provider)))
+    end)
+  end
+
+  defp provider_quota_data?(_provider_quotas), do: false
+
+  defp format_provider_quotas(provider_quotas) when is_map(provider_quotas) do
+    [:codex, :claude]
+    |> Enum.map_join(" | ", fn provider ->
+      snapshot = Map.get(provider_quotas, provider) || Map.get(provider_quotas, Atom.to_string(provider))
+      "#{provider} #{format_provider_quota_snapshot(snapshot)}"
+    end)
+    |> colorize(@ansi_cyan)
+  end
+
+  defp format_provider_quotas(_provider_quotas), do: format_provider_quotas(%{})
+
+  defp format_provider_quota_snapshot(nil), do: "unavailable"
+
+  defp format_provider_quota_snapshot(%{} = snapshot) do
+    buckets = Map.get(snapshot, :buckets) || Map.get(snapshot, "buckets") || %{}
+    error = Map.get(snapshot, :error) || Map.get(snapshot, "error")
+    bucket_summary = format_provider_quota_buckets(buckets)
+
+    provider_quota_summary(bucket_summary, error)
+  end
+
+  defp format_provider_quota_snapshot(_snapshot), do: "unavailable"
+
+  defp format_provider_quota_buckets(buckets) when is_map(buckets) do
+    buckets
+    |> Enum.take(3)
+    |> Enum.map_join(", ", &format_provider_quota_bucket/1)
+  end
+
+  defp format_provider_quota_buckets(_buckets), do: ""
+
+  defp format_provider_quota_bucket({name, bucket}) do
+    percent = map_value(bucket, [:used_percent, "used_percent"])
+    reset = map_value(bucket, [:resets_at, "resets_at"])
+    reset_suffix = if is_nil(reset), do: "", else: " reset #{format_reset_value(reset)}"
+
+    if is_number(percent) do
+      "#{name} #{Float.round(percent * 1.0, 1)}%#{reset_suffix}"
+    else
+      "#{name} n/a#{reset_suffix}"
+    end
+  end
+
+  defp provider_quota_summary(bucket_summary, error) do
+    cond do
+      bucket_summary != "" and is_nil(error) ->
+        bucket_summary
+
+      bucket_summary != "" ->
+        "#{bucket_summary} error=#{quota_error_code(error)}"
+
+      is_map(error) ->
+        "unavailable error=#{quota_error_code(error)}"
+
+      true ->
+        "unavailable"
+    end
+  end
+
+  defp quota_error_code(%{} = error), do: map_value(error, [:code, "code"]) || "error"
+  defp quota_error_code(_error), do: "error"
+
+  defp format_reset_value(value) when is_integer(value), do: "#{format_count(value)}s"
+  defp format_reset_value(value) when is_binary(value), do: value
+  defp format_reset_value(value), do: to_string(value)
+
+  # Legacy rate-limit rendering, kept as the fallback for snapshots that carry a
+  # raw `rate_limits` payload but no normalized `provider_quotas` (see
+  # `format_quota_line/2`).
   defp format_rate_limits(nil), do: colorize("unavailable", @ansi_gray)
 
   defp format_rate_limits(rate_limits) when is_map(rate_limits) do
@@ -1059,10 +1150,6 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_rate_limit_credits(other), do: "credits #{to_string(other)}"
 
-  defp format_reset_value(value) when is_integer(value), do: "#{format_count(value)}s"
-  defp format_reset_value(value) when is_binary(value), do: value
-  defp format_reset_value(value), do: to_string(value)
-
   defp format_number(value) when is_integer(value), do: format_count(value)
 
   defp format_number(value) when is_float(value) do
@@ -1071,14 +1158,10 @@ defmodule SymphonyElixir.StatusDashboard do
     |> :erlang.float_to_binary(decimals: 2)
   end
 
-  defp map_value(map, keys) when is_map(map) and is_list(keys) do
-    Enum.find_value(keys, &Map.get(map, &1))
-  end
-
-  defp map_value(_map, _keys), do: nil
-
   defp integer_like?(value) when is_integer(value), do: true
   defp integer_like?(_value), do: false
+
+  defp map_value(map, keys), do: MapAccess.value(map, keys)
 
   defp status_dot(color_code) do
     colorize("●", color_code)

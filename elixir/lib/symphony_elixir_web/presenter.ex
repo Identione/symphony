@@ -44,6 +44,7 @@ defmodule SymphonyElixirWeb.Presenter do
           dependency_graph: dependency_graph_payload(dependency_graph_nodes),
           codex_totals: snapshot.codex_totals,
           claude_totals: Map.get(snapshot, :claude_totals) || @empty_claude_totals,
+          provider_quotas: Map.get(snapshot, :provider_quotas) || %{},
           rate_limits: snapshot.rate_limits
         }
 
