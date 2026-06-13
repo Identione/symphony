@@ -42,6 +42,27 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert message =~ "agent.claude.quota.dispatch_pause_percent"
   end
 
+  test "claude quota token_source accepts claude_cli_refresh with CLI-refresh defaults" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               "tracker" => %{"kind" => "memory"},
+               "agent" => %{
+                 "kind" => "claude",
+                 "claude" => %{"quota" => %{"token_source" => "claude_cli_refresh"}}
+               }
+             })
+
+    quota = settings.agent.claude.quota
+    assert quota.token_source == "claude_cli_refresh"
+    assert quota.cli_refresh_command == "claude -p /exit"
+    assert quota.cli_refresh_margin_ms == 300_000
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{"agent" => %{"claude" => %{"quota" => %{"token_source" => "carrier_pigeon"}}}})
+
+    assert message =~ "agent.claude.quota.token_source"
+  end
+
   test "codex quota config defaults to disabled and mirrors onto agent.codex" do
     assert {:ok, settings} =
              Schema.parse(%{

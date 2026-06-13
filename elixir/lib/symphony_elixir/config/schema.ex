@@ -166,12 +166,21 @@ defmodule SymphonyElixir.Config.Schema do
 
     `enabled`/`stale_after_ms`/`dispatch_pause_percent` apply to both providers.
     The remaining fields (`endpoint`, `anthropic_beta`, `refresh_ms`,
-    `token_source`) drive the Claude OAuth usage poller only — Codex quota is
-    derived from the app-server rate-limit stream, so those fields are ignored
-    for `agent.codex.quota`.
+    `token_source`, `cli_refresh_command`, `cli_refresh_margin_ms`) drive the
+    Claude OAuth usage poller only — Codex quota is derived from the app-server
+    rate-limit stream, so those fields are ignored for `agent.codex.quota`.
+
+    `token_source` controls how the Claude OAuth access token is obtained:
+    `credentials_file` reads it read-only; `claude_cli_refresh` additionally
+    runs `cli_refresh_command` (a zero-inference `claude` CLI startup) when the
+    cached token is within `cli_refresh_margin_ms` of expiry, letting the CLI
+    perform the OAuth refresh in place. `$CLAUDE_CODE_OAUTH_TOKEN` always wins
+    and skips both.
     """
     use Ecto.Schema
     import Ecto.Changeset
+
+    @token_sources ~w(credentials_file claude_cli_refresh)
 
     @primary_key false
     embedded_schema do
@@ -182,7 +191,12 @@ defmodule SymphonyElixir.Config.Schema do
       field(:stale_after_ms, :integer, default: 180_000)
       field(:dispatch_pause_percent, :float, default: 95.0)
       field(:token_source, :string, default: "credentials_file")
+      field(:cli_refresh_command, :string, default: "claude -p /exit")
+      field(:cli_refresh_margin_ms, :integer, default: 300_000)
     end
+
+    @spec token_sources() :: [String.t()]
+    def token_sources, do: @token_sources
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
@@ -196,15 +210,18 @@ defmodule SymphonyElixir.Config.Schema do
           :refresh_ms,
           :stale_after_ms,
           :dispatch_pause_percent,
-          :token_source
+          :token_source,
+          :cli_refresh_command,
+          :cli_refresh_margin_ms
         ],
         empty_values: []
       )
-      |> validate_required([:endpoint, :anthropic_beta, :token_source])
+      |> validate_required([:endpoint, :anthropic_beta, :token_source, :cli_refresh_command])
       |> validate_number(:refresh_ms, greater_than: 0)
       |> validate_number(:stale_after_ms, greater_than: 0)
       |> validate_number(:dispatch_pause_percent, greater_than_or_equal_to: 0, less_than_or_equal_to: 100)
-      |> validate_inclusion(:token_source, ["credentials_file"])
+      |> validate_number(:cli_refresh_margin_ms, greater_than: 0)
+      |> validate_inclusion(:token_source, @token_sources)
     end
   end
 

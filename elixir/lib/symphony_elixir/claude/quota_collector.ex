@@ -41,6 +41,9 @@ defmodule SymphonyElixir.Claude.QuotaCollector do
   def fetch_once(%{} = settings, opts \\ []) do
     quota = settings.agent.claude.quota
     http_client = Keyword.get(opts, :http_client, {Req, :get})
+    cmd_runner = Keyword.get(opts, :cmd_runner, {System, :cmd})
+
+    maybe_cli_refresh_token(settings, quota, cmd_runner)
 
     with {:ok, token} <- oauth_token(settings),
          {:ok, body} <- request_usage(http_client, quota, token) do
@@ -60,6 +63,77 @@ defmodule SymphonyElixir.Claude.QuotaCollector do
         |> token_from_credentials_file()
     end
   end
+
+  # Cap the CLI refresh subprocess so a hung `claude` can't block the poller.
+  @cli_refresh_timeout_s 60
+
+  # When `token_source: claude_cli_refresh` and the cached OAuth token is within
+  # `cli_refresh_margin_ms` of expiry, run a zero-inference `claude` startup so
+  # the CLI performs the OAuth refresh in place before we read the token. Only
+  # the credentials-file auth path is eligible — `$CLAUDE_CODE_OAUTH_TOKEN` and
+  # API-key auth have no short-lived token to renew.
+  defp maybe_cli_refresh_token(settings, %{token_source: "claude_cli_refresh"} = quota, cmd_runner) do
+    with "" <- oauth_token_env(),
+         path when is_binary(path) <- credentials_path(settings),
+         true <- token_expiring_soon?(path, cli_refresh_margin_ms(quota)) do
+      run_cli_refresh(quota, settings, cmd_runner)
+    else
+      _ -> :ok
+    end
+  end
+
+  defp maybe_cli_refresh_token(_settings, _quota, _cmd_runner), do: :ok
+
+  defp oauth_token_env, do: System.get_env("CLAUDE_CODE_OAUTH_TOKEN") || ""
+
+  defp token_expiring_soon?(path, margin_ms) do
+    case read_expires_at(path) do
+      ms when is_integer(ms) -> ms - System.os_time(:millisecond) <= margin_ms
+      _ -> false
+    end
+  end
+
+  defp read_expires_at(path) do
+    with {:ok, body} <- File.read(path),
+         {:ok, parsed} <- Jason.decode(body),
+         %{} = oauth <- Map.get(parsed, "claudeAiOauth"),
+         ms when is_integer(ms) <- Map.get(oauth, "expiresAt") do
+      ms
+    else
+      _ -> nil
+    end
+  end
+
+  defp run_cli_refresh(quota, settings, {module, function}) do
+    command = quota.cli_refresh_command || "claude -p /exit"
+    shell = "timeout #{@cli_refresh_timeout_s} #{command}"
+
+    # Run from a scratch cwd so the CLI never spawns the repo's `.mcp.json`
+    # servers, and pin CLAUDE_CONFIG_DIR so it refreshes the same credentials
+    # file we read. Failures are non-fatal: we fall through to whatever token
+    # is on disk and the normal error-snapshot path handles a stale one.
+    cmd_opts = [cd: System.tmp_dir!(), env: cli_refresh_env(settings), stderr_to_stdout: true]
+    apply(module, function, ["bash", ["-lc", shell], cmd_opts])
+    Logger.debug("Claude quota collector ran CLI token refresh")
+    :ok
+  rescue
+    error ->
+      Logger.debug("Claude quota CLI token refresh failed: #{inspect(error)}")
+      :ok
+  catch
+    kind, reason ->
+      Logger.debug("Claude quota CLI token refresh error: #{inspect({kind, reason})}")
+      :ok
+  end
+
+  defp cli_refresh_env(%{agent: %{claude: %{config_dir: dir}}}) when is_binary(dir) and dir != "" do
+    [{"CLAUDE_CONFIG_DIR", Path.expand(dir)}]
+  end
+
+  defp cli_refresh_env(_settings), do: []
+
+  defp cli_refresh_margin_ms(%{cli_refresh_margin_ms: ms}) when is_integer(ms) and ms > 0, do: ms
+  defp cli_refresh_margin_ms(_quota), do: 300_000
 
   defp refresh(state) do
     case Config.settings() do

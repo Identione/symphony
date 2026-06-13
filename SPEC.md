@@ -612,9 +612,24 @@ Fields:
 - `refresh_ms` (integer > 0) — Claude only
   - Default: `60000` (1 minute). Poll cadence for the OAuth usage endpoint.
 - `token_source` (enum) — Claude only
-  - Allowed values: `credentials_file`. Default: `credentials_file`. The OAuth token is read from
-    `$CLAUDE_CODE_OAUTH_TOKEN` when set, otherwise from `<config_dir>/.credentials.json`
-    (`agent.claude.config_dir`, else `$CLAUDE_CONFIG_DIR`, else `~/.claude`).
+  - Allowed values: `credentials_file`, `claude_cli_refresh`. Default: `credentials_file`. The OAuth
+    token is read from `$CLAUDE_CODE_OAUTH_TOKEN` when set, otherwise from
+    `<config_dir>/.credentials.json` (`agent.claude.config_dir`, else `$CLAUDE_CONFIG_DIR`, else
+    `~/.claude`).
+  - `claude_cli_refresh` additionally renews the cached OAuth access token in place: when it is
+    within `cli_refresh_margin_ms` of expiry, the poller runs `cli_refresh_command` — a
+    zero-inference `claude` CLI startup that performs the OAuth refresh-token grant and rewrites the
+    credentials file — before reading the token. This keeps an otherwise-idle deployment's token
+    alive without re-implementing OAuth. Only the credentials-file path is eligible; a set
+    `$CLAUDE_CODE_OAUTH_TOKEN` (or API-key/cloud-provider auth) skips it. Refresh failures are
+    non-fatal (the poller falls back to the on-disk token).
+- `cli_refresh_command` (string) — Claude only
+  - Default: `claude -p /exit`. The command run (via `bash -lc`, from a scratch cwd, with
+    `CLAUDE_CONFIG_DIR` pinned to the resolved credentials dir) to trigger a CLI-side token refresh.
+    Only used when `token_source == claude_cli_refresh`.
+- `cli_refresh_margin_ms` (integer > 0) — Claude only
+  - Default: `300000` (5 minutes). Run `cli_refresh_command` only when the cached token expires
+    within this window (so it fires roughly once per token lifetime, not every poll).
 
 #### 5.3.6 `repo` (object, OPTIONAL)
 
