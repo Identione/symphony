@@ -60,6 +60,15 @@ defmodule SymphonyElixir.ClaudeAppServerTest do
     "'" <> String.replace(str, "'", ~s('"'"')) <> "'"
   end
 
+  # Stub sidecar that reads Symphony's init line, writes it verbatim to `path`,
+  # then completes the handshake and idles. Lets a test re-read and assert on
+  # exactly what Symphony sent.
+  defp capture_init_command(path) do
+    "(IFS= read -r init_line ; printf '%s' \"$init_line\" > " <>
+      Path.absname(path) <>
+      " ; printf '%s\\n' '{\"type\":\"ready\"}' ; while IFS= read -r _; do :; done)"
+  end
+
   defp default_claude_config do
     %{
       command: "true",
@@ -158,6 +167,64 @@ defmodule SymphonyElixir.ClaudeAppServerTest do
     assert schema["required"] == ["query"]
     assert schema["properties"]["query"]["type"] == "string"
     assert schema["additionalProperties"] == false
+
+    AppServer.stop_session(session)
+  end
+
+  test "init envelope omits setting_sources when config value is nil (CLI parity)",
+       %{workspace: workspace} do
+    # nil is the schema default: the sidecar must NOT receive setting_sources at
+    # all, so ClaudeAgentOptions falls back to None and the CLI loads all
+    # filesystem settings (.claude/settings.json, project .mcp.json, CLAUDE.md).
+    init_capture_path = Path.join(workspace, "captured-init-nil.json")
+    cmd = capture_init_command(init_capture_path)
+
+    {:ok, session} =
+      AppServer.start_session(workspace,
+        config: %{default_claude_config() | command: cmd, setting_sources: nil}
+      )
+
+    assert {:ok, body} = File.read(init_capture_path)
+    assert {:ok, init_payload} = Jason.decode(body)
+    assert init_payload["type"] == "init"
+    refute Map.has_key?(init_payload, "setting_sources")
+
+    AppServer.stop_session(session)
+  end
+
+  test "init envelope forwards an explicit setting_sources verbatim (isolation opt-out)",
+       %{workspace: workspace} do
+    init_capture_path = Path.join(workspace, "captured-init-explicit.json")
+    cmd = capture_init_command(init_capture_path)
+
+    {:ok, session} =
+      AppServer.start_session(workspace,
+        config: %{default_claude_config() | command: cmd, setting_sources: []}
+      )
+
+    assert {:ok, body} = File.read(init_capture_path)
+    assert {:ok, init_payload} = Jason.decode(body)
+    assert init_payload["setting_sources"] == []
+
+    AppServer.stop_session(session)
+  end
+
+  test "sidecar receives MISE_TRUSTED_CONFIG_PATHS scoped to the per-issue workspace",
+       %{workspace: workspace} do
+    # `mise exec` (used by a project `.mcp.json` lsp server and the agent's own
+    # tooling) aborts on an untrusted workspace mise.toml. Symphony trusts only
+    # this checkout by exporting MISE_TRUSTED_CONFIG_PATHS to the sidecar.
+    {:ok, session} =
+      AppServer.start_session(workspace,
+        config: %{default_claude_config() | command: env_echo_command("MISE_TRUSTED_CONFIG_PATHS")}
+      )
+
+    {:ok, result} = AppServer.run_turn(session, "go", issue(), turn_timeout_ms: 5_000)
+
+    assert is_binary(result.session_id)
+
+    assert String.contains?(result.session_id, workspace),
+           "expected MISE_TRUSTED_CONFIG_PATHS to include the workspace #{workspace}, got #{result.session_id}"
 
     AppServer.stop_session(session)
   end

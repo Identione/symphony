@@ -189,7 +189,7 @@ defmodule SymphonyElixir.Claude.AppServer do
   defp open_port(workspace, %{command: command} = config) when is_binary(command) and command != "" do
     env_charlists =
       config
-      |> sidecar_env_overrides()
+      |> sidecar_env_overrides(workspace)
       |> Enum.map(fn {k, v} -> {String.to_charlist(to_string(k)), String.to_charlist(to_string(v))} end)
 
     port_opts = [
@@ -231,13 +231,21 @@ defmodule SymphonyElixir.Claude.AppServer do
   # sidecar env so the SDK's underlying `claude` CLI scopes its OAuth lookup
   # to that subscription's credentials directory. `extra_env` still wins if it
   # explicitly sets either variable.
-  defp sidecar_env_overrides(config) do
+  #
+  # MISE_TRUSTED_CONFIG_PATHS is scoped to the per-issue `workspace` so that
+  # `mise exec` (used by the checkout's tooling — e.g. a project `.mcp.json`
+  # `lsp` server invoked as `mise exec --fresh-env -- ./scripts/...`, and the
+  # agent's own `mise` use) does not abort on the freshly-provisioned, untrusted
+  # `mise.toml`, and so the checkout's `[env]` exports apply. It trusts only this
+  # checkout, leaving global mise trust untouched; any inherited value is kept.
+  defp sidecar_env_overrides(config, workspace) do
     extra_env = Map.get(config, :extra_env, %{}) || %{}
 
     base =
       extra_env
       |> stringify_env_keys()
       |> Map.put_new("SYMPHONY_CLAUDE_PRIV_DIR", claude_priv_dir())
+      |> Map.put_new("MISE_TRUSTED_CONFIG_PATHS", mise_trusted_config_paths(workspace))
 
     case Map.get(config, :config_dir) do
       dir when is_binary(dir) and dir != "" ->
@@ -246,6 +254,19 @@ defmodule SymphonyElixir.Claude.AppServer do
       _ ->
         base
     end
+  end
+
+  # Prepend the workspace to any inherited MISE_TRUSTED_CONFIG_PATHS (colon-
+  # separated) so we extend, rather than clobber, the operator's existing trust
+  # list. Deduped, workspace first.
+  defp mise_trusted_config_paths(workspace) do
+    inherited =
+      System.get_env("MISE_TRUSTED_CONFIG_PATHS", "")
+      |> String.split(":", trim: true)
+
+    [workspace | inherited]
+    |> Enum.uniq()
+    |> Enum.join(":")
   end
 
   # Resolves to the `priv/claude_agent` directory for the running app. Under
@@ -283,7 +304,12 @@ defmodule SymphonyElixir.Claude.AppServer do
         allowed_tools: Map.get(config, :allowed_tools, []),
         disallowed_tools: Map.get(config, :disallowed_tools, []),
         system_prompt_preset: Map.get(config, :system_prompt_preset, "claude_code"),
-        setting_sources: Map.get(config, :setting_sources, []),
+        # nil (the default) is dropped by the `is_nil` reject below, so the
+        # envelope omits `setting_sources` and the sidecar lets the SDK apply
+        # its all-sources default (CLI parity: load `.claude/settings.json`,
+        # `.mcp.json`, `CLAUDE.md`). An explicit `[]` (isolation) or subset is
+        # sent verbatim.
+        setting_sources: Map.get(config, :setting_sources),
         max_turns: Map.get(config, :max_turns),
         max_budget_usd: Map.get(config, :max_budget_usd),
         effort: Map.get(config, :effort),

@@ -565,11 +565,22 @@ protocol to Symphony shaped like the Codex app-server client.
 - `system_prompt_preset` (string enum)
   - Allowed values: `claude_code`, `minimal`.
   - Default: `claude_code`.
-- `setting_sources` (list of strings)
-  - Default: `[]` (do NOT load any host-level Claude Code settings).
-  - When the list is empty the sidecar MUST NOT inherit `.claude/settings.json`, home settings,
-    or other host-level Claude Code configuration; this preserves Symphony's deterministic
-    sandbox posture across hosts.
+- `setting_sources` (list of strings or null)
+  - Default: unset/null — load the Claude Agent SDK's default sources (`user`, `project`,
+    `local`), matching an interactive `claude` run in the workspace. The sidecar MUST omit
+    `setting_sources` from the SDK options when unset so the SDK applies its own all-sources
+    default; consequently the agent inherits the target repo's `.claude/settings.json`
+    (including `enableAllProjectMcpServers`), project `.mcp.json` MCP servers (e.g. an `lsp`
+    code-intelligence server), and `CLAUDE.md`.
+  - An explicit `[]` restores deterministic isolation: the sidecar MUST NOT inherit
+    `.claude/settings.json`, home settings, or other host-level Claude Code configuration. A
+    subset such as `["project"]` loads only the named layers.
+  - Safety for the inherited surface (repo-supplied hooks and permission rules) rests on the
+    outer sandbox (jai, §15.5) plus the workspace-cwd invariant (§15.2), NOT on settings
+    isolation. Deployments without an outer sandbox SHOULD set `setting_sources: []`.
+  - Project `.mcp.json` server tools must additionally be permitted to be callable under
+    `dontAsk`: either the repo's loaded `.claude/settings.json` `permissions.allow` covers
+    them, or `agent.claude.allowed_tools` lists `mcp__<server>` (e.g. `mcp__lsp`).
 - `max_turns` (positive integer or null)
   - Default: implementation-defined.
   - When set, caps the SDK-internal turn budget for one Symphony turn (separate from
@@ -832,7 +843,9 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.claude.allowed_tools`: list of strings, default `[]`
 - `agent.claude.disallowed_tools`: list of strings, default `[]`
 - `agent.claude.system_prompt_preset`: enum (`claude_code` | `minimal`), default `claude_code`
-- `agent.claude.setting_sources`: list of strings, default `[]`
+- `agent.claude.setting_sources`: list of strings or null, default null (load the SDK's default
+  sources — CLI parity; inherits the repo's `.claude/settings.json`, `.mcp.json`, `CLAUDE.md`).
+  Set `[]` for deterministic isolation.
 - `agent.claude.max_turns`: positive integer or null, default implementation-defined
 - `agent.claude.max_budget_usd`: number or null, default `null`
 - `agent.claude.effort`: enum (`low` | `medium` | `high` | `xhigh` | `max`) or null,
@@ -1495,8 +1508,10 @@ Session startup:
   - `permission_mode` from `agent.claude.permission_mode`.
   - `model` from `agent.claude.model`.
   - `allowed_tools` and `disallowed_tools` from the corresponding config keys.
-  - `setting_sources` from `agent.claude.setting_sources` (default `[]` — do NOT inherit
-    `.claude/settings.json` or other host-level configuration).
+  - `setting_sources` from `agent.claude.setting_sources` when set; when unset (the default)
+    the option is OMITTED so the SDK loads its default sources (CLI parity: inherit the repo's
+    `.claude/settings.json`, project `.mcp.json` servers, and `CLAUDE.md`). `[]` opts back into
+    isolation.
   - `max_turns` from `agent.claude.max_turns` when set.
   - `effort` from `agent.claude.effort` when set.
   - `mcp_servers` containing an in-process MCP server constructed via
@@ -2613,8 +2628,10 @@ If the Claude adapter is implemented (`agent.kind == claude`):
 - When `permission_mode == "dontAsk"`, tools absent from `agent.claude.allowed_tools` are
   refused without prompting and without stalling
 - A `PreToolUse` hook rejects tool inputs whose realpath escapes the workspace
-- `setting_sources == []` is honored (the sidecar does not load `.claude/settings.json` or
-  other host-level Claude Code settings)
+- `setting_sources` is honored: when set to `[]` the sidecar loads no host-level Claude Code
+  settings (deterministic isolation); when unset (default) the option is omitted so the SDK
+  loads its default sources (the agent inherits the repo's `.claude/settings.json`,
+  `.mcp.json`, and `CLAUDE.md`, like an interactive `claude` run)
 - If `linear_graphql` is implemented, it is registered via `create_sdk_mcp_server` + `@tool`
   (in-process MCP) and addressed as `mcp__<server_name>__linear_graphql` in `allowed_tools`
 

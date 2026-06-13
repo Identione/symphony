@@ -311,7 +311,18 @@ defmodule SymphonyElixir.Config.Schema do
       field(:allowed_tools, {:array, :string}, default: [])
       field(:disallowed_tools, {:array, :string}, default: [])
       field(:system_prompt_preset, :string, default: "claude_code")
-      field(:setting_sources, {:array, :string}, default: [])
+      # Which filesystem settings layers the underlying `claude` CLI loads.
+      # Unset (nil) — the default — means "load the CLI defaults"
+      # (user/project/local), so a Claude agent inherits the target repo's
+      # `.claude/settings.json`, `enableAllProjectMcpServers`, project
+      # `.mcp.json` servers (e.g. `lsp`), and `CLAUDE.md`, exactly like an
+      # interactive `claude` run in that checkout. The sidecar omits the field
+      # entirely when nil so the SDK applies its own all-sources default. Set
+      # this to `[]` to restore deterministic isolation (load no host-level
+      # settings), or to a subset like `["project"]`. Safety for the inherited
+      # surface (repo hooks, repo permission rules) rests on the jai sandbox in
+      # the default `command` + the workspace-cwd invariant, not on isolation.
+      field(:setting_sources, {:array, :string})
       field(:max_turns, :integer)
       field(:max_budget_usd, :float)
       # Reasoning effort forwarded to the sidecar's ClaudeAgentOptions. No

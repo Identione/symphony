@@ -308,9 +308,19 @@ def build_options_payload(init_envelope: dict[str, Any]) -> dict[str, Any]:
         "permission_mode": init_envelope.get("permission_mode", "dontAsk"),
         "allowed_tools": init_envelope.get("allowed_tools", []) or [],
         "disallowed_tools": init_envelope.get("disallowed_tools", []) or [],
-        "setting_sources": init_envelope.get("setting_sources", []) or [],
         "system_prompt": system_prompt,
     }
+
+    # Only forward setting_sources when Symphony actually supplied one. When the
+    # init envelope omits it, leave it off the payload so ClaudeAgentOptions
+    # uses its own default (None -> the CLI loads all filesystem settings:
+    # .claude/settings.json, project .mcp.json, CLAUDE.md), matching an
+    # interactive `claude` run. An explicit [] (isolation) or subset is passed
+    # through verbatim. Distinguish "absent" from "[]" — `or []` would conflate
+    # them and silently force isolation.
+    setting_sources = init_envelope.get("setting_sources")
+    if setting_sources is not None:
+        payload["setting_sources"] = setting_sources
 
     if init_envelope.get("model"):
         payload["model"] = init_envelope["model"]

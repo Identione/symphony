@@ -1,5 +1,5 @@
 .PHONY: help all setup deps build fmt fmt-check lint test coverage ci dialyzer e2e \
-        escript ensure-deps upgrade-tools
+        escript ensure-deps upgrade-tools python-test
 
 # mise refuses to activate an untrusted config (per-machine trust state),
 # which would silently strip mix/elixir from PATH. Trust at parse time so a
@@ -12,7 +12,7 @@ _ := $(shell mise trust --quiet . 2>/dev/null || true)
 MIX ?= mise exec -- mix
 
 help:
-	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, e2e, ci, build, escript, all, upgrade-tools"
+	@echo "Targets: setup, deps, fmt, fmt-check, lint, test, coverage, dialyzer, python-test, e2e, ci, build, escript, all, upgrade-tools"
 	@echo
 	@echo "Daemon launches happen from generated instance Makefiles under instances/<name>/."
 	@echo "Run 'make init INSTANCE=<name> ARGS=\"...\"' at the repo root to create one."
@@ -66,6 +66,13 @@ test: ensure-deps
 dialyzer: ensure-deps
 	$(MIX) dialyzer --format short
 
+# The Python sidecar harness (priv/claude_agent) ships its own pytest suite of
+# pure-Python wire/option helpers (no claude-agent-sdk required). Run it through
+# uv with the frozen lockfile so the pinned dev deps are used. Part of `ci` so
+# this fork's only quality signal (local `make all`) covers the harness too.
+python-test:
+	cd priv/claude_agent && mise exec -- uv run --frozen pytest -q
+
 e2e:
 	SYMPHONY_RUN_LIVE_E2E=1 $(MIX) test test/symphony_elixir/live_e2e_test.exs
 
@@ -76,6 +83,7 @@ ci:
 	$(MAKE) lint
 	$(MAKE) coverage
 	$(MAKE) dialyzer
+	$(MAKE) python-test
 
 all: ci
 

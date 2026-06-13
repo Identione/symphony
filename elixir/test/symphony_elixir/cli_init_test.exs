@@ -228,7 +228,10 @@ defmodule SymphonyElixir.CLI.InitTest do
     assert contents =~ "uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent"
     assert contents =~ "permission_mode: dontAsk"
     assert contents =~ "mcp__symphony__linear_graphql"
-    assert contents =~ "setting_sources: []"
+    # `setting_sources` ships commented-out: the default (unset) loads the
+    # repo's Claude settings/.mcp.json/CLAUDE.md like an interactive run, and
+    # the line is offered as a swap-ready isolation opt-out.
+    assert contents =~ "#setting_sources: []"
 
     # The jai-wrapped form is shipped as a commented swap-ready alternative
     # (`#command: jai uv run …`), so the bare substring "jai uv run" appears

@@ -119,9 +119,18 @@ agent:
       # In-process MCP tool the sidecar exposes; round-trips back to Symphony
       # so Linear auth never leaves the orchestrator.
       - mcp__symphony__linear_graphql
-    # Do not inherit ~/.claude/settings.json or other host-level Claude Code
-    # settings — keep the sidecar's posture deterministic.
-    setting_sources: []
+      # Project `.mcp.json` server tools (e.g. an `lsp` code-intelligence
+      # server) must be allowlisted to be callable under `dontAsk`: add
+      # `mcp__<server>` here (e.g. `mcp__lsp`) or rely on the repo's loaded
+      # `.claude/settings.json` `permissions.allow`.
+      #- mcp__lsp
+    # `setting_sources` is intentionally unset: like an interactive `claude`
+    # run, the agent loads the target repo's `.claude/settings.json`
+    # (incl. `enableAllProjectMcpServers`), project `.mcp.json` servers, and
+    # `CLAUDE.md`. The `jai` command above is the outer sandbox that contains
+    # this inherited surface (repo hooks / permission rules). Uncomment for
+    # deterministic isolation (load no host-level settings).
+    #setting_sources: []
     # Quiet by default so Claude's debug feed doesn't drown out per-issue
     # orchestration output. Flip to `true` to restore the noisy debugging view:
     # SDK partial-message + hook-event streams, the underlying `claude` CLI's
