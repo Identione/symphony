@@ -589,7 +589,17 @@ defmodule SymphonyElixir.CLI.Init do
           - TodoWrite
           - NotebookEdit
           - mcp__symphony__linear_graphql
-        setting_sources: []
+          # If the target repo ships a project `.mcp.json` server (e.g. `lsp`),
+          # its tools must be allowlisted to be callable under `dontAsk`: add
+          # `mcp__<server>` here (e.g. `mcp__lsp`) or rely on the repo's own
+          # `.claude/settings.json` `permissions.allow`.
+          #- mcp__lsp
+        # `setting_sources` is intentionally unset: like an interactive `claude`
+        # run, the agent loads the target repo's `.claude/settings.json`
+        # (incl. `enableAllProjectMcpServers`), project `.mcp.json` servers, and
+        # `CLAUDE.md`. Uncomment for deterministic isolation (load no host-level
+        # settings); the jai command (A) contains the inherited surface.
+        #setting_sources: []
     """
     |> String.trim_trailing("\n")
   end

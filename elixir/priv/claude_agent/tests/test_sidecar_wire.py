@@ -61,8 +61,33 @@ def test_build_options_payload_defaults() -> None:
     assert payload["permission_mode"] == "dontAsk"
     assert payload["allowed_tools"] == []
     assert payload["disallowed_tools"] == []
-    assert payload["setting_sources"] == []
     assert payload["system_prompt"] == {"type": "preset", "preset": "claude_code"}
+
+
+def test_build_options_payload_omits_setting_sources_when_absent() -> None:
+    """Absent setting_sources -> key left off so ClaudeAgentOptions defaults to
+    None, i.e. the CLI loads all filesystem settings (.claude/settings.json,
+    project .mcp.json, CLAUDE.md) — parity with an interactive `claude` run."""
+
+    payload = build_options_payload({"type": "init", "cwd": "/tmp/ws"})
+    assert "setting_sources" not in payload
+
+
+def test_build_options_payload_forwards_empty_setting_sources_for_isolation() -> None:
+    """An explicit [] is passed through verbatim (SDK isolation: load no
+    host-level settings) — it must NOT be conflated with "absent"."""
+
+    payload = build_options_payload(
+        {"type": "init", "cwd": "/tmp/ws", "setting_sources": []}
+    )
+    assert payload["setting_sources"] == []
+
+
+def test_build_options_payload_forwards_setting_sources_subset() -> None:
+    payload = build_options_payload(
+        {"type": "init", "cwd": "/tmp/ws", "setting_sources": ["project"]}
+    )
+    assert payload["setting_sources"] == ["project"]
 
 
 def test_build_options_payload_minimal_preset() -> None:

@@ -100,7 +100,10 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
     assert settings.agent.claude.system_prompt_preset == "claude_code"
     assert settings.agent.claude.allowed_tools == []
     assert settings.agent.claude.disallowed_tools == []
-    assert settings.agent.claude.setting_sources == []
+    # nil (unset) is the CLI-parity default: the sidecar omits setting_sources
+    # so the SDK loads all filesystem settings (.claude/settings.json,
+    # project .mcp.json, CLAUDE.md). Set [] to restore deterministic isolation.
+    assert settings.agent.claude.setting_sources == nil
     assert settings.agent.claude.turn_timeout_ms == 3_600_000
     assert settings.agent.claude.read_timeout_ms == 30_000
     assert settings.agent.claude.stall_timeout_ms == 300_000

@@ -209,6 +209,17 @@ Reasoning effort: Codex is tuned via `--config model_reasoning_effort=…` in it
 (`low|medium|high|xhigh|max`). Both default to the agent's own default
 (`high` for the Claude SDK) when unset; `xhigh` requires Opus 4.7.
 
+Project settings (Claude adapter): `agent.claude.setting_sources` is unset by
+default, so a Claude agent loads the target repo's Claude Code settings just
+like an interactive `claude` run — its `.claude/settings.json` (including
+`enableAllProjectMcpServers`), project `.mcp.json` MCP servers (e.g. an `lsp`
+code-intelligence server), and `CLAUDE.md`. The outer `jai` sandbox contains
+the inherited surface (repo hooks / permission rules); deployments without it
+should set `agent.claude.setting_sources: []` for deterministic isolation. To
+make a project MCP server's tools callable under `dontAsk`, add `mcp__<server>`
+(e.g. `mcp__lsp`) to `agent.claude.allowed_tools`, or let the repo's loaded
+`permissions.allow` cover them.
+
 Detailed codex/claude policy knobs (`approval_policy`, `thread_sandbox`,
 `turn_sandbox_policy`, `claude.config_dir`, `permission_mode`, the
 Codex 0.115+ `.git` deny-rule workaround with `jai`/`default_permissions`
