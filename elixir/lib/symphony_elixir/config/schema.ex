@@ -285,6 +285,7 @@ defmodule SymphonyElixir.Config.Schema do
     use Ecto.Schema
     import Ecto.Changeset
 
+    alias SymphonyElixir.Config.Schema
     alias SymphonyElixir.Config.Schema.Quota
 
     @permission_modes ~w(default acceptEdits plan dontAsk bypassPermissions)
@@ -329,6 +330,14 @@ defmodule SymphonyElixir.Config.Schema do
       # default — when unset Symphony sends nothing and the SDK picks its own
       # default (`high`).
       field(:effort, :string)
+      # Per-issue-state overrides for `model`/`effort`, keyed by lowercased
+      # Linear state name (e.g. `merging`). When the issue's current state has
+      # an entry it wins over the top-level `model`/`effort`; otherwise the
+      # global value (or SDK default) applies. Mirrors
+      # `agent.max_concurrent_agents_by_state`. Lets mechanical states (the
+      # merge/land run) drop to a cheaper model + lower reasoning effort.
+      field(:model_by_state, :map, default: %{})
+      field(:effort_by_state, :map, default: %{})
       field(:extra_env, :map, default: %{})
       field(:turn_timeout_ms, :integer, default: 3_600_000)
       # Cold sidecar startup (uv → Python interpreter → claude_agent_sdk
@@ -380,6 +389,8 @@ defmodule SymphonyElixir.Config.Schema do
           :max_turns,
           :max_budget_usd,
           :effort,
+          :model_by_state,
+          :effort_by_state,
           :extra_env,
           :turn_timeout_ms,
           :read_timeout_ms,
@@ -394,10 +405,34 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_inclusion(:permission_mode, @permission_modes)
       |> validate_inclusion(:system_prompt_preset, @system_prompt_presets)
       |> validate_inclusion(:effort, @efforts)
+      |> update_change(:model_by_state, &Schema.normalize_state_map/1)
+      |> update_change(:effort_by_state, &Schema.normalize_state_map/1)
+      |> Schema.validate_state_strings(:model_by_state)
+      |> validate_state_efforts(:effort_by_state)
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
       |> validate_number(:max_turns, greater_than: 0)
+    end
+
+    # Like `Schema.validate_state_strings/2`, but additionally constrains each
+    # value to the `@efforts` whitelist (the validator lives here so it can see
+    # the module-local list).
+    defp validate_state_efforts(changeset, field) do
+      validate_change(changeset, field, fn ^field, mapping ->
+        Enum.flat_map(mapping, fn {state_name, effort} ->
+          cond do
+            to_string(state_name) == "" ->
+              [{field, "state names must not be blank"}]
+
+            effort not in @efforts ->
+              [{field, "effort must be one of: #{Enum.join(@efforts, ", ")}"}]
+
+            true ->
+              []
+          end
+        end)
+      end)
     end
   end
 
@@ -702,6 +737,35 @@ defmodule SymphonyElixir.Config.Schema do
 
           not is_integer(limit) or limit <= 0 ->
             [{field, "limits must be positive integers"}]
+
+          true ->
+            []
+        end
+      end)
+    end)
+  end
+
+  @doc false
+  @spec normalize_state_map(nil | map()) :: map()
+  def normalize_state_map(nil), do: %{}
+
+  def normalize_state_map(mapping) when is_map(mapping) do
+    Enum.reduce(mapping, %{}, fn {state_name, value}, acc ->
+      Map.put(acc, normalize_issue_state(to_string(state_name)), value)
+    end)
+  end
+
+  @doc false
+  @spec validate_state_strings(Ecto.Changeset.t(), atom()) :: Ecto.Changeset.t()
+  def validate_state_strings(changeset, field) do
+    validate_change(changeset, field, fn ^field, mapping ->
+      Enum.flat_map(mapping, fn {state_name, value} ->
+        cond do
+          to_string(state_name) == "" ->
+            [{field, "state names must not be blank"}]
+
+          not is_binary(value) or value == "" ->
+            [{field, "values must be non-empty strings"}]
 
           true ->
             []
