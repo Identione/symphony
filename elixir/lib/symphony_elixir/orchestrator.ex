@@ -737,6 +737,9 @@ defmodule SymphonyElixir.Orchestrator do
 
         terminate_running_issue(state, issue.id, false)
 
+      issue_blocked_by_non_terminal?(issue, terminal_states) ->
+        pause_dependency_blocked_running_issue(state, issue, active_states)
+
       active_issue_state?(issue.state, active_states) ->
         refresh_running_issue_state(state, issue)
 
@@ -846,6 +849,62 @@ defmodule SymphonyElixir.Orchestrator do
       _ ->
         state
     end
+  end
+
+  defp pause_dependency_blocked_running_issue(%State{} = state, %Issue{} = issue, active_states) do
+    state = maybe_restore_dependency_blocked_issue_state(state, issue, active_states)
+
+    Logger.info("Issue is waiting on non-terminal blockers: #{issue_context(issue)} state=#{inspect(issue.state)} blocked_by=#{length(issue.blocked_by)}; pausing active agent")
+
+    terminate_running_issue(state, issue.id, false)
+  end
+
+  defp maybe_restore_dependency_blocked_issue_state(%State{} = state, %Issue{} = issue, active_states) do
+    if active_issue_state?(issue.state, active_states) do
+      state
+    else
+      state
+      |> dependency_resume_state(issue, active_states)
+      |> restore_dependency_blocked_issue_state(state, issue)
+    end
+  end
+
+  defp restore_dependency_blocked_issue_state(nil, %State{} = state, %Issue{} = issue) do
+    Logger.warning("Dependency-blocked issue is outside active states and no active resume state is configured: #{issue_context(issue)} state=#{inspect(issue.state)}")
+    state
+  end
+
+  defp restore_dependency_blocked_issue_state(state_name, %State{} = state, %Issue{} = issue) do
+    case Tracker.update_issue_state(issue.id, state_name) do
+      :ok ->
+        Logger.info("Moved dependency-blocked issue back to active state: #{issue_context(issue)} from=#{inspect(issue.state)} to=#{inspect(state_name)}")
+        state
+
+      {:error, reason} ->
+        Logger.warning("Failed to move dependency-blocked issue back to active state: #{issue_context(issue)} from=#{inspect(issue.state)} to=#{inspect(state_name)} reason=#{inspect(reason)}")
+        state
+    end
+  end
+
+  defp dependency_resume_state(%State{} = state, %Issue{} = issue, active_states) do
+    state.running
+    |> Map.get(issue.id, %{})
+    |> Map.get(:issue)
+    |> case do
+      %Issue{state: previous_state} when is_binary(previous_state) ->
+        if active_issue_state?(previous_state, active_states),
+          do: previous_state,
+          else: default_dependency_resume_state()
+
+      _ ->
+        default_dependency_resume_state()
+    end
+  end
+
+  defp default_dependency_resume_state do
+    active_states = Config.settings!().tracker.active_states
+
+    Enum.find(active_states, &match_normalized_state?(&1, "todo")) || List.first(active_states)
   end
 
   defp refresh_blocked_issue_state(%State{} = state, %Issue{} = issue) do
@@ -1145,7 +1204,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp dependency_blocked_candidate?(%Issue{} = issue, %State{} = state, active_states, terminal_states) do
     candidate_issue?(issue, active_states, terminal_states) and
-      todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
+      issue_blocked_by_non_terminal?(issue, terminal_states) and
       not MapSet.member?(state.claimed, issue.id) and
       not Map.has_key?(state.running, issue.id) and
       not Map.has_key?(state.blocked, issue.id)
@@ -1294,7 +1353,7 @@ defmodule SymphonyElixir.Orchestrator do
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states) and
+      !issue_blocked_by_non_terminal?(issue, terminal_states) and
       !MapSet.member?(claimed, issue.id) and
       !Map.has_key?(running, issue.id) and
       !Map.has_key?(blocked, issue.id) and
@@ -1368,22 +1427,18 @@ defmodule SymphonyElixir.Orchestrator do
       MapSet.disjoint?(excluded_label_set(), present)
   end
 
-  defp todo_issue_blocked_by_non_terminal?(
-         %Issue{state: issue_state, blocked_by: blockers},
-         terminal_states
-       )
-       when is_binary(issue_state) and is_list(blockers) do
-    normalize_issue_state(issue_state) == "todo" and
-      Enum.any?(blockers, fn
-        %{state: blocker_state} when is_binary(blocker_state) ->
-          !terminal_issue_state?(blocker_state, terminal_states)
+  defp issue_blocked_by_non_terminal?(%Issue{blocked_by: blockers}, terminal_states)
+       when is_list(blockers) do
+    Enum.any?(blockers, fn
+      %{state: blocker_state} when is_binary(blocker_state) ->
+        !terminal_issue_state?(blocker_state, terminal_states)
 
-        _ ->
-          true
-      end)
+      _ ->
+        true
+    end)
   end
 
-  defp todo_issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
+  defp issue_blocked_by_non_terminal?(_issue, _terminal_states), do: false
 
   defp terminal_issue_state?(state_name, terminal_states) when is_binary(state_name) do
     MapSet.member?(terminal_states, normalize_issue_state(state_name))
@@ -1397,6 +1452,10 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp normalize_issue_state(state_name) when is_binary(state_name) do
     String.downcase(String.trim(state_name))
+  end
+
+  defp match_normalized_state?(state_name, normalized) when is_binary(normalized) do
+    normalize_issue_state(state_name) == normalized
   end
 
   defp normalize_label(label) when is_binary(label) do
@@ -2393,7 +2452,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp retry_candidate_issue?(%Issue{} = issue, terminal_states) do
     candidate_issue?(issue, active_state_set(), terminal_states) and
-      !todo_issue_blocked_by_non_terminal?(issue, terminal_states)
+      !issue_blocked_by_non_terminal?(issue, terminal_states)
   end
 
   defp dispatch_slots_available?(%Issue{} = issue, %State{} = state) do
