@@ -138,8 +138,11 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     }
   end
 
+  # Compact encoding (no `pretty: true`): every linear_graphql result is pasted
+  # into the conversation and re-read on each subsequent turn (~1,327 calls in
+  # the spend window), so pretty-print indentation is paid for many times over.
   defp encode_payload(payload) when is_map(payload) or is_list(payload) do
-    Jason.encode!(payload, pretty: true)
+    Jason.encode!(payload)
   end
 
   defp encode_payload(payload), do: inspect(payload)

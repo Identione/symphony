@@ -72,17 +72,23 @@ defmodule SymphonyElixir.OrchestratorRetryPolicyTest do
       assert {:retry, 60_000} = RetryPolicy.decide(:rate_limited, 2, nil, settings)
       assert {:retry, 45_000} = RetryPolicy.decide(:rate_limited, 1, 45_000, settings)
 
-      # Hints are clamped to the policy's `max_ms` (default 900_000ms baseline).
-      assert {:retry, 900_000} = RetryPolicy.decide(:rate_limited, 1, 5_000_000, settings)
+      # A subscription usage-limit reset can be hours out — `:rate_limited`
+      # honors the embedded `retry-after` up to a 6h ceiling rather than the
+      # shared 15-min cap, so it doesn't re-hit the wall mid-window.
+      assert {:retry, 5_000_000} = RetryPolicy.decide(:rate_limited, 1, 5_000_000, settings)
+      assert {:retry, 21_600_000} = RetryPolicy.decide(:rate_limited, 1, 99_000_000, settings)
     end
 
-    test "overloaded uses long backoff and honors Retry-After hint" do
+    test "overloaded honors Retry-After but stays on the short cap (transient 503)" do
       assert {:retry, 30_000} = RetryPolicy.decide(:overloaded, 1, nil, nil)
       assert {:retry, 12_000} = RetryPolicy.decide(:overloaded, 1, 12_000, nil)
+      # A malformed multi-hour hint must not strand a transient 503 — clamped to
+      # the 15-min baseline, unlike `:rate_limited`.
+      assert {:retry, 900_000} = RetryPolicy.decide(:overloaded, 1, 5_000_000, nil)
     end
 
-    test "context_window_exhausted, quota_exceeded, invalid_request never retry" do
-      for code <- [:context_window_exhausted, :quota_exceeded, :invalid_request] do
+    test "context_window_exhausted, quota_exceeded, invalid_request, budget_exhausted never retry" do
+      for code <- [:context_window_exhausted, :quota_exceeded, :invalid_request, :budget_exhausted] do
         assert RetryPolicy.decide(code, 1, nil, nil) == :no_retry, "code=#{code}"
         assert RetryPolicy.decide(code, 7, 60_000, nil) == :no_retry, "code=#{code} retry_after"
       end

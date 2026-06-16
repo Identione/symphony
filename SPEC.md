@@ -595,6 +595,12 @@ protocol to Symphony shaped like the Codex app-server client.
 - `max_budget_usd` (number or null)
   - Default: `null`.
   - Optional SDK-side cost ceiling.
+- `tool_output_limit` (non-negative integer)
+  - Default: implementation-defined (`16384` in the reference implementation).
+  - Per-call byte cap on native-tool output (e.g. `Read`/`Bash`/`Grep`/`Glob`). The sidecar
+    SHOULD register a `PostToolUse` hook that shrinks oversized string leaves of the tool
+    response head+tail — preserving the tool's output schema — so a large result is not re-sent
+    as `cache_read` on every subsequent turn. `0` disables the hook.
 - `extra_env` (map)
   - Default: `{}`.
   - Additional environment variables forwarded to the sidecar process.

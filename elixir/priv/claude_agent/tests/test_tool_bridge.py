@@ -146,6 +146,39 @@ def test_translate_missing_output_field_falls_back() -> None:
     assert json.loads(translated["content"][0]["text"]) == {"success": True, "answer": 42}
 
 
+def test_translate_caps_oversized_output_head_and_tail() -> None:
+    """An oversized linear_graphql result is elided head+tail with a marker so
+    it does not enter (and get re-read across) the conversation uncapped.
+
+    Distinct from the log-only ``fold_text``: this caps what Claude actually
+    sees, not just what gets logged.
+    """
+
+    from symphony_claude_agent.sidecar import _TOOL_RESULT_LIMIT
+
+    body = "A" * 5000 + "Z" * 5000  # well over the cap
+    result = {"success": True, "output": body}
+
+    translated = translate_symphony_tool_result(result)
+    text = translated["content"][0]["text"]
+
+    assert translated["is_error"] is False
+    assert len(text) < len(body)
+    assert len(text) <= _TOOL_RESULT_LIMIT + 200  # cap + marker headroom
+    assert text.startswith("A")  # head preserved
+    assert text.endswith("Z")  # tail preserved
+    assert "elided" in text  # omission is visible, not silent
+
+
+def test_translate_leaves_small_output_verbatim() -> None:
+    """An under-cap result is forwarded byte-for-byte (no marker injected)."""
+
+    inner = '{"data":{"viewer":{"id":"abc"}}}'
+    translated = translate_symphony_tool_result({"success": True, "output": inner})
+
+    assert translated == {"content": [{"type": "text", "text": inner}], "is_error": False}
+
+
 def test_translate_non_dict_result_is_error() -> None:
     """Defensive: a non-dict result is treated as a malformed reply."""
 

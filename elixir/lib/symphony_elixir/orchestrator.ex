@@ -9,7 +9,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   alias SymphonyElixir.{AgentRunner, Config, DeterministicFailure, ProviderQuota, StatusDashboard, Tracker, Workspace}
   alias SymphonyElixir.Linear.Issue
-  alias SymphonyElixir.Orchestrator.RetryPolicy
+  alias SymphonyElixir.Orchestrator.{RetryPolicy, SessionBudget}
 
   @continuation_retry_delay_ms 1_000
   @failure_retry_base_ms 10_000
@@ -76,6 +76,15 @@ defmodule SymphonyElixir.Orchestrator do
       # is NOT in `running` (the agent has exited) and has no retry timer
       # scheduled yet — the result handler decides whether to schedule one.
       pending_escalations: %{},
+      # Cumulative, episode-scoped per-issue session counter backing the
+      # `agent.max_sessions_per_issue` cap (P1/R1(a)). Keyed by issue id →
+      # `%{generation, count}`. Mirrored to `session_budget_table` (DETS) on
+      # every change so it survives a daemon restart / `make upgrade`.
+      session_counts: %{},
+      # DETS handle for the durable mirror, or `nil` when persistence is off
+      # (no instance `run/` dir wired) — the in-memory counter still caps within
+      # a single daemon lifetime.
+      session_budget_table: nil,
       codex_totals: nil,
       claude_totals: nil,
       provider_quotas: %{}
@@ -93,6 +102,9 @@ defmodule SymphonyElixir.Orchestrator do
     now_ms = System.monotonic_time(:millisecond)
     config = Config.settings!()
 
+    {session_budget_table, session_counts} =
+      SessionBudget.open(Application.get_env(:symphony_elixir, :session_budget_file))
+
     state = %State{
       poll_interval_ms: config.polling.interval_ms,
       max_concurrent_agents: config.agent.max_concurrent_agents,
@@ -100,6 +112,8 @@ defmodule SymphonyElixir.Orchestrator do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: nil,
+      session_counts: session_counts,
+      session_budget_table: session_budget_table,
       codex_totals: @empty_codex_totals,
       claude_totals: @empty_claude_totals,
       provider_quotas: %{codex: nil, claude: nil}
@@ -274,21 +288,31 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down(:normal, state, issue_id, running_entry, session_id) do
-    if input_required_blocker?(running_entry) do
-      block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
-    else
-      Logger.info("Agent task completed for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}; scheduling active-state continuation check")
+    settings = Config.settings!()
 
-      state
-      |> clear_deterministic_failure(issue_id)
-      |> complete_issue(issue_id)
-      |> schedule_issue_retry(issue_id, 1, %{
-        identifier: running_entry.identifier,
-        session_id: session_id,
-        delay_type: :continuation,
-        worker_host: Map.get(running_entry, :worker_host),
-        workspace_path: Map.get(running_entry, :workspace_path)
-      })
+    cond do
+      input_required_blocker?(running_entry) ->
+        block_input_required_agent_down(state, issue_id, running_entry, session_id, :normal)
+
+      session_budget_exhausted?(state, issue_id, settings) ->
+        # The issue keeps finishing turns cleanly yet never leaves the active
+        # set (poll-only / blocked-parent loop). Stop the continuation march and
+        # escalate through the same DeterministicFailure machinery as IDE-73.
+        escalate_session_budget(state, issue_id, running_entry, session_id, settings)
+
+      true ->
+        Logger.info("Agent task completed for issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} session_id=#{session_id}; scheduling active-state continuation check")
+
+        state
+        |> clear_deterministic_failure(issue_id)
+        |> complete_issue(issue_id)
+        |> schedule_issue_retry(issue_id, 1, %{
+          identifier: running_entry.identifier,
+          session_id: session_id,
+          delay_type: :continuation,
+          worker_host: Map.get(running_entry, :worker_host),
+          workspace_path: Map.get(running_entry, :workspace_path)
+        })
     end
   end
 
@@ -530,6 +554,7 @@ defmodule SymphonyElixir.Orchestrator do
         deterministic_failures: DeterministicFailure.reset(state.deterministic_failures, issue_id),
         pending_escalations: Map.delete(state.pending_escalations, issue_id)
     }
+    |> close_session_episode(issue_id)
   end
 
   defp put_pending_escalation(state, issue_id, pending) do
@@ -553,6 +578,97 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp clear_deterministic_failure(state, issue_id) do
     %{state | deterministic_failures: DeterministicFailure.reset(state.deterministic_failures, issue_id)}
+  end
+
+  # ── Cumulative per-issue session cap (P1/R1(a)) ─────────────────────────────
+
+  defp session_count(%State{session_counts: counts}, issue_id) do
+    case Map.get(counts, issue_id) do
+      %{count: count} when is_integer(count) -> count
+      _ -> 0
+    end
+  end
+
+  defp session_budget_exhausted?(%State{} = state, issue_id, settings) do
+    cap = settings.agent.max_sessions_per_issue
+    is_integer(cap) and cap > 0 and session_count(state, issue_id) >= cap
+  end
+
+  # Bump the current episode's session count and mirror it to DETS. Called on
+  # every actual session launch (initial dispatch and every relaunch), so the
+  # count reflects total sessions run in the active episode.
+  defp bump_session_count(%State{} = state, issue_id) do
+    entry = Map.get(state.session_counts, issue_id, %{generation: 1, count: 0})
+    updated = %{entry | count: entry.count + 1}
+    SessionBudget.put(state.session_budget_table, issue_id, updated)
+    %{state | session_counts: Map.put(state.session_counts, issue_id, updated)}
+  end
+
+  # The issue is leaving the active set (terminal, escalated, or otherwise
+  # released). Advance the generation and zero the count so a later re-entry
+  # (e.g. a human moving an escalated issue back to Todo) starts a fresh
+  # episode with full budget instead of re-escalating off the stale tally.
+  defp close_session_episode(%State{} = state, issue_id) do
+    case Map.get(state.session_counts, issue_id) do
+      nil ->
+        state
+
+      %{generation: generation} ->
+        updated = %{generation: generation + 1, count: 0}
+        SessionBudget.put(state.session_budget_table, issue_id, updated)
+        %{state | session_counts: Map.put(state.session_counts, issue_id, updated)}
+    end
+  end
+
+  # Escalate via the same supervised DeterministicFailure side-effect path the
+  # :DOWN handler uses (workpad comment + state move), then drop the issue from
+  # the active set in the result handler. The synthetic entry keeps the shared
+  # `apply_deterministic_failure_result/5` fallback (escalation side-effect
+  # failed) well-formed.
+  defp escalate_session_budget(%State{} = state, issue_id, running_entry, session_id, settings) do
+    count = session_count(state, issue_id)
+    action = {:escalate, :max_sessions_per_issue, count}
+    issue = Map.get(running_entry, :issue) || running_entry_issue_fallback(running_entry, issue_id)
+
+    Logger.warning(
+      "Issue hit cumulative session cap issue_id=#{issue_id} issue_identifier=#{running_entry.identifier} " <>
+        "session_id=#{session_id} sessions=#{count} cap=#{settings.agent.max_sessions_per_issue}; escalating"
+    )
+
+    entry = %{
+      code: :max_sessions_per_issue,
+      count: count,
+      notified_alert?: false,
+      notified_escalation?: false
+    }
+
+    case spawn_deterministic_action(issue_id, issue, action, settings) do
+      {:ok, token} ->
+        pending = %{
+          token: token,
+          action: action,
+          entry: entry,
+          running_entry: running_entry,
+          reason: {:agent_run_failed, :max_sessions_per_issue, :session_cap}
+        }
+
+        put_pending_escalation(state, issue_id, pending)
+
+      {:error, spawn_reason} ->
+        # Couldn't spawn the side effect; fall back to a continuation retry so
+        # the issue isn't stranded. The next clean exit re-checks the cap.
+        Logger.warning("Session-cap escalation spawn failed for issue_id=#{issue_id}: #{inspect(spawn_reason)}")
+
+        state
+        |> complete_issue(issue_id)
+        |> schedule_issue_retry(issue_id, 1, %{
+          identifier: running_entry.identifier,
+          session_id: session_id,
+          delay_type: :continuation,
+          worker_host: Map.get(running_entry, :worker_host),
+          workspace_path: Map.get(running_entry, :workspace_path)
+        })
+    end
   end
 
   defp extract_error_code({:agent_run_failed, code, _reason}) when is_atom(code), do: code
@@ -974,6 +1090,7 @@ defmodule SymphonyElixir.Orchestrator do
             deterministic_failures: DeterministicFailure.reset(state.deterministic_failures, issue_id),
             pending_escalations: Map.delete(state.pending_escalations, issue_id)
         }
+        |> close_session_episode(issue_id)
 
       _ ->
         release_issue_claim(state, issue_id)
@@ -1625,6 +1742,7 @@ defmodule SymphonyElixir.Orchestrator do
             retry_attempts: Map.delete(state.retry_attempts, issue.id),
             rebase_pending: Map.delete(state.rebase_pending, issue.id)
         }
+        |> bump_session_count(issue.id)
 
       {:error, reason} ->
         Logger.error("Unable to spawn agent for #{issue_context(issue)}: #{inspect(reason)}")
@@ -1855,6 +1973,7 @@ defmodule SymphonyElixir.Orchestrator do
         deterministic_failures: DeterministicFailure.reset(state.deterministic_failures, issue_id),
         pending_escalations: Map.delete(state.pending_escalations, issue_id)
     }
+    |> close_session_episode(issue_id)
   end
 
   defp retry_delay(attempt, metadata) when is_integer(attempt) and attempt > 0 and is_map(metadata) do

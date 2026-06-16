@@ -324,8 +324,22 @@ defmodule SymphonyElixir.Config.Schema do
       # surface (repo hooks, repo permission rules) rests on the jai sandbox in
       # the default `command` + the workspace-cwd invariant, not on isolation.
       field(:setting_sources, {:array, :string})
-      field(:max_turns, :integer)
+      # Level-1 belt (P0.4): the SDK caps model turns *within a single
+      # continuation* at this value. Left unset the SDK is unbounded, so a
+      # non-rate-limit within-query tool runaway is bounded only by
+      # `max_budget_usd` (also unset by default). 40 sits well above the
+      # observed 2–4 turns/continuation norm without truncating legitimate long
+      # turns. Rate-limit waste is braked separately at the error path; this is
+      # the generic within-session ceiling.
+      field(:max_turns, :integer, default: 40)
       field(:max_budget_usd, :float)
+      # R2b: per-call cap (bytes) on native-tool output (Read/Bash/Grep/Glob),
+      # enforced by a PostToolUse hook in the sidecar. A returned tool result is
+      # re-sent as `cache_read` on every later turn, so an uncapped large output
+      # is paid for ~Σ(turns) times. The hook shrinks oversized string leaves
+      # head+tail (preserving the tool's output schema) and tells the model it
+      # can re-read a narrower slice. Default 16 KiB; 0 disables the hook.
+      field(:tool_output_limit, :integer, default: 16_384)
       # Reasoning effort forwarded to the sidecar's ClaudeAgentOptions. No
       # default — when unset Symphony sends nothing and the SDK picks its own
       # default (`high`).
@@ -388,6 +402,7 @@ defmodule SymphonyElixir.Config.Schema do
           :setting_sources,
           :max_turns,
           :max_budget_usd,
+          :tool_output_limit,
           :effort,
           :model_by_state,
           :effort_by_state,
@@ -413,6 +428,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
       |> validate_number(:max_turns, greater_than: 0)
+      |> validate_number(:tool_output_limit, greater_than_or_equal_to: 0)
     end
 
     # Like `Schema.validate_state_strings/2`, but additionally constrains each
@@ -461,6 +477,18 @@ defmodule SymphonyElixir.Config.Schema do
       field(:deterministic_failure_alert_threshold, :integer, default: 3)
       field(:deterministic_failure_escalation_threshold, :integer, default: 5)
       field(:deterministic_failure_escalation_state, :string, default: "Human Review")
+      # Cumulative, episode-scoped ceiling on how many agent sessions a single
+      # issue may run before the orchestrator escalates it (P1/R1(a)). Unlike
+      # the deterministic-failure streak — which only counts *consecutive
+      # same-code* failures and resets on a clean `:normal` exit or a transient
+      # blip — this is failure-mode-agnostic: it catches an issue that keeps
+      # finishing turns cleanly yet never leaves the active set (the
+      # poll-only/blocked-parent loop). The count is persisted per issue (DETS
+      # under the instance `run/`) so it survives a daemon restart / `make
+      # upgrade`, and resets when the issue leaves the active set (terminal,
+      # escalated, or human-moved). Default 8 sits well above a normal
+      # multi-turn issue.
+      field(:max_sessions_per_issue, :integer, default: 8)
       embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
       embeds_one(:claude, Claude, on_replace: :update, defaults_to_struct: true)
     end
@@ -482,7 +510,8 @@ defmodule SymphonyElixir.Config.Schema do
           :kind,
           :deterministic_failure_alert_threshold,
           :deterministic_failure_escalation_threshold,
-          :deterministic_failure_escalation_state
+          :deterministic_failure_escalation_state,
+          :max_sessions_per_issue
         ],
         empty_values: []
       )
@@ -494,6 +523,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
       |> validate_number(:deterministic_failure_alert_threshold, greater_than: 0)
       |> validate_number(:deterministic_failure_escalation_threshold, greater_than: 0)
+      |> validate_number(:max_sessions_per_issue, greater_than: 0)
       |> validate_thresholds_order()
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)

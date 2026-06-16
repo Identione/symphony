@@ -16,11 +16,11 @@ window; the rest are untouched.
 
 | # | Analysis item | Status | Evidence (current code) |
 |---|---|---|---|
-| 3a / **P0** | Model is Opus 4.7 (≈5× price) | ⚠️ **Partial — infra only** | `model_by_state`/`effort_by_state` added in `c5b8ba0` (`elixir/lib/symphony_elixir/config/schema.ex:339-340`; resolved at `elixir/lib/symphony_elixir/claude/app_server.ex:171-204`). Only **`merging → haiku`** is wired, in the single new `instances/entry-elixir-v1-app-v2/WORKFLOW.md`. The bulk Todo/In-Progress work — where ~all the spend is — runs on the **unset global model → SDK default → Opus**. `entry`/`symphony` set no model at all. |
-| 3b / **P1** | No give-up / convergence cap | ⚠️ **Partial** | IDE-73/74 added deterministic-failure escalation: `max_turns_reached` is now a counted code (`elixir/lib/symphony_elixir/deterministic_failure.ex:62`), escalating to **Human Review** after 5 consecutive hits (`schema.ex:461-463`). Three structural holes remain — see §3, R1. |
-| 3c / **P2** | Tool output not truncated | ❌ **Not solved** | `translate_symphony_tool_result` passes `output` verbatim (`elixir/priv/claude_agent/symphony_claude_agent/sidecar.py:241-249`). |
-| 3d | No context compaction | ❌ **Not solved** | SDK payload still only carries `max_turns/max_budget_usd/model/effort` (`sidecar.py:306-345`); no compaction knob. |
-| 3e / **P3** | `linear_graphql` pretty-printed JSON | ❌ **Not solved** | `Jason.encode!(payload, pretty: true)` unchanged (`elixir/lib/symphony_elixir/codex/dynamic_tool.ex:142`). |
+| 3a / **P0** | Model is Opus 4.7 (≈5× price) | ❌ **Rejected — keep Opus for planning** | Operator decision (2026-06-16): the bulk Todo/In-Progress work is *planning + implementation*, which is exactly where Opus quality earns its cost — a weaker plan means more turns/reworks, eating the nominal 5× saving. Sonnet stays off the planning path. Cheaper models remain appropriate only for **mechanical, no-reasoning states** via `model_by_state` (e.g. `merging → haiku`, already wired in `entry-elixir-v1-app-v2`). Cost must come from R1/R2 (cut the long tail + context), not from downgrading the planner. |
+| 3b / **P1** | No give-up / convergence cap | ⚠️ **Partial — R1(b) done; R1(a) deferred** | IDE-73/74 escalation (`deterministic_failure.ex`) plus R1(b): `max_budget_usd` breaches now *halt* — sidecar surfaces `error_max_budget_usd` as an error envelope (`sidecar.py` `_forward_message`), mapped to `:budget_exhausted` (`app_server.ex`), classified `:no_retry` + immediate-escalation. The cumulative, restart-durable cap **R1(a)** remains open (design decisions in §3). |
+| 3c / **P2** | Tool output not truncated | ⚠️ **Partial — R2c done; R2b deferred** | `linear_graphql` results now capped head+tail at 8 KiB (`sidecar.py` `cap_tool_result_text` in `translate_symphony_tool_result`). The dominant `Read`/`Bash` SDK-native cost still needs the **R2b** `PostToolUse` hook. |
+| 3d | No context compaction | ❌ **Not solved** | SDK payload still only carries `max_turns/max_budget_usd/model/effort` (`sidecar.py`); no compaction knob. |
+| 3e / **P3** | `linear_graphql` pretty-printed JSON | ✅ **Done (R3)** | `Jason.encode!(payload)` — `pretty: true` dropped (`elixir/lib/symphony_elixir/codex/dynamic_tool.ex:142`). |
 | P4 | 1-hour prompt cache | ❌ **Not solved** (low priority) | No cache-control plumbing in the sidecar. |
 
 ---

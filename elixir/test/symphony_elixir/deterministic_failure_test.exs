@@ -100,9 +100,34 @@ defmodule SymphonyElixir.DeterministicFailureTest do
       # agent.max_turns cap-hits surface stuck issues through the same
       # workpad-alert/escalation pipeline.
       assert :max_turns_reached in codes
+      # R1(b): a max_budget_usd breach is a hard stop that escalates.
+      assert :budget_exhausted in codes
       refute :rate_limited in codes
       refute :overloaded in codes
       refute :unknown in codes
+    end
+  end
+
+  describe "decide/3 — budget_exhausted escalates immediately" do
+    test "a single budget_exhausted breach escalates on the first occurrence" do
+      # Unlike streak-counted codes, a budget breach is a hard, operator-visible
+      # stop: it escalates at count 1 regardless of the configured threshold.
+      assert {%{code: :budget_exhausted, count: 1}, {:escalate, :budget_exhausted, 1}} =
+               DeterministicFailure.decide(nil, :budget_exhausted, settings())
+    end
+
+    test "a single max_turns_reached breach does NOT escalate at count 1" do
+      # Guard the contrast: only the immediate-escalation set short-circuits the
+      # threshold; ordinary deterministic codes still accumulate.
+      assert {%{code: :max_turns_reached, count: 1}, :no_action} =
+               DeterministicFailure.decide(nil, :max_turns_reached, settings())
+    end
+
+    test "an already-escalated budget breach stays quiet (no re-escalate)" do
+      escalated = %{code: :budget_exhausted, count: 1, notified_alert?: true, notified_escalation?: true}
+
+      assert {%{count: 2}, :no_action} =
+               DeterministicFailure.decide(escalated, :budget_exhausted, settings())
     end
   end
 

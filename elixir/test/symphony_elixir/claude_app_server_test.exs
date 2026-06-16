@@ -798,7 +798,13 @@ defmodule SymphonyElixir.ClaudeAppServerTest do
           {"context_window_exhausted", :context_window_exhausted},
           {"overloaded", :overloaded},
           {"quota_exceeded", :quota_exceeded},
-          {"invalid_request", :invalid_request}
+          {"invalid_request", :invalid_request},
+          {"error_max_budget_usd", :budget_exhausted},
+          # Raw `AssistantMessageError` literals the sidecar forwards verbatim.
+          {"rate_limit", :rate_limited},
+          {"billing_error", :quota_exceeded},
+          {"server_error", :overloaded},
+          {"authentication_failed", :invalid_request}
         ] do
       test "error envelope with error_code=#{error_code} yields :#{atom}", %{workspace: workspace} do
         error_code = unquote(error_code)

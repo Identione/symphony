@@ -191,6 +191,16 @@ defmodule SymphonyElixir.CLI do
 
   defp set_logs_root(logs_root) do
     Application.put_env(:symphony_elixir, :log_file, LogFile.default_log_file(logs_root))
+    # Co-locate the restart-durable session-budget store under the instance
+    # `run/` dir (wiped only by `make clean`), mirroring how the disk log is
+    # derived from the same root. Absent --logs-root, the store stays unset and
+    # the per-issue session cap is enforced in-memory only.
+    Application.put_env(
+      :symphony_elixir,
+      :session_budget_file,
+      Path.join(logs_root, "run/session_budget.dets")
+    )
+
     :ok
   end
 
