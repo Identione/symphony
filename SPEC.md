@@ -292,7 +292,7 @@ Fields:
   Surfaced by the Codex adapter only — the Claude sidecar runs unattended and does not report
   input-required blockers.)
 - `dependency_blocked` (map `issue_id -> dependency-blocked entry`; observability-only mirror of
-  active candidates currently held back by the §8.2 Todo-blocker rule — a Todo issue whose
+  active candidates currently held back by the §8.2 blocker rule — an active issue whose
   `blocked_by` list still contains a non-terminal blocker. Dispatch never consults this map; it is
   rebuilt wholesale on every successful candidate fetch so it self-heals once the upstream blocker
   reaches a terminal state. Last-known-good is kept on candidate-fetch failure / rate limit.
@@ -1001,10 +1001,16 @@ An issue is dispatch-eligible only if all are true:
 - It is not already in `claimed`.
 - Global concurrency slots are available.
 - Per-state concurrency slots are available.
-- Blocker rule for `Todo` state passes:
-  - If the issue state is `Todo`, do not dispatch when any blocker is non-terminal. Issues that
+- Blocker rule passes:
+  - Do not dispatch an issue in any active state when any blocker is non-terminal. Issues that
     fail *only* this rule SHOULD be recorded in `dependency_blocked` (§4.1.8) so dashboards can
     surface them; the rule itself remains the source of truth for dispatch eligibility.
+  - If a running issue gains a non-terminal blocker, stop the active worker without cleaning its
+    workspace and release the claim. The issue remains dependency-blocked until the blocker reaches
+    a terminal state, then it can be dispatched again by the normal polling loop.
+  - If that running issue was moved out of the active state set while it was waiting on the blocker
+    (for example to `Human Review`), the orchestrator SHOULD move it back to the previous active
+    state, falling back to `Todo` when no previous active state is known.
 
 Sorting order (stable intent):
 

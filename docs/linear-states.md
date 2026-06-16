@@ -36,12 +36,12 @@ Every state falls into one of three buckets:
 | Neither (e.g. `Backlog`, `Human Review`) | Ignored — never claimed | **Stop agent, keep workspace** |
 
 Key code:
-- Dispatch eligibility — `orchestrator.ex:1062` (`should_dispatch_issue?`), `:1100` (`candidate_issue?`). Must be in `active_states` AND not in `terminal_states`.
-- Running-issue reconciliation — `orchestrator.ex:670` (`reconcile_issue_state`): terminal→cleanup, active→keep, other→stop-without-cleanup.
+- Dispatch eligibility — `orchestrator.ex` (`should_dispatch_issue?`, `candidate_issue?`). Must be in `active_states` AND not in `terminal_states`.
+- Running-issue reconciliation — `orchestrator.ex` (`reconcile_issue_state`): terminal→cleanup, dependency-blocked→stop-without-cleanup, active→keep, other→stop-without-cleanup.
 - Polling query filters server-side by `active_states` — `linear/client.ex:120`.
 
 Extra mechanical rules tied to state:
-- **`Todo` + blocker**: a `Todo` issue is not dispatched if it has a `blockedBy` blocker that isn't itself terminal — `orchestrator.ex:1134`.
+- **Active state + blocker**: an issue in any active state is not dispatched if it has a `blockedBy` blocker that isn't itself terminal. A running issue that gains such a blocker is stopped without workspace cleanup and becomes eligible again after the blocker reaches a terminal state.
 - **Per-state concurrency**: `agent.max_concurrent_agents_by_state` caps agents per state (keys lowercased) — `config.ex:51`; else the global `max_concurrent_agents`.
 - **Startup cleanup**: on boot, terminal-state issues get their leftover workspaces removed — `orchestrator.ex:93`.
 - **Deterministic-failure escalation**: after repeated structured failures, Symphony moves the issue to `deterministic_failure_escalation_state` (default `Human Review`, validated to not be in `active_states`) so the loop stops re-dispatching — `schema.ex:342`.
