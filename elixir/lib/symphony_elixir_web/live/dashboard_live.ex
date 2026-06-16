@@ -72,9 +72,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <h1 class="hero-title">
               Operations Dashboard
             </h1>
-            <p class="hero-copy">
-              Current state, retry pressure, token usage, and orchestration health for the active Symphony runtime.
-            </p>
             <%= if @payload[:linear_project] do %>
               <p class="hero-meta">
                 Linear project: <span class="hero-meta-value"><%= @payload.linear_project %></span>
@@ -127,7 +124,7 @@ defmodule SymphonyElixirWeb.DashboardLive do
           <article class="metric-card">
             <p class="metric-label">Blocked</p>
             <p class="metric-value numeric"><%= @payload.counts.blocked %></p>
-            <p class="metric-detail">Issues paused for operator input or approval.</p>
+            <p class="metric-detail">Issues halted for operator input, approval, or a non-retryable failure.</p>
           </article>
 
           <article class="metric-card">
@@ -164,56 +161,94 @@ defmodule SymphonyElixirWeb.DashboardLive do
             </div>
           </div>
 
-          <pre class="code-panel"><%= pretty_value(Map.get(@payload, :provider_quotas, %{})) %></pre>
+          <% quota_cards = Presenter.provider_quota_cards(Map.get(@payload, :provider_quotas, %{})) %>
+          <%= if quota_cards == [] do %>
+            <p class="empty-state">No quota snapshots yet.</p>
+          <% else %>
+            <div class="quota-cards">
+              <article :for={card <- quota_cards} class="quota-card">
+                <div class="quota-provider-head">
+                  <span class="quota-provider"><%= card.provider %></span>
+                  <span class="quota-source"><%= card.source %></span>
+                  <%= if card.stale do %>
+                    <span class="status-badge quota-stale">Stale</span>
+                  <% end %>
+                </div>
+
+                <%= if card.error do %>
+                  <p class="quota-error">
+                    <strong><%= card.error[:code] || card.error["code"] %></strong>
+                    <%= card.error[:detail] || card.error["detail"] %>
+                  </p>
+                <% end %>
+
+                <%= if card.buckets == [] do %>
+                  <p class="empty-state">No usage buckets reported.</p>
+                <% else %>
+                  <div class="quota-row" :for={bucket <- card.buckets}>
+                    <span class="quota-label"><%= bucket.label %></span>
+                    <div class="quota-bar" title={"#{bucket.name}"}>
+                      <div class={"quota-bar-fill quota-#{bucket.level}"} style={"width: #{bucket.width}%"}></div>
+                      <%= if is_number(card.threshold) do %>
+                        <div class="quota-bar-threshold" style={"left: #{card.threshold}%"} title={"pause at #{card.threshold}%"}></div>
+                      <% end %>
+                    </div>
+                    <span class="quota-pct numeric">
+                      <%= if is_number(bucket.used_percent), do: "#{bucket.used_percent}%", else: "n/a" %>
+                    </span>
+                    <span class="quota-resets"><%= bucket.resets_in || "—" %></span>
+                  </div>
+                <% end %>
+              </article>
+            </div>
+          <% end %>
+
+          <details class="quota-raw">
+            <summary>Raw snapshot</summary>
+            <pre class="code-panel"><%= pretty_value(Map.get(@payload, :provider_quotas, %{})) %></pre>
+          </details>
         </section>
 
         <section class="section-card">
           <div class="section-header">
             <div>
-              <h2 class="section-title">Running sessions</h2>
-              <p class="section-copy">Active issues, last known agent activity, and token usage.</p>
+              <h2 class="section-title">Agent sessions</h2>
+              <p class="section-copy">
+                Active, retrying, and blocked issue sessions. Retrying entries re-run automatically; blocked entries wait for you to change their Linear state.
+              </p>
             </div>
           </div>
 
-          <%= if @payload.running == [] do %>
-            <p class="empty-state">No active sessions.</p>
-          <% else %>
-            <div class="table-wrap">
-              <table class="data-table data-table-running">
-                <colgroup>
-                  <col style="width: 12rem;" />
-                  <col style="width: 8rem;" />
-                  <col style="width: 7.5rem;" />
-                  <col style="width: 8.5rem;" />
-                  <col />
-                  <col style="width: 10rem;" />
-                </colgroup>
-                <thead>
+          <div class="table-wrap">
+            <table class="data-table data-table-running">
+              <colgroup>
+                <col style="width: 12rem;" />
+                <col style="width: 11rem;" />
+                <col style="width: 9rem;" />
+                <col style="width: 10rem;" />
+                <col />
+              </colgroup>
+              <thead>
+                <tr>
+                  <th>Issue</th>
+                  <th>State</th>
+                  <th>Time</th>
+                  <th>Tokens</th>
+                  <th>Description</th>
+                </tr>
+              </thead>
+              <tbody>
+                <%= if @payload.sessions == [] do %>
                   <tr>
-                    <th>Issue</th>
-                    <th>State</th>
-                    <th>Session</th>
-                    <th>Runtime / turns</th>
-                    <th>Agent update</th>
-                    <th>Tokens</th>
+                    <td colspan="5" class="empty-state">No sessions.</td>
                   </tr>
-                </thead>
-                <tbody>
-                  <tr :for={entry <- @payload.running}>
+                <% else %>
+                  <tr :for={entry <- @payload.sessions}>
                     <td>
                       <div class="issue-stack">
                         <span class="issue-id"><%= entry.issue_identifier %></span>
                         <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
-                      </div>
-                    </td>
-                    <td>
-                      <span class={state_badge_class(entry.state)}>
-                        <%= entry.state %>
-                      </span>
-                    </td>
-                    <td>
-                      <div class="session-stack">
-                        <%= if entry.session_id do %>
+                        <%= if entry[:session_id] do %>
                           <button
                             type="button"
                             class="subtle-button"
@@ -223,114 +258,51 @@ defmodule SymphonyElixirWeb.DashboardLive do
                           >
                             Copy ID
                           </button>
-                        <% else %>
-                          <span class="muted">n/a</span>
                         <% end %>
                       </div>
                     </td>
-                    <td class="numeric"><%= format_runtime_and_turns(entry.started_at, entry.turn_count, @now) %></td>
                     <td>
                       <div class="detail-stack">
-                        <span
-                          class="event-text"
-                          title={entry.last_message || to_string(entry.last_event || "n/a")}
-                        ><%= entry.last_message || to_string(entry.last_event || "n/a") %></span>
-                        <span class="muted event-meta">
-                          <%= entry.last_event || "n/a" %>
-                          <%= if entry.last_event_at do %>
-                            · <span class="mono numeric"><%= entry.last_event_at %></span>
-                          <% end %>
+                        <span class={session_status_class(entry.status)}>
+                          <%= session_status_label(entry.status) %>
                         </span>
-                      </div>
-                    </td>
-                    <td>
-                      <div class="token-stack numeric">
-                        <span>Total: <%= format_int(entry.tokens.total_tokens) %></span>
-                        <span class="muted">In <%= format_int(entry.tokens.input_tokens) %> / Out <%= format_int(entry.tokens.output_tokens) %></span>
-                        <%= if entry[:agent_kind] == "claude" do %>
-                          <span class="muted">Cache: created <%= format_int(entry.tokens.cache_creation_input_tokens) %> · read <%= format_int(entry.tokens.cache_read_input_tokens) %></span>
+                        <%= if session_state_sublabel(entry) do %>
+                          <span class="muted event-meta"><%= session_state_sublabel(entry) %></span>
                         <% end %>
                       </div>
                     </td>
-                  </tr>
-                </tbody>
-              </table>
-            </div>
-          <% end %>
-        </section>
-
-        <section class="section-card">
-          <div class="section-header">
-            <div>
-              <h2 class="section-title">Blocked sessions</h2>
-              <p class="section-copy">Issues paused because Codex requested operator input or approval.</p>
-            </div>
-          </div>
-
-          <%= if @payload.blocked == [] do %>
-            <p class="empty-state">No blocked sessions.</p>
-          <% else %>
-            <div class="table-wrap">
-              <table class="data-table" style="min-width: 760px;">
-                <thead>
-                  <tr>
-                    <th>Issue</th>
-                    <th>State</th>
-                    <th>Session</th>
-                    <th>Blocked at</th>
-                    <th>Last update</th>
-                    <th>Error</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr :for={entry <- @payload.blocked}>
+                    <td class="numeric"><%= session_time(entry, @now) %></td>
                     <td>
-                      <div class="issue-stack">
-                        <span class="issue-id"><%= entry.issue_identifier %></span>
-                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
-                      </div>
-                    </td>
-                    <td>
-                      <span class={state_badge_class(entry.state || "Blocked")}>
-                        <%= entry.state || "Blocked" %>
-                      </span>
-                    </td>
-                    <td>
-                      <%= if entry.session_id do %>
-                        <button
-                          type="button"
-                          class="subtle-button"
-                          data-label="Copy ID"
-                          data-copy={entry.session_id}
-                          onclick="navigator.clipboard.writeText(this.dataset.copy); this.textContent = 'Copied'; clearTimeout(this._copyTimer); this._copyTimer = setTimeout(() => { this.textContent = this.dataset.label }, 1200);"
-                        >
-                          Copy ID
-                        </button>
+                      <%= if entry[:tokens] do %>
+                        <div class="token-stack numeric">
+                          <span>Total: <%= format_int(entry.tokens.total_tokens) %></span>
+                          <span class="muted">In <%= format_int(entry.tokens.input_tokens) %> / Out <%= format_int(entry.tokens.output_tokens) %></span>
+                          <%= if entry[:agent_kind] == "claude" do %>
+                            <span class="muted">Cache: created <%= format_int(entry.tokens.cache_creation_input_tokens) %> · read <%= format_int(entry.tokens.cache_read_input_tokens) %></span>
+                          <% end %>
+                        </div>
                       <% else %>
                         <span class="muted">n/a</span>
                       <% end %>
                     </td>
-                    <td class="mono"><%= entry.blocked_at || "n/a" %></td>
                     <td>
                       <div class="detail-stack">
-                        <span
-                          class="event-text"
-                          title={entry.last_message || to_string(entry.last_event || "n/a")}
-                        ><%= entry.last_message || to_string(entry.last_event || "n/a") %></span>
-                        <span class="muted event-meta">
-                          <%= entry.last_event || "n/a" %>
-                          <%= if entry.last_event_at do %>
-                            · <span class="mono numeric"><%= entry.last_event_at %></span>
-                          <% end %>
-                        </span>
+                        <span class="event-text" title={session_description(entry)}><%= session_description(entry) %></span>
+                        <%= if entry[:last_event] || entry[:last_event_at] do %>
+                          <span class="muted event-meta">
+                            <%= entry[:last_event] || "n/a" %>
+                            <%= if entry[:last_event_at] do %>
+                              · <span class="mono numeric"><%= entry.last_event_at %></span>
+                            <% end %>
+                          </span>
+                        <% end %>
                       </div>
                     </td>
-                    <td><%= entry.error || "n/a" %></td>
                   </tr>
-                </tbody>
-              </table>
-            </div>
-          <% end %>
+                <% end %>
+              </tbody>
+            </table>
+          </div>
         </section>
 
         <section class="section-card">
@@ -350,45 +322,6 @@ defmodule SymphonyElixirWeb.DashboardLive do
               data-graph={Jason.encode!(@payload.dependency_graph)}
             >
               <div id="dependency-graph-canvas" phx-update="ignore" class="graph-canvas"></div>
-            </div>
-          <% end %>
-        </section>
-
-        <section class="section-card">
-          <div class="section-header">
-            <div>
-              <h2 class="section-title">Retry queue</h2>
-              <p class="section-copy">Issues waiting for the next retry window.</p>
-            </div>
-          </div>
-
-          <%= if @payload.retrying == [] do %>
-            <p class="empty-state">No issues are currently backing off.</p>
-          <% else %>
-            <div class="table-wrap">
-              <table class="data-table" style="min-width: 680px;">
-                <thead>
-                  <tr>
-                    <th>Issue</th>
-                    <th>Attempt</th>
-                    <th>Due at</th>
-                    <th>Error</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  <tr :for={entry <- @payload.retrying}>
-                    <td>
-                      <div class="issue-stack">
-                        <span class="issue-id"><%= entry.issue_identifier %></span>
-                        <a class="issue-link" href={"/api/v1/#{entry.issue_identifier}"}>JSON details</a>
-                      </div>
-                    </td>
-                    <td><%= entry.attempt %></td>
-                    <td class="mono"><%= entry.due_at || "n/a" %></td>
-                    <td><%= entry.error || "n/a" %></td>
-                  </tr>
-                </tbody>
-              </table>
             </div>
           <% end %>
         </section>
@@ -462,16 +395,68 @@ defmodule SymphonyElixirWeb.DashboardLive do
 
   defp format_int(_value), do: "n/a"
 
-  defp state_badge_class(state) do
-    base = "state-badge"
-    normalized = state |> to_string() |> String.downcase()
+  defp session_status_label(:running), do: "Running"
+  defp session_status_label(:retrying), do: "Retrying"
+  defp session_status_label(:blocked), do: "Blocked"
+  defp session_status_label(_status), do: "Session"
 
-    cond do
-      String.contains?(normalized, ["progress", "running", "active"]) -> "#{base} state-badge-active"
-      String.contains?(normalized, ["blocked", "error", "failed"]) -> "#{base} state-badge-danger"
-      String.contains?(normalized, ["todo", "queued", "pending", "retry"]) -> "#{base} state-badge-warning"
-      true -> base
+  defp session_status_class(:running), do: "state-badge state-badge-active"
+  defp session_status_class(:retrying), do: "state-badge state-badge-warning"
+  defp session_status_class(:blocked), do: "state-badge state-badge-danger"
+  defp session_status_class(_status), do: "state-badge"
+
+  # Secondary, muted line under the status badge: the Linear workflow state for
+  # running/blocked rows, the retry attempt number for retrying rows.
+  defp session_state_sublabel(%{status: :retrying, attempt: attempt}) when is_integer(attempt),
+    do: "attempt #{attempt}"
+
+  defp session_state_sublabel(%{status: status, state: state})
+       when status in [:running, :blocked] and is_binary(state) and state != "",
+       do: state
+
+  defp session_state_sublabel(_entry), do: nil
+
+  # The Time column is status-dependent: live runtime + turns while running, a
+  # live countdown to the next retry while retrying, and elapsed-since while
+  # blocked. All re-render on the 1s `:runtime_tick`.
+  defp session_time(%{status: :running} = entry, now),
+    do: format_runtime_and_turns(entry[:started_at], entry[:turn_count], now)
+
+  defp session_time(%{status: :retrying, due_at: due_at}, now), do: format_due_in(due_at, now)
+
+  defp session_time(%{status: :blocked, blocked_at: blocked_at}, now),
+    do: format_blocked_since(blocked_at, now)
+
+  defp session_time(_entry, _now), do: "n/a"
+
+  defp format_due_in(due_at, now) when is_binary(due_at) do
+    case DateTime.from_iso8601(due_at) do
+      {:ok, parsed, _offset} ->
+        case DateTime.diff(parsed, now, :second) do
+          seconds when seconds > 0 -> "next try in #{format_runtime_seconds(seconds)}"
+          _ -> "due now"
+        end
+
+      _ ->
+        "n/a"
     end
+  end
+
+  defp format_due_in(_due_at, _now), do: "n/a"
+
+  defp format_blocked_since(blocked_at, now) when is_binary(blocked_at) do
+    case DateTime.from_iso8601(blocked_at) do
+      {:ok, parsed, _offset} -> "blocked #{format_runtime_seconds(DateTime.diff(now, parsed, :second))} ago"
+      _ -> "blocked"
+    end
+  end
+
+  defp format_blocked_since(_blocked_at, _now), do: "blocked"
+
+  # Description prefers the last agent message (running), then the block/retry
+  # error reason, then the raw last event.
+  defp session_description(entry) do
+    entry[:last_message] || entry[:error] || to_string(entry[:last_event] || "n/a")
   end
 
   defp schedule_runtime_tick do

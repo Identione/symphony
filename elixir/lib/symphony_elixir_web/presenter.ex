@@ -3,8 +3,10 @@ defmodule SymphonyElixirWeb.Presenter do
   Shared projections for the observability API and dashboard.
   """
 
-  alias SymphonyElixir.{Config, Orchestrator, StatusDashboard}
+  alias SymphonyElixir.{Config, Orchestrator, ProviderQuota, StatusDashboard}
   alias SymphonyElixirWeb.HeroTint
+
+  @default_dispatch_pause_percent 95.0
 
   @empty_claude_totals %{
     input_tokens: 0,
@@ -40,6 +42,7 @@ defmodule SymphonyElixirWeb.Presenter do
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
+          sessions: session_entries(snapshot),
           dependency_blocked: Enum.map(dependency_blocked, &dependency_blocked_entry_payload/1),
           dependency_graph: dependency_graph_payload(dependency_graph_nodes),
           codex_totals: snapshot.codex_totals,
@@ -85,6 +88,139 @@ defmodule SymphonyElixirWeb.Presenter do
         {:ok, Map.update!(payload, :requested_at, &DateTime.to_iso8601/1)}
     end
   end
+
+  @doc """
+  Projects the raw `provider_quotas` map (`%{codex: snapshot | nil, claude: snapshot | nil}`)
+  into a render-ready list of provider cards for the dashboard.
+
+  Each card carries a sorted list of buckets with the usage percent already rounded, a
+  threshold-relative band (`:ok | :warn | :danger`), a stale flag, and a relative reset time.
+  Providers without a snapshot are omitted; an empty list means "no snapshots yet".
+  """
+  @spec provider_quota_cards(map() | nil) :: [map()]
+  def provider_quota_cards(provider_quotas) when is_map(provider_quotas) do
+    now_ms = System.monotonic_time(:millisecond)
+    now = DateTime.utc_now()
+
+    [:codex, :claude]
+    |> Enum.flat_map(fn provider ->
+      case Map.get(provider_quotas, provider) do
+        %{} = snapshot -> [provider_quota_card(provider, snapshot, now_ms, now)]
+        _ -> []
+      end
+    end)
+  end
+
+  def provider_quota_cards(_provider_quotas), do: []
+
+  defp provider_quota_card(provider, snapshot, now_ms, now) do
+    threshold = provider_threshold(provider)
+
+    %{
+      provider: provider,
+      source: Map.get(snapshot, :source),
+      fetched_at: Map.get(snapshot, :fetched_at),
+      stale: ProviderQuota.stale?(snapshot, now_ms),
+      error: Map.get(snapshot, :error),
+      threshold: threshold,
+      buckets: quota_buckets(Map.get(snapshot, :buckets, %{}), threshold, now)
+    }
+  end
+
+  defp quota_buckets(buckets, threshold, now) when is_map(buckets) do
+    buckets
+    |> Enum.map(fn {name, bucket} -> quota_bucket(to_string(name), bucket, threshold, now) end)
+    |> Enum.sort_by(& &1.name)
+  end
+
+  defp quota_buckets(_buckets, _threshold, _now), do: []
+
+  defp quota_bucket(name, bucket, threshold, now) do
+    used = round_percent(Map.get(bucket, :used_percent))
+    resets_at = Map.get(bucket, :resets_at)
+
+    %{
+      name: name,
+      label: bucket_label(name),
+      used_percent: used,
+      width: clamp_percent(used),
+      level: quota_level(used, threshold),
+      over_threshold: is_number(used) and used >= threshold,
+      resets_at: resets_at,
+      resets_in: relative_reset(resets_at, now)
+    }
+  end
+
+  defp round_percent(value) when is_number(value), do: Float.round(value / 1, 1)
+  defp round_percent(_value), do: nil
+
+  defp clamp_percent(value) when is_number(value), do: value |> max(0) |> min(100)
+  defp clamp_percent(_value), do: 0
+
+  defp quota_level(used, threshold) when is_number(used) and is_number(threshold) do
+    cond do
+      used >= threshold -> :danger
+      used >= threshold * 0.8 -> :warn
+      true -> :ok
+    end
+  end
+
+  defp quota_level(_used, _threshold), do: :ok
+
+  defp bucket_label("five_hour"), do: "5h"
+  defp bucket_label("seven_day"), do: "Weekly"
+  defp bucket_label("seven_day_opus"), do: "Weekly · Opus"
+  defp bucket_label("seven_day_sonnet"), do: "Weekly · Sonnet"
+  defp bucket_label("seven_day_design"), do: "Weekly · Design"
+  defp bucket_label("seven_day_cowork"), do: "Weekly · Cowork"
+  defp bucket_label("seven_day_oauth_apps"), do: "Weekly · OAuth apps"
+
+  defp bucket_label(name) do
+    cond do
+      String.ends_with?(name, ".primary") -> "Primary"
+      String.ends_with?(name, ".secondary") -> "Secondary"
+      true -> name
+    end
+  end
+
+  defp relative_reset(resets_at, now) when is_binary(resets_at) do
+    case DateTime.from_iso8601(resets_at) do
+      {:ok, dt, _offset} ->
+        case DateTime.diff(dt, now, :second) do
+          seconds when seconds > 0 -> "in " <> humanize_duration(seconds)
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp relative_reset(_resets_at, _now), do: nil
+
+  defp humanize_duration(seconds) when is_integer(seconds) do
+    days = div(seconds, 86_400)
+    hours = div(rem(seconds, 86_400), 3_600)
+    minutes = div(rem(seconds, 3_600), 60)
+
+    cond do
+      days > 0 -> "#{days}d #{hours}h"
+      hours > 0 -> "#{hours}h #{minutes}m"
+      minutes > 0 -> "#{minutes}m"
+      true -> "<1m"
+    end
+  end
+
+  defp provider_threshold(provider) do
+    case provider_quota_config(Config.settings!(), provider) do
+      %{dispatch_pause_percent: value} when is_number(value) -> value
+      _ -> @default_dispatch_pause_percent
+    end
+  end
+
+  defp provider_quota_config(%{codex: %{quota: %{} = quota}}, :codex), do: quota
+  defp provider_quota_config(%{agent: %{claude: %{quota: %{} = quota}}}, :claude), do: quota
+  defp provider_quota_config(_config, _provider), do: nil
 
   defp issue_payload_body(issue_identifier, running, retry, blocked) do
     %{
@@ -166,6 +302,19 @@ defmodule SymphonyElixirWeb.Presenter do
       last_message: summarize_message(entry.last_codex_message),
       last_event_at: iso8601(entry.last_codex_timestamp)
     }
+  end
+
+  # Unified session view for the dashboard's single "Sessions" table. Each of
+  # the three orchestrator tables (running / retrying / blocked) is a distinct
+  # Symphony status for one issue, so we tag the existing per-status payloads
+  # with `:status` and concatenate them in priority order (running first). The
+  # template reads fields defensively (`entry[:key]`), so absent keys — e.g.
+  # `:tokens` on a retry row — simply render as "n/a". The original
+  # `running`/`retrying`/`blocked` keys are kept untouched for the JSON API.
+  defp session_entries(snapshot) do
+    Enum.map(snapshot.running, &Map.put(running_entry_payload(&1), :status, :running)) ++
+      Enum.map(snapshot.retrying, &Map.put(retry_entry_payload(&1), :status, :retrying)) ++
+      Enum.map(Map.get(snapshot, :blocked, []), &Map.put(blocked_entry_payload(&1), :status, :blocked))
   end
 
   defp dependency_blocked_entry_payload(entry) do

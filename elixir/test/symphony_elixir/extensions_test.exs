@@ -643,6 +643,10 @@ defmodule SymphonyElixir.ExtensionsTest do
                "blocked" => 1,
                "dependency_blocked" => 1
              },
+             # Unified dashboard view: running/retrying/blocked entries tagged
+             # with :status. Content is asserted explicitly below; the original
+             # running/retrying/blocked keys are kept untouched for API consumers.
+             "sessions" => state_payload["sessions"],
              "running" => [
                %{
                  "issue_id" => "issue-http",
@@ -752,6 +756,16 @@ defmodule SymphonyElixir.ExtensionsTest do
              "provider_quotas" => %{},
              "rate_limits" => %{"primary" => %{"remaining" => 11}}
            }
+
+    # The unified sessions list concatenates running, retrying, then blocked,
+    # each tagged with its status (atoms serialize to strings over JSON).
+    assert [running_session, retrying_session, blocked_session] = state_payload["sessions"]
+    assert running_session["status"] == "running"
+    assert running_session["issue_identifier"] == "MT-HTTP"
+    assert retrying_session["status"] == "retrying"
+    assert retrying_session["issue_identifier"] == "MT-RETRY"
+    assert blocked_session["status"] == "blocked"
+    assert blocked_session["issue_identifier"] == "MT-BLOCKED"
 
     conn = get(build_conn(), "/api/v1/MT-HTTP")
     issue_payload = json_response(conn, 200)
@@ -1056,7 +1070,7 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "Live"
     assert html =~ "Offline"
     assert html =~ "Copy ID"
-    assert html =~ "Agent update"
+    assert html =~ "Agent sessions"
     assert html =~ "Waiting on blockers"
     assert html =~ "Dependency graph"
     assert html =~ "MT-DEP"
