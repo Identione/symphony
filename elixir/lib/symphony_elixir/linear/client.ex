@@ -9,6 +9,36 @@ defmodule SymphonyElixir.Linear.Client do
   @issue_page_size 50
   @max_error_body_log_bytes 1_000
 
+  # Bound on how many sub-issues we pull per parent when building the dependency
+  # graph's containers. Linear scores nested connections multiplicatively, so a
+  # large family fetched via both `children` and `parent.children` must stay
+  # well under the API complexity budget — keep this conservative.
+  @child_page_size 50
+
+  # Shared selection set for a sub-issue node. Carries exactly the fields the
+  # orchestrator's manageability check needs (state, labels, assignee) plus the
+  # display fields the dashboard renders, and nothing deeper (no nested
+  # children/relations) so the query stays bounded.
+  @issue_child_fields """
+              id
+              identifier
+              title
+              priority
+              state {
+                name
+                type
+              }
+              url
+              assignee {
+                id
+              }
+              labels {
+                nodes {
+                  name
+                }
+              }
+  """
+
   @query """
   query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first: Int!, $relationFirst: Int!, $after: String) {
     issues(filter: {project: {slugId: {eq: $projectSlug}}, state: {name: {in: $stateNames}}}, first: $first, after: $after) {
@@ -32,9 +62,22 @@ defmodule SymphonyElixir.Linear.Client do
             name
           }
         }
-        children(first: 1) {
+        children(first: #{@child_page_size}) {
           nodes {
-            id
+  #{@issue_child_fields}          }
+        }
+        parent {
+          id
+          identifier
+          title
+          url
+          state {
+            name
+            type
+          }
+          children(first: #{@child_page_size}) {
+            nodes {
+  #{@issue_child_fields}            }
           }
         }
         inverseRelations(first: $relationFirst) {
@@ -83,9 +126,22 @@ defmodule SymphonyElixir.Linear.Client do
             name
           }
         }
-        children(first: 1) {
+        children(first: #{@child_page_size}) {
           nodes {
-            id
+  #{@issue_child_fields}          }
+        }
+        parent {
+          id
+          identifier
+          title
+          url
+          state {
+            name
+            type
+          }
+          children(first: #{@child_page_size}) {
+            nodes {
+  #{@issue_child_fields}            }
           }
         }
         inverseRelations(first: $relationFirst) {
@@ -490,6 +546,9 @@ defmodule SymphonyElixir.Linear.Client do
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),
       has_children: extract_has_children(issue),
+      parent_id: get_in(issue, ["parent", "id"]),
+      parent: extract_parent(issue, assignee_filter),
+      children: extract_children(issue, assignee_filter),
       created_at: parse_datetime(issue["createdAt"]),
       updated_at: parse_datetime(issue["updatedAt"])
     }
@@ -582,12 +641,15 @@ defmodule SymphonyElixir.Linear.Client do
     |> Enum.flat_map(fn
       %{"type" => relation_type, "issue" => blocker_issue}
       when is_binary(relation_type) and is_map(blocker_issue) ->
-        if String.downcase(String.trim(relation_type)) == "blocks" do
+        normalized_relation = String.downcase(String.trim(relation_type))
+
+        if normalized_relation == "blocks" do
           [
             %{
               id: blocker_issue["id"],
               identifier: blocker_issue["identifier"],
-              state: get_in(blocker_issue, ["state", "name"])
+              state: get_in(blocker_issue, ["state", "name"]),
+              relation: normalized_relation
             }
           ]
         else
@@ -603,6 +665,39 @@ defmodule SymphonyElixir.Linear.Client do
 
   defp extract_has_children(%{"children" => %{"nodes" => nodes}}) when is_list(nodes), do: nodes != []
   defp extract_has_children(_), do: false
+
+  # The parent issue (one level up) normalized into an `Issue`, carrying its own
+  # `children` (this issue's siblings) so the orchestrator can build a container
+  # node from any managed child without a second fetch. Bounded: the parent's
+  # selection set does not nest a further `parent`, so recursion stops here.
+  defp extract_parent(%{"parent" => parent}, assignee_filter) when is_map(parent) do
+    normalize_issue(parent, assignee_filter)
+  end
+
+  defp extract_parent(_issue, _assignee_filter), do: nil
+
+  # Sub-issues normalized into `Issue` structs with `parent_id` backfilled to the
+  # owning issue. Children are selected with the full `@issue_child_fields` set;
+  # entries lacking an `identifier` (e.g. a legacy `children(first: 1) { id }`
+  # probe) are dropped so they never masquerade as real sub-issues.
+  defp extract_children(%{"id" => parent_id, "children" => %{"nodes" => nodes}}, assignee_filter)
+       when is_list(nodes) do
+    nodes
+    |> Enum.map(&normalize_child(&1, parent_id, assignee_filter))
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp extract_children(_issue, _assignee_filter), do: []
+
+  defp normalize_child(%{"identifier" => identifier} = child, parent_id, assignee_filter)
+       when is_binary(identifier) do
+    case normalize_issue(child, assignee_filter) do
+      %Issue{} = normalized -> %{normalized | parent_id: parent_id}
+      nil -> nil
+    end
+  end
+
+  defp normalize_child(_child, _parent_id, _assignee_filter), do: nil
 
   defp parse_datetime(nil), do: nil
 

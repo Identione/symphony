@@ -1267,8 +1267,236 @@ defmodule SymphonyElixir.Orchestrator do
 
     {known, refs} = expand_graph(known, frontier, refs, 0)
 
-    %{state | dependency_graph: finalize_dependency_graph(known, refs)}
+    known =
+      known
+      |> finalize_dependency_graph(refs)
+      |> add_subissue_containers(issues)
+
+    %{state | dependency_graph: known}
   end
+
+  # Group sub-issues under their parent as a container node. Anchored on managed
+  # work: we only build containers for parents that touch issues the poll already
+  # returned (a candidate/active issue's parent, or a polled parent issue
+  # itself), then surface *every* sub-issue under that parent — managed or not —
+  # so the operator sees the full family. Unmanaged children carry a
+  # manageability diagnostic (see `child_manageability/3`). Respects the
+  # `@graph_max_nodes` cap and logs when the cap drops nodes.
+  defp add_subissue_containers(known, issues) when is_map(known) and is_list(issues) do
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
+
+    containers = collect_containers(issues)
+
+    {known, dropped} =
+      Enum.reduce(containers, {known, 0}, fn {parent_id, {parent_info, children}}, {acc, dropped} ->
+        container = container_node(parent_id, parent_info, children, terminal_states)
+        {acc, dropped} = put_graph_node(acc, parent_id, container, dropped)
+
+        Enum.reduce(children, {acc, dropped}, fn %Issue{id: child_id} = child, {acc2, dropped2} ->
+          node = child_node(child, parent_id, active_states, terminal_states)
+          put_graph_node(acc2, child_id, node, dropped2)
+        end)
+      end)
+
+    if dropped > 0 do
+      Logger.debug("Dependency graph container expansion capped: dropped=#{dropped} max_nodes=#{@graph_max_nodes}")
+    end
+
+    known
+  end
+
+  # Insert a graph node, upgrading an existing placeholder to the richer node but
+  # otherwise preserving an already-present real node (merging in container
+  # membership). New ids are only added while under the node cap; drops are
+  # counted for a single summary log.
+  defp put_graph_node(known, id, node, dropped) when is_binary(id) and is_map(node) do
+    case Map.get(known, id) do
+      nil when map_size(known) >= @graph_max_nodes ->
+        {known, dropped + 1}
+
+      nil ->
+        {Map.put(known, id, node), dropped}
+
+      %{placeholder: true} ->
+        {Map.put(known, id, node), dropped}
+
+      existing ->
+        # Real node already projected (managed/active issue). Keep it, but adopt
+        # the container membership and diagnostic computed for this child.
+        merged =
+          existing
+          |> Map.put(:parent, Map.get(node, :parent))
+          |> maybe_put(:managed, Map.get(node, :managed))
+          |> maybe_put(:requirements, Map.get(node, :requirements))
+          |> maybe_put(:kind, Map.get(node, :kind))
+
+        {Map.put(known, id, merged), dropped}
+    end
+  end
+
+  defp put_graph_node(known, _id, _node, dropped), do: {known, dropped}
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
+
+  # Build `parent_id => {parent_display, [child Issue]}` from the polled issues.
+  # A container arises either from a child pointing up to its parent (with the
+  # parent carrying the full sibling list) or from a polled parent issue itself.
+  defp collect_containers(issues) do
+    Enum.reduce(issues, %{}, fn
+      %Issue{} = issue, acc ->
+        acc
+        |> maybe_container_from_parent(issue)
+        |> maybe_container_from_self(issue)
+
+      _other, acc ->
+        acc
+    end)
+  end
+
+  defp maybe_container_from_parent(acc, %Issue{parent: %Issue{id: parent_id} = parent})
+       when is_binary(parent_id) do
+    upsert_container(acc, parent_id, parent_info(parent), parent.children || [])
+  end
+
+  defp maybe_container_from_parent(acc, _issue), do: acc
+
+  defp maybe_container_from_self(acc, %Issue{id: id, has_children: true, children: [_ | _] = children})
+       when is_binary(id) do
+    upsert_container(acc, id, parent_info_from_self(children), children)
+  end
+
+  defp maybe_container_from_self(acc, _issue), do: acc
+
+  defp upsert_container(acc, parent_id, parent_info, children) do
+    Map.update(acc, parent_id, {parent_info, children}, fn {existing_info, existing_children} ->
+      {merge_parent_info(existing_info, parent_info), merge_children(existing_children, children)}
+    end)
+  end
+
+  # Prefer whichever sighting of the parent carries the richer display fields
+  # (a polled parent issue has identifier/state; a `parent { ... }` selection may
+  # be sparser). Non-nil values win.
+  defp merge_parent_info(existing, incoming) do
+    Map.merge(existing, incoming, fn _k, old, new -> old || new end)
+  end
+
+  defp merge_children(existing, incoming) do
+    (existing ++ incoming)
+    |> Enum.reject(&match?(%Issue{id: nil}, &1))
+    |> Enum.uniq_by(& &1.id)
+  end
+
+  defp parent_info(%Issue{} = parent) do
+    %{
+      identifier: parent.identifier,
+      title: parent.title,
+      state: parent.state,
+      state_type: parent.state_type,
+      url: parent.url
+    }
+  end
+
+  # When the container is sourced from a polled parent issue we have the parent's
+  # own fields directly via that issue; this fallback derives display info from a
+  # child only when the parent issue itself was not polled (sibling-sourced).
+  defp parent_info_from_self([%Issue{parent: %Issue{} = parent} | _]), do: parent_info(parent)
+  defp parent_info_from_self(_children), do: %{}
+
+  defp container_node(parent_id, parent_info, children, terminal_states) do
+    child_total = length(children)
+
+    child_done =
+      Enum.count(children, fn %Issue{state: state} -> terminal_issue_state?(state, terminal_states) end)
+
+    %{
+      id: parent_id,
+      identifier: Map.get(parent_info, :identifier),
+      title: Map.get(parent_info, :title),
+      state: Map.get(parent_info, :state),
+      state_type: Map.get(parent_info, :state_type),
+      priority: nil,
+      url: Map.get(parent_info, :url),
+      blocked_by: [],
+      placeholder: false,
+      kind: :container,
+      parent: nil,
+      child_total: child_total,
+      child_done: child_done
+    }
+  end
+
+  defp child_node(%Issue{} = child, parent_id, active_states, terminal_states) do
+    {managed, requirements} = child_manageability(child, active_states, terminal_states)
+
+    child
+    |> node_projection()
+    |> Map.put(:parent, parent_id)
+    |> Map.put(:managed, managed)
+    |> Map.put(:requirements, requirements)
+  end
+
+  # Classify a sub-issue relative to this Symphony instance's workflow rules:
+  #   * terminal-state children are done — managed, no action needed;
+  #   * children that satisfy every dispatch rule are managed;
+  #   * otherwise the child is unmanaged and we report what must change for this
+  #     instance to pick it up (inverse of the candidate predicates).
+  defp child_manageability(%Issue{state: state} = child, active_states, terminal_states) do
+    cond do
+      terminal_issue_state?(state, terminal_states) -> {true, []}
+      candidate_issue?(child, active_states, terminal_states) -> {true, []}
+      true -> {false, unmanaged_requirements(child, active_states)}
+    end
+  end
+
+  defp unmanaged_requirements(%Issue{} = issue, active_states) do
+    []
+    |> add_requirement(parent_issue?(issue), "tracker issue — work lives in its own sub-issues")
+    |> add_requirement(not issue_routable_to_worker?(issue), assignee_requirement())
+    |> Enum.concat(label_requirements(issue))
+    |> add_requirement(
+      not active_issue_state?(to_string(issue.state), active_states),
+      state_requirement()
+    )
+    |> Enum.reject(&is_nil/1)
+  end
+
+  defp add_requirement(reqs, true, message), do: reqs ++ [message]
+  defp add_requirement(reqs, _false, _message), do: reqs
+
+  defp assignee_requirement do
+    case Config.settings!().tracker.assignee do
+      assignee when is_binary(assignee) and assignee != "" -> "assign to #{assignee}"
+      _ -> "assign to the configured worker"
+    end
+  end
+
+  defp state_requirement do
+    case Config.settings!().tracker.active_states do
+      [_ | _] = states -> "move to an active state (#{Enum.join(states, ", ")})"
+      _ -> "move to an active state"
+    end
+  end
+
+  defp label_requirements(%Issue{labels: labels}) when is_list(labels) do
+    present = MapSet.new(labels, &normalize_label/1)
+    tracker = Config.settings!().tracker
+
+    missing =
+      (tracker.required_labels || [])
+      |> Enum.reject(fn label -> MapSet.member?(present, normalize_label(label)) end)
+
+    offending =
+      (tracker.excluded_labels || [])
+      |> Enum.filter(fn label -> MapSet.member?(present, normalize_label(label)) end)
+
+    []
+    |> add_requirement(missing != [], "add label(s): #{Enum.join(missing, ", ")}")
+    |> add_requirement(offending != [], "remove label(s): #{Enum.join(offending, ", ")}")
+  end
+
+  defp label_requirements(_issue), do: []
 
   defp expand_graph(known, [], refs, _round), do: {known, refs}
 
@@ -1322,7 +1550,9 @@ defmodule SymphonyElixir.Orchestrator do
       priority: issue.priority,
       url: issue.url,
       blocked_by: issue.blocked_by || [],
-      placeholder: false
+      placeholder: false,
+      kind: :issue,
+      parent: nil
     }
   end
 
@@ -1336,7 +1566,9 @@ defmodule SymphonyElixir.Orchestrator do
       priority: nil,
       url: nil,
       blocked_by: [],
-      placeholder: true
+      placeholder: true,
+      kind: :issue,
+      parent: nil
     }
   end
 
@@ -2024,6 +2256,94 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
+  # Active/last-active session id for a graph node, joined from whichever
+  # tracking map still holds the issue (running > blocked > retrying). Entries
+  # are dropped once an issue leaves those states, so completed/idle issues
+  # report nil and the dashboard renders "-".
+  defp graph_session_id(%State{} = state, issue_id) do
+    graph_entry_field(state, issue_id, :session_id)
+  end
+
+  defp graph_workspace_path(%State{} = state, issue_id) do
+    graph_entry_field(state, issue_id, :workspace_path)
+  end
+
+  defp graph_entry_field(%State{} = state, issue_id, key) do
+    entry =
+      Map.get(state.running, issue_id) ||
+        Map.get(state.blocked, issue_id) ||
+        Map.get(state.retry_attempts, issue_id)
+
+    case entry do
+      %{} = metadata ->
+        case Map.get(metadata, key) do
+          value when is_binary(value) -> value
+          _ -> nil
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  # Short human explanation of why a node has no live agent session. Returns nil
+  # for running issues (a session is active, so no reason is needed).
+  # Container (parent/umbrella) nodes summarize sub-issue progress rather than a
+  # dispatch state, so they intercept ahead of the status-keyed clauses.
+  defp graph_inactive_reason(_state, _issue_id, _status, %{kind: :container} = node) do
+    done = Map.get(node, :child_done, 0)
+    total = Map.get(node, :child_total, 0)
+    "#{done}/#{total} sub-issues done"
+  end
+
+  defp graph_inactive_reason(_state, _issue_id, :running, _node), do: nil
+
+  defp graph_inactive_reason(%State{} = state, issue_id, :retrying, _node) do
+    case Map.get(state.retry_attempts, issue_id) do
+      %{attempt: attempt} = retry ->
+        case Map.get(retry, :error) do
+          error when is_binary(error) and error != "" -> "Retry #{attempt}: #{error}"
+          _ -> "Retry #{attempt}: waiting to retry"
+        end
+
+      _ ->
+        "Waiting to retry"
+    end
+  end
+
+  defp graph_inactive_reason(%State{} = state, issue_id, :blocked, _node) do
+    case Map.get(state.blocked, issue_id) do
+      %{error: error} when is_binary(error) and error != "" -> error
+      _ -> "Blocked — operator attention required"
+    end
+  end
+
+  defp graph_inactive_reason(%State{} = state, issue_id, :waiting_on_blockers, node) do
+    blockers =
+      case Map.get(Map.get(state, :dependency_blocked, %{}), issue_id) do
+        %{blocked_by: blocked_by} when is_list(blocked_by) -> blocked_by
+        _ -> Map.get(node, :blocked_by, [])
+      end
+
+    "Waiting on #{length(blockers)} blocker(s)"
+  end
+
+  # Unmanaged sub-issues explain what must change for this instance to pick them
+  # up (the inverse of the dispatch rules), computed at graph-build time.
+  defp graph_inactive_reason(_state, _issue_id, nil, %{managed: false, requirements: [_ | _] = requirements}) do
+    "Needs: " <> Enum.join(requirements, "; ")
+  end
+
+  defp graph_inactive_reason(%State{} = state, issue_id, nil, node) do
+    cond do
+      Map.get(node, :placeholder, false) == true -> "External blocker"
+      Map.get(node, :state_type) == "completed" -> "Completed"
+      Map.get(node, :state_type) == "canceled" -> "Canceled"
+      MapSet.member?(state.completed, issue_id) -> "Completed"
+      true -> "Idle — not yet dispatched"
+    end
+  end
+
   @spec request_refresh() :: map() | :unavailable
   def request_refresh do
     request_refresh(__MODULE__)
@@ -2140,9 +2460,14 @@ defmodule SymphonyElixir.Orchestrator do
 
     dependency_graph =
       Enum.map(dependency_graph_map, fn {issue_id, node} ->
+        status = derive_symphony_status(state, issue_id)
+
         node
         |> Map.put(:issue_id, issue_id)
-        |> Map.put(:symphony_status, derive_symphony_status(state, issue_id))
+        |> Map.put(:symphony_status, status)
+        |> Map.put(:session_id, graph_session_id(state, issue_id))
+        |> Map.put(:workspace_path, graph_workspace_path(state, issue_id))
+        |> Map.put(:inactive_reason, graph_inactive_reason(state, issue_id, status, node))
       end)
 
     {:reply,

@@ -719,7 +719,16 @@ defmodule SymphonyElixir.ExtensionsTest do
                    "url" => "https://linear.app/example/MT-DEP",
                    "placeholder" => false,
                    "symphony_status" => "waiting_on_blockers",
-                   "symphony_status_label" => "Waiting on blockers"
+                   "symphony_status_label" => "Waiting on blockers",
+                   "session_id" => nil,
+                   "workspace_path" => nil,
+                   "inactive_reason" => "Waiting on 1 blocker(s)",
+                   "kind" => "issue",
+                   "parent" => nil,
+                   "managed" => true,
+                   "requirements" => [],
+                   "child_total" => nil,
+                   "child_done" => nil
                  },
                  %{
                    "id" => "issue-upstream",
@@ -732,11 +741,20 @@ defmodule SymphonyElixir.ExtensionsTest do
                    "url" => "https://linear.app/example/MT-UP",
                    "placeholder" => false,
                    "symphony_status" => nil,
-                   "symphony_status_label" => nil
+                   "symphony_status_label" => nil,
+                   "session_id" => "thread-upstream",
+                   "workspace_path" => "/workspaces/MT-UP",
+                   "inactive_reason" => "Idle — not yet dispatched",
+                   "kind" => "issue",
+                   "parent" => nil,
+                   "managed" => true,
+                   "requirements" => [],
+                   "child_total" => nil,
+                   "child_done" => nil
                  }
                ],
                "edges" => [
-                 %{"source" => "issue-upstream", "target" => "issue-dep"}
+                 %{"source" => "issue-upstream", "target" => "issue-dep", "kind" => "blocks"}
                ]
              },
              "codex_totals" => %{
@@ -1287,10 +1305,13 @@ defmodule SymphonyElixir.ExtensionsTest do
           priority: 3,
           url: "https://linear.app/example/MT-DEP",
           blocked_by: [
-            %{id: "issue-upstream", identifier: "MT-UP", state: "In Progress"}
+            %{id: "issue-upstream", identifier: "MT-UP", state: "In Progress", relation: "blocks"}
           ],
           placeholder: false,
-          symphony_status: :waiting_on_blockers
+          symphony_status: :waiting_on_blockers,
+          session_id: nil,
+          workspace_path: nil,
+          inactive_reason: "Waiting on 1 blocker(s)"
         },
         %{
           issue_id: "issue-upstream",
@@ -1303,7 +1324,10 @@ defmodule SymphonyElixir.ExtensionsTest do
           url: "https://linear.app/example/MT-UP",
           blocked_by: [],
           placeholder: false,
-          symphony_status: nil
+          symphony_status: nil,
+          session_id: "thread-upstream",
+          workspace_path: "/workspaces/MT-UP",
+          inactive_reason: "Idle — not yet dispatched"
         }
       ],
       codex_totals: %{input_tokens: 4, output_tokens: 8, total_tokens: 12, seconds_running: 42.5},

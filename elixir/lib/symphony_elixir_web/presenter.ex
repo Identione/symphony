@@ -360,9 +360,10 @@ defmodule SymphonyElixirWeb.Presenter do
     |> Enum.flat_map(&edge_from_blocker(&1, target_id, known_ids))
   end
 
-  defp edge_from_blocker(%{id: source_id}, target_id, known_ids) when is_binary(source_id) do
+  defp edge_from_blocker(%{id: source_id} = blocker, target_id, known_ids)
+       when is_binary(source_id) do
     if MapSet.member?(known_ids, source_id) do
-      [%{source: source_id, target: target_id}]
+      [%{source: source_id, target: target_id, kind: Map.get(blocker, :relation, "blocks")}]
     else
       []
     end
@@ -385,9 +386,26 @@ defmodule SymphonyElixirWeb.Presenter do
       url: Map.get(node, :url),
       placeholder: Map.get(node, :placeholder, false) == true,
       symphony_status: symphony_status_string(status),
-      symphony_status_label: symphony_status_label(status)
+      symphony_status_label: symphony_status_label(status),
+      session_id: Map.get(node, :session_id),
+      workspace_path: Map.get(node, :workspace_path),
+      inactive_reason: Map.get(node, :inactive_reason),
+      # Sub-issue containment + manageability. `kind` is "container" for an
+      # umbrella/parent node and "issue" otherwise; `parent` is the container id
+      # a sub-issue belongs to (nil for top-level nodes); `managed` is false for
+      # sub-issues this instance would not pick up, with `requirements` listing
+      # what must change. Containers also report aggregate sub-issue progress.
+      kind: graph_node_kind(Map.get(node, :kind)),
+      parent: Map.get(node, :parent),
+      managed: Map.get(node, :managed, true) == true,
+      requirements: Map.get(node, :requirements, []),
+      child_total: Map.get(node, :child_total),
+      child_done: Map.get(node, :child_done)
     }
   end
+
+  defp graph_node_kind(:container), do: "container"
+  defp graph_node_kind(_kind), do: "issue"
 
   defp priority_label(1), do: "Urgent"
   defp priority_label(2), do: "High"

@@ -1235,6 +1235,89 @@ defmodule SymphonyElixir.OrchestratorCoverageTest do
     assert state.dependency_blocked == %{}
   end
 
+  test "dependency_graph groups a candidate's siblings under a parent container with manageability" do
+    use_memory_tracker()
+    pid = start_orchestrator(:DependencyGraphContainer)
+
+    # An unmanaged sibling: `Backlog` is neither active nor terminal, so it is
+    # not a dispatch candidate and the graph must explain what to change.
+    sibling = %Issue{
+      id: "iss-sibling",
+      identifier: "SUB-2",
+      title: "Sibling",
+      state: "Backlog",
+      state_type: "backlog",
+      labels: [],
+      parent_id: "parent-1"
+    }
+
+    # The managed child is held by a non-terminal blocker so the poll does not
+    # dispatch it, but it stays a candidate (managed) and anchors the container.
+    blocker_ref = %{id: "iss-blocker", identifier: "BLK-1", state: "In Progress"}
+
+    managed_child = %Issue{
+      id: "iss-child",
+      identifier: "SUB-1",
+      title: "Managed child",
+      state: "In Progress",
+      state_type: "started",
+      labels: [],
+      parent_id: "parent-1",
+      blocked_by: [blocker_ref]
+    }
+
+    parent = %Issue{
+      id: "parent-1",
+      identifier: "UMB-1",
+      title: "Umbrella",
+      state: "In Progress",
+      state_type: "started",
+      has_children: true,
+      children: [managed_child, sibling]
+    }
+
+    candidate = %{managed_child | parent: parent}
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_candidate_issues_response,
+      {:ok, [candidate]}
+    )
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_issue_states_by_ids_response,
+      {:ok, []}
+    )
+
+    send(pid, :run_poll_cycle)
+
+    state =
+      wait_for_state(
+        pid,
+        fn s -> Map.has_key?(s.dependency_graph, "parent-1") end,
+        2_000
+      )
+
+    container = state.dependency_graph["parent-1"]
+    assert container.kind == :container
+    assert container.child_total == 2
+    # Only the In Progress child is terminal-or-active... neither is terminal.
+    assert container.child_done == 0
+
+    child_node = state.dependency_graph["iss-child"]
+    assert child_node.kind == :issue
+    assert child_node.parent == "parent-1"
+    assert child_node.managed == true
+    assert child_node.requirements == []
+
+    sibling_node = state.dependency_graph["iss-sibling"]
+    assert sibling_node.kind == :issue
+    assert sibling_node.parent == "parent-1"
+    assert sibling_node.managed == false
+    assert Enum.any?(sibling_node.requirements, &(&1 =~ "active state"))
+  end
+
   test "dependency_blocked self-heals when an upstream blocker flips terminal between polls" do
     use_memory_tracker()
     pid = start_orchestrator(:DependencySelfHeal)

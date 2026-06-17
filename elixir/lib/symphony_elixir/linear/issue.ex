@@ -18,6 +18,9 @@ defmodule SymphonyElixir.Linear.Issue do
     labels: [],
     assigned_to_worker: true,
     has_children: false,
+    parent_id: nil,
+    parent: nil,
+    children: [],
     created_at: nil,
     updated_at: nil
   ]
@@ -36,6 +39,9 @@ defmodule SymphonyElixir.Linear.Issue do
           labels: [String.t()],
           assigned_to_worker: boolean(),
           has_children: boolean(),
+          parent_id: String.t() | nil,
+          parent: t() | nil,
+          children: [t()],
           created_at: DateTime.t() | nil,
           updated_at: DateTime.t() | nil
         }

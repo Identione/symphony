@@ -182,6 +182,16 @@ Fields:
 - `has_children` (boolean)
   - True when the issue has sub-issues (children). Parent/umbrella issues are
     excluded from candidate selection (see §8.2).
+- `parent_id` (string or null)
+  - The id of this issue's parent (umbrella) issue, when it is itself a sub-issue.
+- `parent` (issue or null)
+  - The parent issue, normalized, carrying its own `children` (this issue's
+    siblings). Populated inline by the poll query so the dashboard can build a
+    sub-issue container from any one managed child without a second fetch
+    (see §11 dependency graph).
+- `children` (list of issues)
+  - This issue's sub-issues, each normalized with `parent_id` backfilled. Bounded
+    per parent by a fetch cap.
 - `created_at` (timestamp or null)
 - `updated_at` (timestamp or null)
 
@@ -309,7 +319,14 @@ Fields:
   blockers`). Rebuilt per successful candidate fetch with last-known-good retained on failure.
   Expansion is bounded by a per-refresh round cap and a hard node cap so a deep blocker chain
   cannot drive unbounded Linear API usage; truncated ids surface as placeholder nodes. Never
-  consulted by dispatch.)
+  consulted by dispatch. Sub-issue containers are overlaid on this set: a node carries `kind`
+  (`:container` for a parent/umbrella node, `:issue` otherwise), `parent` (the container id a
+  sub-issue belongs to, or null), and — for sub-issues — `managed` (false when this instance would
+  not pick the issue up) with `requirements` (the inverse of the dispatch rules: what must change to
+  manage it). Container nodes also carry `child_total`/`child_done`. Containers are anchored on
+  managed work: a container is built only for the parent of an issue the poll already returned, then
+  *every* sub-issue of that parent is surfaced — managed or not — so the operator sees the full
+  family. Container expansion is subject to the same node cap.)
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
 - `agent_totals` (aggregate tokens + runtime seconds; tracked per active adapter — codex totals
   and claude totals are stored separately so adapter-specific cache fields stay typed correctly)
@@ -1003,7 +1020,10 @@ An issue is dispatch-eligible only if all are true:
   - An issue that has sub-issues (children) is a tracker, not a work unit — its
     work lives in the children. Parent issues are never dispatch-eligible,
     regardless of state, so the agent cannot re-implement a sub-issue's scope and
-    collide with the sub-issue's own PR.
+    collide with the sub-issue's own PR. (Parents are still surfaced for
+    observability as container nodes in the dependency graph — see §4.2's
+    `dependency_graph` — grouping their sub-issues, including ones this instance
+    does not manage.)
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.
@@ -1673,6 +1693,14 @@ Additional normalization details:
 - `labels` -> lowercase strings
 - `blocked_by` -> derived from inverse relations where relation type is `blocks`
 - `has_children` -> true when the issue's `children` connection has at least one node
+- `parent_id` -> `parent.id` from the tracker payload (null when the issue has no parent)
+- `parent` -> the `parent` connection normalized as an issue, carrying its own `children`
+  (the issue's siblings); each child is normalized with `parent_id` backfilled. Selected inline by
+  the poll query (`children` for an issue's own sub-issues, `parent { ... children }` for a child's
+  container + siblings), bounded per parent by a child-page cap so nested connections stay within the
+  tracker's query-complexity budget
+- `children` -> sub-issues normalized from the `children` connection; entries without an `identifier`
+  are dropped
 - `priority` -> integer only (non-integers become null)
 - `state` -> `state.name` from the tracker payload (operator-facing label, may be customized)
 - `state_type` -> `state.type` from the tracker payload (stable workflow-state bucket; see §4.1.1)
@@ -1979,7 +2007,16 @@ Minimum endpoints:
             "url": "https://linear.app/example/issue/MT-651",
             "placeholder": false,
             "symphony_status": "waiting_on_blockers",
-            "symphony_status_label": "Waiting on blockers"
+            "symphony_status_label": "Waiting on blockers",
+            "session_id": null,
+            "workspace_path": null,
+            "inactive_reason": "Waiting on 1 blocker(s)",
+            "kind": "issue",
+            "parent": "umb001",
+            "managed": true,
+            "requirements": [],
+            "child_total": null,
+            "child_done": null
           },
           {
             "id": "abc123",
@@ -1992,11 +2029,64 @@ Minimum endpoints:
             "url": "https://linear.app/example/issue/MT-649",
             "placeholder": false,
             "symphony_status": "running",
-            "symphony_status_label": "Running"
+            "symphony_status_label": "Running",
+            "session_id": "0199c2f4-thread-turn",
+            "workspace_path": "/srv/symphony/workspaces/MT-649",
+            "inactive_reason": null,
+            "kind": "issue",
+            "parent": "umb001",
+            "managed": true,
+            "requirements": [],
+            "child_total": null,
+            "child_done": null
+          },
+          {
+            "id": "umb001",
+            "issue_identifier": "MT-600",
+            "title": "Observability epic",
+            "state": "In Progress",
+            "state_type": "started",
+            "priority": null,
+            "priority_label": "No priority",
+            "url": "https://linear.app/example/issue/MT-600",
+            "placeholder": false,
+            "symphony_status": null,
+            "symphony_status_label": null,
+            "session_id": null,
+            "workspace_path": null,
+            "inactive_reason": "1/3 sub-issues done",
+            "kind": "container",
+            "parent": null,
+            "managed": true,
+            "requirements": [],
+            "child_total": 3,
+            "child_done": 1
+          },
+          {
+            "id": "jkl012",
+            "issue_identifier": "MT-652",
+            "title": "Backfill historical metrics",
+            "state": "Backlog",
+            "state_type": "backlog",
+            "priority": 4,
+            "priority_label": "Low",
+            "url": "https://linear.app/example/issue/MT-652",
+            "placeholder": false,
+            "symphony_status": null,
+            "symphony_status_label": null,
+            "session_id": null,
+            "workspace_path": null,
+            "inactive_reason": "Needs: move to an active state (Todo, In Progress)",
+            "kind": "issue",
+            "parent": "umb001",
+            "managed": false,
+            "requirements": ["move to an active state (Todo, In Progress)"],
+            "child_total": null,
+            "child_done": null
           }
         ],
         "edges": [
-          {"source": "abc123", "target": "ghi789"}
+          {"source": "abc123", "target": "ghi789", "kind": "blocks"}
         ]
       },
       "agent_totals": {
