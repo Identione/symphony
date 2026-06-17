@@ -336,6 +336,29 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
       assert_received :stub_stop_session
     end
 
+    test "treats a rate-limited issue-state refresh as done, not a failure (IDE-211)" do
+      ctx = setup_workspace!()
+      write_stub_workflow!(ctx, max_turns: 5)
+
+      # A transient Linear rate-limit on the post-turn refresh must NOT discard
+      # the completed turn into an exit/retry. `continue_with_issue?` maps
+      # `{:error, :rate_limited}` to `{:done, issue}`, so the run returns `:ok`
+      # and the reconcile loop re-dispatches later if the issue is still active.
+      fetcher = fn ["issue-cov-1"] -> {:error, :rate_limited} end
+
+      assert :ok =
+               AgentRunner.run(issue(), nil,
+                 adapter: StubAdapter,
+                 issue_state_fetcher: fetcher
+               )
+
+      # Exactly one turn ran and the session stopped cleanly — no second turn,
+      # no exit.
+      assert_received {:stub_run_turn, _prompt}
+      refute_received {:stub_run_turn, _other}
+      assert_received :stub_stop_session
+    end
+
     test "treats a non-binary issue state on refresh as inactive (done)" do
       ctx = setup_workspace!()
       write_stub_workflow!(ctx, max_turns: 5)

@@ -462,6 +462,22 @@ defmodule SymphonyElixir.AgentRunner do
       {:ok, []} ->
         {:done, issue}
 
+      # IDE-211: a transient Linear rate-limit on the *post-turn* state refresh
+      # must not discard a turn that already completed (and typically committed)
+      # successfully. Treating it as a fatal failure exits the run and triggers a
+      # full fresh-session retry, throwing away the finished turn's work and
+      # tokens. Instead, treat it as done-for-now: the orchestrator's reconcile
+      # loop re-dispatches the issue once the rate-limit window clears, if it is
+      # still active. If the agent already moved the issue to a terminal state,
+      # nothing re-runs at all.
+      {:error, :rate_limited} ->
+        Logger.warning(
+          "Issue-state refresh rate-limited after a completed turn for #{issue_context(issue)}; " <>
+            "treating run as done — reconcile will re-dispatch if still active"
+        )
+
+        {:done, issue}
+
       {:error, reason} ->
         {:error, {:issue_state_refresh_failed, reason}}
     end

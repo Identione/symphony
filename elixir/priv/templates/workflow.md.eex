@@ -14,7 +14,12 @@ tracker:
     - Duplicate
     - Done
 polling:
-  interval_ms: 5000
+  # Each poll cycle issues several Linear GraphQL calls (candidate fetch +
+  # running/blocked reconcile + dependency-graph expansion). Keep this at or
+  # above the schema default (30s); aggressive intervals like 5s exhaust
+  # Linear's hourly request budget and arm a 1-hour rate-limit back-off that
+  # stalls the whole daemon.
+  interval_ms: 30000
 workspace:
   root: <%= @workspace_root %>
 repo:
