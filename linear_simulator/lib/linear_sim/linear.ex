@@ -15,8 +15,67 @@ defmodule LinearSim.Linear do
     Project,
     Team,
     User,
+    WebhookDelivery,
     WorkflowState
   }
+
+  @doc "Coarse entity counts for the current simulator state (dashboard overview)."
+  @spec counts() :: %{atom() => non_neg_integer()}
+  def counts do
+    %{
+      organizations: Repo.aggregate(Organization, :count),
+      users: Repo.aggregate(User, :count),
+      teams: Repo.aggregate(Team, :count),
+      projects: Repo.aggregate(Project, :count),
+      issues: Repo.aggregate(Issue, :count),
+      comments: Repo.aggregate(Comment, :count),
+      workflow_states: Repo.aggregate(WorkflowState, :count),
+      webhook_deliveries: Repo.aggregate(WebhookDelivery, :count)
+    }
+  end
+
+  @doc "Lists an organization's users for the entity browser."
+  @spec list_users(Organization.t() | nil) :: [User.t()]
+  def list_users(nil), do: []
+
+  def list_users(%Organization{} = org) do
+    User
+    |> where([u], u.organization_id == ^org.id)
+    |> order_by([u], asc: u.inserted_at, asc: u.id)
+    |> Repo.all()
+  end
+
+  @doc "Lists an organization's teams for the entity browser."
+  @spec list_teams(Organization.t() | nil) :: [Team.t()]
+  def list_teams(nil), do: []
+
+  def list_teams(%Organization{} = org) do
+    Team
+    |> where([t], t.organization_id == ^org.id)
+    |> order_by([t], asc: t.inserted_at, asc: t.id)
+    |> Repo.all()
+  end
+
+  @doc "Lists every workflow state across an organization's teams (with team preloaded)."
+  @spec list_workflow_states(Organization.t() | nil) :: [WorkflowState.t()]
+  def list_workflow_states(nil), do: []
+
+  def list_workflow_states(%Organization{} = org) do
+    WorkflowState
+    |> join(:inner, [s], t in assoc(s, :team))
+    |> where([_s, t], t.organization_id == ^org.id)
+    |> order_by([s], asc: s.position, asc: s.id)
+    |> preload([:team])
+    |> Repo.all()
+  end
+
+  @doc "Lists recorded webhook delivery attempts, most recent first."
+  @spec list_webhook_deliveries() :: [WebhookDelivery.t()]
+  def list_webhook_deliveries do
+    WebhookDelivery
+    |> order_by([d], desc: d.inserted_at, desc: d.id)
+    |> Repo.all()
+  end
 
   @doc "The default organization, used when no auth header is supplied."
   @spec default_organization() :: Organization.t() | nil

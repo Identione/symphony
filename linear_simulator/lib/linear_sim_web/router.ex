@@ -5,6 +5,16 @@ defmodule LinearSimWeb.Router do
     plug :accepts, ["json"]
   end
 
+  # Dashboard (LiveView) — the operator-facing control UI.
+  pipeline :browser do
+    plug :accepts, ["html"]
+    plug :fetch_session
+    plug :fetch_live_flash
+    plug :put_root_layout, html: {LinearSimWeb.Layouts, :root}
+    plug :protect_from_forgery
+    plug :put_secure_browser_headers
+  end
+
   # Linear-compatible GraphQL endpoint. Context resolves the bearer token into
   # the Absinthe context; the request logger then records the (redacted) request.
   pipeline :graphql do
@@ -36,5 +46,16 @@ defmodule LinearSimWeb.Router do
     pipe_through :graphql
 
     forward "/graphql", Absinthe.Plug, schema: LinearSimWeb.GraphQL.Schema
+  end
+
+  scope "/", LinearSimWeb do
+    pipe_through :browser
+
+    live "/", OverviewLive
+    live "/scenarios", ScenariosLive
+    live "/entities", EntitiesLive
+    live "/captured", CapturedLive
+    live "/webhooks", WebhooksLive
+    live "/settings", SettingsLive
   end
 end

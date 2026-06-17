@@ -41,6 +41,8 @@ defmodule LinearSim.MixProject do
     [
       {:phoenix, "~> 1.8.8"},
       {:phoenix_ecto, "~> 4.5"},
+      {:phoenix_html, "~> 4.1"},
+      {:phoenix_live_view, "~> 1.0"},
       {:ecto_sql, "~> 3.13"},
       {:ecto_sqlite3, ">= 0.0.0"},
       {:telemetry_metrics, "~> 1.0"},
@@ -50,7 +52,8 @@ defmodule LinearSim.MixProject do
       {:bandit, "~> 1.5"},
       {:absinthe, "~> 1.7"},
       {:absinthe_plug, "~> 1.5"},
-      {:req, "~> 0.5"}
+      {:req, "~> 0.5"},
+      {:lazy_html, ">= 0.1.0", only: :test}
     ]
   end
 
@@ -62,9 +65,16 @@ defmodule LinearSim.MixProject do
   # See the documentation for `Mix` for more info on aliases.
   defp aliases do
     [
-      setup: ["deps.get", "ecto.setup"],
+      setup: ["deps.get", "ecto.setup", "assets.setup"],
       "ecto.setup": ["ecto.create", "ecto.migrate", "run priv/repo/seeds.exs"],
       "ecto.reset": ["ecto.drop", "ecto.setup"],
+      # No JS bundler: the dashboard serves the prebuilt LiveView client straight
+      # from the hex packages. Copy it into priv/static/assets on setup.
+      "assets.setup": [
+        "cmd mkdir -p priv/static/assets",
+        "cmd cp deps/phoenix/priv/static/phoenix.min.js priv/static/assets/phoenix.min.js",
+        "cmd cp deps/phoenix_live_view/priv/static/phoenix_live_view.min.js priv/static/assets/phoenix_live_view.min.js"
+      ],
       test: ["ecto.create --quiet", "ecto.migrate --quiet", "test"],
       precommit: ["compile --warnings-as-errors", "deps.unlock --unused", "format", "test"]
     ]

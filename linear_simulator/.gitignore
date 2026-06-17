@@ -32,3 +32,6 @@ linear_sim-*.tar
 
 # Captured GraphQL operations are raw evidence, not committed (docs §5).
 /priv/linear/operations/captured/
+
+# Dashboard JS client is copied from deps by `mix assets.setup`, not committed.
+/priv/static/assets/

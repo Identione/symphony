@@ -7,6 +7,8 @@ defmodule LinearSim.Linear.WebhookDelivery do
   @foreign_key_type :string
   @timestamps_opts [type: :utc_datetime_usec]
 
+  @type t :: %__MODULE__{}
+
   schema "webhook_deliveries" do
     field :target_url, :string
     field :event_type, :string

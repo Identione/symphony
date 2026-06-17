@@ -44,9 +44,23 @@ defmodule LinearSim.Scenarios do
 
   @default_scenario "basic_workspace"
 
+  @current_key {__MODULE__, :current}
+
   @doc "Names of all known scenarios."
   @spec names() :: [String.t()]
   def names, do: Map.keys(@scenarios)
+
+  @doc "The name of the most recently loaded scenario (defaults to the default scenario)."
+  @spec current() :: String.t()
+  def current, do: :persistent_term.get(@current_key, @default_scenario)
+
+  @doc "The default scenario name."
+  @spec default() :: String.t()
+  def default, do: @default_scenario
+
+  @doc "Returns true if the named scenario puts the endpoint into a non-normal response mode."
+  @spec error_scenario?(String.t()) :: boolean()
+  def error_scenario?(name), do: Map.has_key?(@modes, name)
 
   @doc "Resets the simulator to the default scenario."
   @spec reset!() :: :ok
@@ -77,6 +91,7 @@ defmodule LinearSim.Scenarios do
       end)
 
     LinearSim.Mode.put(Map.get(@modes, name, :normal))
+    :persistent_term.put(@current_key, name)
     :ok
   end
 

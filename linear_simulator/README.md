@@ -12,11 +12,36 @@ Stack: Elixir + Phoenix + Absinthe + Ecto + SQLite (Req for outbound webhooks).
 ```bash
 cd linear_simulator
 mise install            # Erlang 28 / Elixir 1.19 (pinned in mise.toml)
-mise exec -- mix setup  # deps.get + ecto.create + migrate + seed basic_workspace
+mise exec -- mix setup  # deps.get + ecto.create + migrate + seed basic_workspace + assets
 mise exec -- mix phx.server   # serves http://localhost:4000
 ```
 
+`mix setup` includes `mix assets.setup`, which copies the prebuilt LiveView JS
+client (`phoenix.min.js` + `phoenix_live_view.min.js`) from deps into
+`priv/static/assets/` — there is no JS bundler. Re-run `mix assets.setup` after a
+`phoenix`/`phoenix_live_view` upgrade.
+
 Health check: `curl http://localhost:4000/health` → `{"status":"ok"}`.
+
+## Dashboard (web UI)
+
+A LiveView control dashboard is served at the root path — open
+<http://localhost:4000/> in a browser. It is styled like Linear (dark theme,
+indigo accent, monospace technical values) and exposes the simulator's control
+plane interactively:
+
+| Page | Path | What it does |
+| --- | --- | --- |
+| Overview | `/` | Live entity counts + current scenario / response mode / capture state |
+| Scenarios | `/scenarios` | Load any scenario; force a response-mode override |
+| Entities | `/entities` | Browse issues, projects, teams, workflow states, users |
+| Captured Operations | `/captured` | Inspect captured ops; promote to the curated corpus; clear |
+| Webhooks | `/webhooks` | Sign & replay a webhook; delivery history |
+| Settings | `/settings` | Toggle operation capture / GraphQL logging; reset / wipe |
+
+The top bar's **Reset** and **Capture ops** controls and live status pills work
+on every page. Tailwind and fonts load from a CDN, so the browser needs network
+access (fine for a local dev tool).
 
 ## Endpoints
 
