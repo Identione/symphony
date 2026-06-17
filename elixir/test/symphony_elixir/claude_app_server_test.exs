@@ -800,6 +800,7 @@ defmodule SymphonyElixir.ClaudeAppServerTest do
           {"quota_exceeded", :quota_exceeded},
           {"invalid_request", :invalid_request},
           {"error_max_budget_usd", :budget_exhausted},
+          {"error_max_turns", :max_turns_reached},
           # Raw `AssistantMessageError` literals the sidecar forwards verbatim.
           {"rate_limit", :rate_limited},
           {"billing_error", :quota_exceeded},

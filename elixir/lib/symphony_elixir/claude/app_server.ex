@@ -531,6 +531,14 @@ defmodule SymphonyElixir.Claude.AppServer do
   # `max_budget_usd` breach; the sidecar re-emits it as an error envelope so it
   # reaches this path instead of looking like a clean turn_end.
   defp to_error_code("error_max_budget_usd"), do: :budget_exhausted
+  # Same shape for the SDK's own within-session `max_turns` ceiling
+  # (`agent.claude.max_turns`): the SDK *returns* a ResultMessage with this
+  # subtype, re-emitted as an error envelope. Map it to `:max_turns_reached`
+  # (not `:unknown`) so it shares the IDE-74/IDE-73 path — fast retry with the
+  # deterministic-failure counter advancing toward escalation — instead of the
+  # generic `:unknown` exponential backoff that retries indefinitely and resets
+  # the counter.
+  defp to_error_code("error_max_turns"), do: :max_turns_reached
   defp to_error_code(_), do: :unknown
 
   defp dispatch_tool_call(session, env, tool_executor) do
