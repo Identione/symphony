@@ -12,6 +12,7 @@ defmodule LinearSimWeb.Router do
     plug LinearSimWeb.GraphQL.Plugs.RateLimitMode
     plug LinearSimWeb.GraphQL.Plugs.Context
     plug LinearSimWeb.GraphQL.Plugs.RequestLogger
+    plug LinearSimWeb.GraphQL.Plugs.CaptureOperations
   end
 
   scope "/" do

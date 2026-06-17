@@ -29,3 +29,6 @@ linear_sim-*.tar
 *.db
 *.db-*
 
+
+# Captured GraphQL operations are raw evidence, not committed (docs §5).
+/priv/linear/operations/captured/

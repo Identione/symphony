@@ -38,6 +38,15 @@ config :linear_sim, :graphql_logging,
   log_variables: true,
   redact_authorization: true
 
+# Operation capture (docs/linear-sim.md §5) — disabled by default. Enable to
+# record incoming GraphQL documents (including agent ad-hoc ops) to disk for
+# promotion into the curated corpus.
+config :linear_sim, :operation_capture,
+  enabled: false,
+  directory: "priv/linear/operations/captured",
+  include_variables: true,
+  redact_variables: ["accessToken", "apiKey", "password", "token"]
+
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
 import_config "#{config_env()}.exs"
