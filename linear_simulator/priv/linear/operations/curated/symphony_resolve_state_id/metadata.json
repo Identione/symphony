@@ -1,0 +1,13 @@
+{
+  "name": "symphony_resolve_state_id",
+  "scenario": "basic_workspace",
+  "operationName": "SymphonyResolveStateId",
+  "auth": "Bearer user_hakan",
+  "source": "symphony lib/symphony_elixir/linear/adapter.ex",
+  "expected": {
+    "allowErrors": false,
+    "paths": {
+      "data.issue.team.states.nodes.0.id": "state_in_progress"
+    }
+  }
+}

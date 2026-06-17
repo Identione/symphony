@@ -1,0 +1,15 @@
+{
+  "name": "symphony_linear_poll",
+  "scenario": "basic_workspace",
+  "operationName": "SymphonyLinearPoll",
+  "auth": "Bearer user_hakan",
+  "source": "symphony lib/symphony_elixir/linear/client.ex",
+  "expected": {
+    "allowErrors": false,
+    "paths": {
+      "data.issues.nodes.0.identifier": "ENG-1",
+      "data.issues.nodes.0.branchName": "hakan/eng-1",
+      "data.issues.pageInfo.hasNextPage": false
+    }
+  }
+}

@@ -1,0 +1,92 @@
+defmodule LinearSim.Scenarios.Common do
+  @moduledoc """
+  Shared seed building blocks. Deterministic string IDs throughout so fixtures
+  and assertions stay stable (docs/linear-sim.md §7).
+  """
+  alias LinearSim.Repo
+
+  alias LinearSim.Linear.{
+    ApiToken,
+    Organization,
+    Project,
+    Team,
+    User,
+    WorkflowState
+  }
+
+  @doc """
+  Seeds the standard org/user/token/team/states/project skeleton used by most
+  scenarios. Returns a map of the inserted records for issue seeding.
+  """
+  @spec base_workspace!() :: map()
+  def base_workspace! do
+    org = Repo.insert!(%Organization{id: "org_default", name: "Acme", url_key: "acme"})
+
+    user =
+      Repo.insert!(%User{
+        id: "user_hakan",
+        organization_id: org.id,
+        name: "Håkan Niska",
+        email: "hakan@example.test"
+      })
+
+    # Token value matches the user id so `Authorization: Bearer user_hakan`
+    # works directly (§14), and a separate opaque token is also resolvable.
+    Repo.insert!(%ApiToken{
+      id: "token_hakan",
+      organization_id: org.id,
+      user_id: user.id,
+      token: "user_hakan",
+      label: "Default simulator token"
+    })
+
+    team =
+      Repo.insert!(%Team{
+        id: "team_eng",
+        organization_id: org.id,
+        key: "ENG",
+        name: "Engineering"
+      })
+
+    states = %{
+      todo: insert_state!(team, "state_todo", "Todo", "unstarted", 1),
+      in_progress: insert_state!(team, "state_in_progress", "In Progress", "started", 2),
+      in_review: insert_state!(team, "state_in_review", "In Review", "started", 3),
+      done: insert_state!(team, "state_done", "Done", "completed", 4)
+    }
+
+    project =
+      Repo.insert!(%Project{
+        id: "project_roadmap",
+        organization_id: org.id,
+        name: "Roadmap",
+        slug_id: "roadmap"
+      })
+
+    %{org: org, user: user, team: team, states: states, project: project}
+  end
+
+  @doc "Inserts a workflow state for the given team."
+  @spec insert_state!(struct(), String.t(), String.t(), String.t(), integer()) :: struct()
+  def insert_state!(team, id, name, type, position) do
+    Repo.insert!(%WorkflowState{
+      id: id,
+      team_id: team.id,
+      name: name,
+      type: type,
+      position: position
+    })
+  end
+
+  @doc "Builds a Linear-style issue URL for the given identifier."
+  @spec issue_url(String.t()) :: String.t()
+  def issue_url(identifier) do
+    "https://linear.app/acme/issue/#{identifier}"
+  end
+
+  @doc "Builds a Linear-style branch name for the given identifier."
+  @spec branch_name(String.t()) :: String.t()
+  def branch_name(identifier) do
+    "hakan/#{String.downcase(identifier)}"
+  end
+end

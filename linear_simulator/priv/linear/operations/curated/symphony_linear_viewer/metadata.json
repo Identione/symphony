@@ -1,0 +1,13 @@
+{
+  "name": "symphony_linear_viewer",
+  "scenario": "basic_workspace",
+  "operationName": "SymphonyLinearViewer",
+  "auth": "Bearer user_hakan",
+  "source": "symphony lib/symphony_elixir/linear/client.ex",
+  "expected": {
+    "allowErrors": false,
+    "paths": {
+      "data.viewer.id": "user_hakan"
+    }
+  }
+}

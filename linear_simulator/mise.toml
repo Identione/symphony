@@ -1,0 +1,9 @@
+# Toolchain for the Linear GraphQL API simulator. Pins match the symphony
+# reference implementation (../elixir/mise.toml) so both build with the same
+# Erlang/Elixir. The simulator needs no agent runtimes (codex/uv).
+[tools]
+erlang = "28"
+elixir = "1.19.5-otp-28"
+
+[settings]
+lockfile = true

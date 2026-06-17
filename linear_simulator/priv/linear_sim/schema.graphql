@@ -1,0 +1,221 @@
+schema {
+  mutation: RootMutationType
+  query: RootQueryType
+}
+
+type RootQueryType {
+  "The currently authenticated user, resolved from the bearer token."
+  viewer: User
+
+  "List issues, filtered Linear-style by project\/state\/id."
+  issues(filter: IssueFilter, first: Int, after: String, last: Int, before: String): IssueConnection
+
+  "Fetch a single issue by internal id or ticket identifier."
+  issue(id: String!): Issue
+
+  "Simulator API version. Placeholder query used by skeleton smoke tests."
+  apiVersion: String!
+}
+
+type RootMutationType {
+  "Update an issue (e.g. transition its workflow state)."
+  issueUpdate(id: String!, input: IssueUpdateInput!): IssuePayload
+
+  "Create a comment on an issue."
+  commentCreate(input: CommentCreateInput!): CommentPayload
+
+  "Update a comment's body."
+  commentUpdate(id: String!, input: CommentUpdateInput!): CommentPayload
+}
+
+"A Linear issue comment."
+type Comment {
+  id: ID!
+  body: String!
+  resolvedAt: DateTime
+  createdAt: DateTime
+  updatedAt: DateTime
+}
+
+type CommentEdge {
+  cursor: String!
+  node: Comment
+}
+
+type CommentConnection {
+  nodes: [Comment]
+  edges: [CommentEdge]
+  pageInfo: PageInfo!
+}
+
+input CommentCreateInput {
+  issueId: String!
+  body: String!
+}
+
+input CommentUpdateInput {
+  body: String!
+}
+
+input IssueUpdateInput {
+  stateId: String
+}
+
+"A team workflow state."
+type WorkflowState {
+  id: ID!
+  name: String!
+  type: String
+}
+
+"An issue label."
+type Label {
+  id: ID!
+  name: String!
+  color: String
+}
+
+"A directed relation; `issue` is the source (e.g. the blocker)."
+type IssueRelation {
+  type: String!
+  issue: Issue
+}
+
+"A Linear team."
+type Team {
+  id: ID!
+  key: String
+  name: String
+  states(filter: WorkflowStateFilter, first: Int, after: String): WorkflowStateConnection
+}
+
+"A Linear issue."
+type Issue {
+  id: ID!
+  identifier: String!
+  title: String
+  description: String
+  priority: Int
+  branchName: String
+  url: String
+  state: WorkflowState
+  assignee: User
+  team: Team
+  createdAt: DateTime
+  updatedAt: DateTime
+  labels(first: Int, after: String): LabelConnection
+  children(first: Int, after: String): IssueConnection
+  inverseRelations(first: Int, after: String): IssueRelationConnection
+  comments(first: Int, after: String, orderBy: PaginationOrderBy): CommentConnection
+}
+
+type IssueEdge {
+  cursor: String!
+  node: Issue
+}
+
+type IssueConnection {
+  nodes: [Issue]
+  edges: [IssueEdge]
+  pageInfo: PageInfo!
+}
+
+type LabelEdge {
+  cursor: String!
+  node: Label
+}
+
+type LabelConnection {
+  nodes: [Label]
+  edges: [LabelEdge]
+  pageInfo: PageInfo!
+}
+
+type WorkflowStateEdge {
+  cursor: String!
+  node: WorkflowState
+}
+
+type WorkflowStateConnection {
+  nodes: [WorkflowState]
+  edges: [WorkflowStateEdge]
+  pageInfo: PageInfo!
+}
+
+type IssueRelationEdge {
+  cursor: String!
+  node: IssueRelation
+}
+
+type IssueRelationConnection {
+  nodes: [IssueRelation]
+  edges: [IssueRelationEdge]
+  pageInfo: PageInfo!
+}
+
+input ProjectFilter {
+  slugId: StringComparator
+}
+
+input WorkflowStateFilter {
+  name: StringComparator
+}
+
+input IssueFilter {
+  id: IdComparator
+  project: ProjectFilter
+  state: WorkflowStateFilter
+}
+
+"A Linear user."
+type User {
+  id: ID!
+  name: String
+  email: String
+}
+
+"Relay page info."
+type PageInfo {
+  startCursor: String
+  endCursor: String
+  hasPreviousPage: Boolean!
+  hasNextPage: Boolean!
+}
+
+"Ordering for paginated connections (Linear's PaginationOrderBy)."
+enum PaginationOrderBy {
+  createdAt
+  updatedAt
+}
+
+"String comparator subset used by symphony filters."
+input StringComparator {
+  eq: String
+  in: [String!]
+}
+
+"ID comparator subset used by symphony filters."
+input IdComparator {
+  eq: ID
+  in: [ID!]
+}
+
+"commentCreate \/ commentUpdate payload."
+type CommentPayload {
+  success: Boolean!
+  comment: Comment
+}
+
+"issueUpdate payload."
+type IssuePayload {
+  success: Boolean!
+  issue: Issue
+}
+
+"""
+The `DateTime` scalar type represents a date and time in the UTC
+timezone. The DateTime appears in a JSON response as an ISO8601 formatted
+string, including UTC timezone ("Z"). The parsed date and time string will
+be converted to UTC if there is an offset.
+"""
+scalar DateTime

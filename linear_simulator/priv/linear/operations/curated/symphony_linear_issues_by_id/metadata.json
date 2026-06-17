@@ -1,0 +1,14 @@
+{
+  "name": "symphony_linear_issues_by_id",
+  "scenario": "basic_workspace",
+  "operationName": "SymphonyLinearIssuesById",
+  "auth": "Bearer user_hakan",
+  "source": "symphony lib/symphony_elixir/linear/client.ex",
+  "expected": {
+    "allowErrors": false,
+    "paths": {
+      "data.issues.nodes.0.id": "issue_eng_1",
+      "data.issues.nodes.0.identifier": "ENG-1"
+    }
+  }
+}

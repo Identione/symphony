@@ -1,0 +1,13 @@
+{
+  "name": "symphony_create_comment",
+  "scenario": "basic_workspace",
+  "operationName": "SymphonyCreateComment",
+  "auth": "Bearer user_hakan",
+  "source": "symphony lib/symphony_elixir/linear/adapter.ex",
+  "expected": {
+    "allowErrors": false,
+    "paths": {
+      "data.commentCreate.success": true
+    }
+  }
+}
