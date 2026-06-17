@@ -357,7 +357,11 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp build_turn_prompt(issue, opts, 1, _max_turns), do: PromptBuilder.build_prompt(issue, opts)
+  defp build_turn_prompt(issue, opts, 1, _max_turns) do
+    issue
+    |> PromptBuilder.build_prompt(opts)
+    |> prepend_resume_after_block_directive(Keyword.get(opts, :resume_after_block))
+  end
 
   defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
     """
@@ -369,6 +373,38 @@ defmodule SymphonyElixir.AgentRunner do
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
     - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
     """
+  end
+
+  # Prepend a rebase-on-resume directive when the orchestrator re-dispatches a
+  # session that was previously paused on a dependency blocker (§4.1.8). The
+  # blocker has since landed on the base branch, so the resuming agent must
+  # integrate the updated base before continuing the ticket work. `@doc false`
+  # public seam so the coverage suite can assert the directive shape without
+  # standing up a real session.
+  @doc false
+  @spec prepend_resume_after_block_directive(String.t(), map() | nil) :: String.t()
+  def prepend_resume_after_block_directive(prompt, %{} = resume_after_block) when is_binary(prompt) do
+    resume_after_block_directive(resume_after_block) <> "\n\n" <> prompt
+  end
+
+  def prepend_resume_after_block_directive(prompt, _resume_after_block) when is_binary(prompt), do: prompt
+
+  defp resume_after_block_directive(resume_after_block) do
+    """
+    Rebase-on-resume guidance:
+
+    - This session was previously paused because it was blocked by another issue.#{landed_blocker_clause(resume_after_block)}
+    - Before resuming the ticket work, integrate the latest base branch into this workspace so your changes build on top of the landed work. Use the `pull` skill (fetch the base branch and rebase/merge it in), resolving any conflicts.
+    - Only after the workspace is up to date with the landed base should you continue the remaining ticket work.
+    """
+  end
+
+  defp landed_blocker_clause(%{blockers: [_ | _] = blockers}) do
+    " The blocking issue(s) #{Enum.join(blockers, ", ")} this work depended on have now landed on the base branch."
+  end
+
+  defp landed_blocker_clause(_resume_after_block) do
+    " The issue that blocked it has now landed on the base branch."
   end
 
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do

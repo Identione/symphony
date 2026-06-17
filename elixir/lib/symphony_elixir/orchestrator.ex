@@ -53,6 +53,15 @@ defmodule SymphonyElixir.Orchestrator do
       claimed: MapSet.new(),
       blocked: %{},
       dependency_blocked: %{},
+      # Issues that were paused mid-run because they gained a non-terminal
+      # blocker (§4.1.8). Keyed by Linear issue id; each value is
+      # `%{blockers: [identifier]}` recording the blockers that held the work.
+      # When the issue is re-dispatched (its blockers having landed), the entry
+      # is consumed to inject a rebase-on-resume directive into the turn-1
+      # prompt so the session integrates the now-landed base before continuing.
+      # Entries are cleared on dispatch; an issue that is paused then abandoned
+      # before re-dispatch leaves a small, harmless residual entry until restart.
+      rebase_pending: %{},
       dependency_graph: %{},
       retry_attempts: %{},
       # Per-issue counter of consecutive same-code adapter failures, used to
@@ -852,12 +861,36 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp pause_dependency_blocked_running_issue(%State{} = state, %Issue{} = issue, active_states) do
-    state = maybe_restore_dependency_blocked_issue_state(state, issue, active_states)
+    state =
+      state
+      |> maybe_restore_dependency_blocked_issue_state(issue, active_states)
+      |> mark_rebase_pending(issue)
 
     Logger.info("Issue is waiting on non-terminal blockers: #{issue_context(issue)} state=#{inspect(issue.state)} blocked_by=#{length(issue.blocked_by)}; pausing active agent")
 
     terminate_running_issue(state, issue.id, false)
   end
+
+  # Record that this paused session must rebase onto its (now-soon-to-land)
+  # blockers' work before it resumes. `terminate_running_issue/3` with
+  # `cleanup_workspace: false` preserves the workspace and leaves
+  # `rebase_pending` intact, so the entry survives until the next dispatch.
+  defp mark_rebase_pending(%State{} = state, %Issue{id: issue_id} = issue) when is_binary(issue_id) do
+    %{state | rebase_pending: Map.put(state.rebase_pending, issue_id, %{blockers: blocker_identifiers(issue)})}
+  end
+
+  defp mark_rebase_pending(%State{} = state, _issue), do: state
+
+  defp blocker_identifiers(%Issue{blocked_by: blockers}) when is_list(blockers) do
+    blockers
+    |> Enum.flat_map(fn
+      %{identifier: identifier} when is_binary(identifier) -> [identifier]
+      _ -> []
+    end)
+    |> Enum.uniq()
+  end
+
+  defp blocker_identifiers(_issue), do: []
 
   defp maybe_restore_dependency_blocked_issue_state(%State{} = state, %Issue{} = issue, active_states) do
     if active_issue_state?(issue.state, active_states) do
@@ -1533,11 +1566,19 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
+    resume_after_block = Map.get(state.rebase_pending, issue.id)
+
     case Task.Supervisor.start_child(agent_task_supervisor(), fn ->
-           AgentRunner.run(issue, recipient, attempt: attempt, worker_host: worker_host)
+           AgentRunner.run(issue, recipient,
+             attempt: attempt,
+             worker_host: worker_host,
+             resume_after_block: resume_after_block
+           )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
+
+        log_resume_after_block(issue, resume_after_block)
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
 
@@ -1581,7 +1622,8 @@ defmodule SymphonyElixir.Orchestrator do
           state
           | running: running,
             claimed: MapSet.put(state.claimed, issue.id),
-            retry_attempts: Map.delete(state.retry_attempts, issue.id)
+            retry_attempts: Map.delete(state.retry_attempts, issue.id),
+            rebase_pending: Map.delete(state.rebase_pending, issue.id)
         }
 
       {:error, reason} ->
@@ -1595,6 +1637,12 @@ defmodule SymphonyElixir.Orchestrator do
         })
     end
   end
+
+  defp log_resume_after_block(issue, %{blockers: blockers}) do
+    Logger.info("Resuming dependency-unblocked issue with rebase-on-resume directive: #{issue_context(issue)} blockers=#{inspect(blockers)}")
+  end
+
+  defp log_resume_after_block(_issue, _resume_after_block), do: :ok
 
   defp revalidate_issue_for_dispatch(%Issue{id: issue_id}, issue_fetcher, terminal_states)
        when is_binary(issue_id) and is_function(issue_fetcher, 1) do
