@@ -194,6 +194,14 @@ defmodule SymphonyElixir.ClaudeWireTest do
       assert {:ok, %{type: :assistant_delta, text: "partial"}} = Wire.decode(raw)
     end
 
+    test "decodes `tool_started` / `tool_finished` lifecycle envelopes" do
+      started = ~s({"type":"tool_started","name":"Bash","tool_use_id":"tu-1"}\n)
+      assert {:ok, %{type: :tool_started, name: "Bash", tool_use_id: "tu-1"}} = Wire.decode(started)
+
+      finished = ~s({"type":"tool_finished","tool_use_id":"tu-1"}\n)
+      assert {:ok, %{type: :tool_finished, tool_use_id: "tu-1"}} = Wire.decode(finished)
+    end
+
     test "decodes a `token_usage` envelope with snake_case usage keys" do
       raw =
         ~s({"type":"token_usage","usage":) <>

@@ -519,4 +519,40 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
       assert Config.active_stall_timeout_ms(settings) == 44_444
     end
   end
+
+  describe "Config.active_tool_stall_timeout_ms/1" do
+    test "agent.kind == claude returns agent.claude.tool_stall_timeout_ms" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      agent:
+        kind: claude
+        claude:
+          tool_stall_timeout_ms: 1234567
+      """
+
+      assert {:ok, settings} = parse(yaml)
+      assert Config.active_tool_stall_timeout_ms(settings) == 1_234_567
+    end
+
+    test "defaults to 30 minutes for claude when unset" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      agent: {kind: claude}
+      """
+
+      assert {:ok, settings} = parse(yaml)
+      assert Config.active_tool_stall_timeout_ms(settings) == 1_800_000
+    end
+
+    test "codex adapter falls back to codex.stall_timeout_ms (no tool tier)" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      codex:
+        stall_timeout_ms: 22222
+      """
+
+      assert {:ok, settings} = parse(yaml)
+      assert Config.active_tool_stall_timeout_ms(settings) == 22_222
+    end
+  end
 end
