@@ -42,6 +42,8 @@ all tables and re-seeds deterministic, string-keyed fixtures.
 | `archived_issues` | one active Todo issue and one archived (Done) issue |
 | `webhook_demo` | same as `basic_workspace` |
 | `rate_limited` | basic data, but `/graphql` returns a Linear `RATELIMITED` error body |
+| `invalid_token` | basic data, but `/graphql` returns an `AUTHENTICATION_ERROR` body |
+| `permission_denied` | basic data, but `/graphql` returns a `FORBIDDEN` body |
 
 ```bash
 curl -X POST http://localhost:4000/admin/scenario/many_issues
@@ -60,8 +62,24 @@ operations Symphony sends (five queries, three mutations), each with example
 variables, scenario, auth, and expected response paths. They are replayed in CI by
 `test/linear_sim_web/operation_replay_test.exs`.
 
-`mix linear_sim.dump_schema` writes the simulator's SDL to
-`priv/linear_sim/schema.graphql` for review/diffing.
+### Compatibility tooling
+
+- `mix linear_sim.dump_schema` — writes the simulator's SDL to
+  `priv/linear_sim/schema.graphql` for review/diffing.
+- `mix linear_sim.validate_operations` — validates every curated operation
+  against the simulator schema via Absinthe (parse + schema validation, no
+  execution, no Node dependency). Exits non-zero on any failure.
+- Operation replay (`test/linear_sim_web/operation_replay_test.exs`) executes
+  each curated operation against its scenario and asserts response paths.
+- **Operation capture** (`config :linear_sim, :operation_capture, enabled: true`)
+  writes incoming GraphQL documents to `priv/linear/operations/captured/` —
+  useful for discovering **agent ad-hoc operations** (e.g. the `MoveIssue`
+  mutation a coding agent issues via symphony's `linear_graphql` tool). Promote
+  useful captures into the curated corpus.
+
+Validating against the *real Linear reference schema* (a `mix linear.fetch_schema`
+that introspects `https://api.linear.app/graphql`) needs a real Linear token and
+is left as future work.
 
 ## Pointing Symphony at the simulator
 

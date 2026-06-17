@@ -1,0 +1,10 @@
+query SymphonyPreflightCandidates($slugId: String!, $stateNames: [String!]!) {
+  issues(filter: {project: {slugId: {eq: $slugId}}, state: {name: {in: $stateNames}}}, first: 250) {
+    pageInfo {
+      hasNextPage
+    }
+    nodes {
+      id
+    }
+  }
+}

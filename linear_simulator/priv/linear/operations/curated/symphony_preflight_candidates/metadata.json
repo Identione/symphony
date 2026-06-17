@@ -1,0 +1,14 @@
+{
+  "name": "symphony_preflight_candidates",
+  "scenario": "basic_workspace",
+  "operationName": "SymphonyPreflightCandidates",
+  "auth": "Bearer user_hakan",
+  "source": "symphony lib/symphony_elixir/cli/preflight.ex",
+  "expected": {
+    "allowErrors": false,
+    "paths": {
+      "data.issues.nodes.0.id": "issue_eng_1",
+      "data.issues.pageInfo.hasNextPage": false
+    }
+  }
+}

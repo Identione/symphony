@@ -1,0 +1,14 @@
+{
+  "name": "symphony_preflight_viewer",
+  "scenario": "basic_workspace",
+  "operationName": "SymphonyPreflightViewer",
+  "auth": "Bearer user_hakan",
+  "source": "symphony lib/symphony_elixir/cli/preflight.ex",
+  "expected": {
+    "allowErrors": false,
+    "paths": {
+      "data.viewer.id": "user_hakan",
+      "data.viewer.name": "Håkan Niska"
+    }
+  }
+}

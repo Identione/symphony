@@ -1,0 +1,16 @@
+query SymphonyPreflightStates($slugId: String!) {
+  projects(filter: {slugId: {eq: $slugId}}, first: 1) {
+    nodes {
+      teams(first: 50) {
+        nodes {
+          states(first: 100) {
+            nodes {
+              name
+              type
+            }
+          }
+        }
+      }
+    }
+  }
+}

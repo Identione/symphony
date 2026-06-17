@@ -9,7 +9,8 @@ defmodule LinearSimWeb.OperationReplayTest do
   @curated Path.wildcard(Path.join([File.cwd!(), "priv", "linear", "operations", "curated", "*"]))
 
   test "the curated corpus is non-empty" do
-    assert length(@curated) == 8
+    # 5 client queries + 3 mutations + 4 preflight queries.
+    assert length(@curated) == 12
   end
 
   for dir <- @curated do

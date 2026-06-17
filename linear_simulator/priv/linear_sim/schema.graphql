@@ -13,6 +13,9 @@ type RootQueryType {
   "Fetch a single issue by internal id or ticket identifier."
   issue(id: String!): Issue
 
+  "List projects, filtered Linear-style by slug."
+  projects(filter: ProjectFilter, first: Int, after: String): ProjectConnection
+
   "Simulator API version. Placeholder query used by skeleton smoke tests."
   apiVersion: String!
 }
@@ -59,6 +62,36 @@ input CommentUpdateInput {
 
 input IssueUpdateInput {
   stateId: String
+}
+
+"A Linear project."
+type Project {
+  id: ID!
+  name: String
+  slugId: String
+  teams(first: Int, after: String): TeamConnection
+}
+
+type TeamEdge {
+  cursor: String!
+  node: Team
+}
+
+type TeamConnection {
+  nodes: [Team]
+  edges: [TeamEdge]
+  pageInfo: PageInfo!
+}
+
+type ProjectEdge {
+  cursor: String!
+  node: Project
+}
+
+type ProjectConnection {
+  nodes: [Project]
+  edges: [ProjectEdge]
+  pageInfo: PageInfo!
 }
 
 "A team workflow state."
