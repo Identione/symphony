@@ -11,7 +11,7 @@ defmodule SymphonyElixir.Claude.AppServer do
   @behaviour SymphonyElixir.Agent.Adapter
 
   require Logger
-  alias SymphonyElixir.{Claude.Wire, Codex.DynamicTool, Config, Linear.Issue, PathSafety}
+  alias SymphonyElixir.{Claude.Wire, Codex.DynamicTool, Config, Config.Schema, Linear.Issue, PathSafety}
 
   @port_line_bytes 1_048_576
   @default_read_timeout_ms 30_000
@@ -28,7 +28,9 @@ defmodule SymphonyElixir.Claude.AppServer do
   @impl true
   @spec start_session(Path.t(), keyword()) :: {:ok, session()} | {:error, term()}
   def start_session(workspace, opts \\ []) do
-    config = Keyword.get_lazy(opts, :config, &resolve_config/0)
+    config =
+      Keyword.get_lazy(opts, :config, fn -> resolve_config(Keyword.get(opts, :issue_state)) end)
+
     worker_host = Keyword.get(opts, :worker_host)
 
     with :ok <- check_local_only(worker_host),
@@ -156,13 +158,22 @@ defmodule SymphonyElixir.Claude.AppServer do
     {:error, {:claude_remote_worker_unsupported, worker_host}}
   end
 
-  defp resolve_config do
-    settings = Config.settings!()
-    claude = settings.agent.claude
+  defp resolve_config(issue_state) do
+    resolve_config(Config.settings!().agent.claude, issue_state)
+  end
+
+  # Pure resolution split out from the global-config reader above so the
+  # per-state override/fallback contract is unit-testable without installing a
+  # WORKFLOW.md. The returned map is consumed verbatim by `write_init/3`, so its
+  # `:model`/`:effort` are exactly what reach the sidecar init payload.
+  @doc false
+  @spec resolve_config(struct(), String.t() | nil) :: map()
+  def resolve_config(claude, issue_state) do
+    state_key = normalize_state_key(issue_state)
 
     %{
       command: claude.command,
-      model: claude.model,
+      model: resolve_by_state(claude.model_by_state, state_key, claude.model),
       permission_mode: claude.permission_mode,
       allowed_tools: claude.allowed_tools,
       disallowed_tools: claude.disallowed_tools,
@@ -170,11 +181,27 @@ defmodule SymphonyElixir.Claude.AppServer do
       setting_sources: claude.setting_sources,
       max_turns: claude.max_turns,
       max_budget_usd: claude.max_budget_usd,
+      effort: resolve_by_state(claude.effort_by_state, state_key, claude.effort),
       extra_env: claude.extra_env,
       config_dir: claude.config_dir,
       read_timeout_ms: claude.read_timeout_ms,
       verbose_logging: claude.verbose_logging
     }
+  end
+
+  defp normalize_state_key(state) when is_binary(state) do
+    Schema.normalize_issue_state(state)
+  end
+
+  defp normalize_state_key(_state), do: nil
+
+  # Per-state overrides win only when the current issue state has an entry;
+  # otherwise fall back to the global value (which may itself be nil → SDK
+  # default).
+  defp resolve_by_state(_mapping, nil, default), do: default
+
+  defp resolve_by_state(mapping, state_key, default) when is_map(mapping) do
+    Map.get(mapping, state_key, default)
   end
 
   defp canonical_workspace(workspace) when is_binary(workspace) do

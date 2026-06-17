@@ -30,7 +30,17 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
     @behaviour SymphonyElixir.Agent.Adapter
 
     @impl true
-    def start_session(_workspace, _opts), do: {:ok, %{session: :stub}}
+    def start_session(_workspace, opts) do
+      # Record the opts AgentRunner handed us so a test can assert the issue
+      # state is forwarded (lever 4 wiring). Guarded so the non-run/3 tests
+      # that never set an owner don't blow up.
+      case Application.get_env(:symphony_elixir, :stub_adapter_owner) do
+        owner when is_pid(owner) -> send(owner, {:stub_start_session, opts})
+        _ -> :ok
+      end
+
+      {:ok, %{session: :stub}}
+    end
 
     @impl true
     def run_turn(_session, prompt, _issue, opts) do
@@ -235,6 +245,24 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
   end
 
   describe "run/3 continuation state machine (stub adapter)" do
+    test "forwards the issue's current state to adapter.start_session (lever 4 wiring)" do
+      ctx = setup_workspace!()
+      write_stub_workflow!(ctx, max_turns: 5)
+
+      # Empty refresh -> the run stops after one turn; we only care that
+      # start_session saw the initial issue state on the way in.
+      fetcher = fn ["issue-cov-1"] -> {:ok, []} end
+
+      assert :ok =
+               AgentRunner.run(issue("Merging"), nil,
+                 adapter: StubAdapter,
+                 issue_state_fetcher: fetcher
+               )
+
+      assert_received {:stub_start_session, opts}
+      assert Keyword.get(opts, :issue_state) == "Merging"
+    end
+
     test "stops after one turn when the issue refreshes to a terminal state" do
       ctx = setup_workspace!()
       write_stub_workflow!(ctx, max_turns: 5)

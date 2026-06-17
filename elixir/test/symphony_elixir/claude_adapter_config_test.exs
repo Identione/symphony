@@ -1,5 +1,6 @@
 defmodule SymphonyElixir.ClaudeAdapterConfigTest do
   use SymphonyElixir.TestSupport
+  alias SymphonyElixir.Claude.AppServer
   alias SymphonyElixir.Config
   alias SymphonyElixir.Config.Schema
   alias SymphonyElixir.Config.Schema.{Agent, Claude}
@@ -200,6 +201,92 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
 
     assert {:error, {:invalid_workflow_config, message}} = parse(yaml)
     assert message =~ "agent.claude.effort"
+  end
+
+  test "agent.claude.model_by_state / effort_by_state default to empty maps" do
+    assert {:ok, settings} = parse(~s|tracker: {kind: linear, project_slug: p, api_key: t}\n|)
+    assert settings.agent.claude.model_by_state == %{}
+    assert settings.agent.claude.effort_by_state == %{}
+  end
+
+  test "agent.claude.model_by_state / effort_by_state parse and lowercase state keys" do
+    yaml = """
+    tracker: {kind: linear, project_slug: p, api_key: t}
+    agent:
+      kind: claude
+      claude:
+        model_by_state:
+          Merging: claude-haiku-4-5-20251001
+        effort_by_state:
+          Merging: low
+    """
+
+    assert {:ok, settings} = parse(yaml)
+    assert settings.agent.claude.model_by_state == %{"merging" => "claude-haiku-4-5-20251001"}
+    assert settings.agent.claude.effort_by_state == %{"merging" => "low"}
+  end
+
+  test "agent.claude.effort_by_state rejects an unsupported effort level" do
+    yaml = """
+    tracker: {kind: linear, project_slug: p, api_key: t}
+    agent:
+      kind: claude
+      claude:
+        effort_by_state:
+          merging: ultra
+    """
+
+    assert {:error, {:invalid_workflow_config, message}} = parse(yaml)
+    assert message =~ "effort_by_state"
+  end
+
+  test "agent.claude.model_by_state rejects a non-string model value" do
+    yaml = """
+    tracker: {kind: linear, project_slug: p, api_key: t}
+    agent:
+      kind: claude
+      claude:
+        model_by_state:
+          merging: 42
+    """
+
+    assert {:error, {:invalid_workflow_config, message}} = parse(yaml)
+    assert message =~ "model_by_state"
+  end
+
+  # ----------------------------------------------------------------------
+  # Resolution contract (lever 4): AppServer.resolve_config/2 picks the
+  # per-state override when the (normalized) issue state has an entry, and
+  # otherwise falls back to the global model/effort. The returned map is
+  # consumed verbatim by `write_init/3`, so asserting its `:model`/`:effort`
+  # is exactly what reaches the sidecar init payload.
+  # ----------------------------------------------------------------------
+  defp claude_with_overrides do
+    %Claude{
+      model: "claude-sonnet-4-6",
+      effort: "high",
+      model_by_state: %{"merging" => "claude-haiku-4-5-20251001"},
+      effort_by_state: %{"merging" => "low"}
+    }
+  end
+
+  test "resolve_config applies the per-state model/effort override (state name normalized)" do
+    # Mixed-case "Merging" must normalize to the lowercased map key.
+    resolved = AppServer.resolve_config(claude_with_overrides(), "Merging")
+    assert resolved.model == "claude-haiku-4-5-20251001"
+    assert resolved.effort == "low"
+  end
+
+  test "resolve_config falls back to global model/effort for an unlisted state" do
+    resolved = AppServer.resolve_config(claude_with_overrides(), "In Progress")
+    assert resolved.model == "claude-sonnet-4-6"
+    assert resolved.effort == "high"
+  end
+
+  test "resolve_config falls back to global model/effort when issue state is nil" do
+    resolved = AppServer.resolve_config(claude_with_overrides(), nil)
+    assert resolved.model == "claude-sonnet-4-6"
+    assert resolved.effort == "high"
   end
 
   test "agent.claude.config_dir defaults to nil" do

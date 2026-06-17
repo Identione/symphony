@@ -294,7 +294,8 @@ defmodule SymphonyElixir.AgentRunner do
       max_turns: max_turns
     }
 
-    with {:ok, session} <- adapter.start_session(workspace, worker_host: worker_host) do
+    with {:ok, session} <-
+           adapter.start_session(workspace, worker_host: worker_host, issue_state: issue.state) do
       try do
         do_run_codex_turns(context, session, issue, 1)
       after
