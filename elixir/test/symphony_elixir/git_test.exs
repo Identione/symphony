@@ -111,4 +111,69 @@ defmodule SymphonyElixir.GitTest do
       assert ref == "refs/symphony/wip/feature/ab_12"
     end
   end
+
+  describe "working_tree_signals/4 (IDE-211 Layer 1 probe)" do
+    test "reports an empty/clean tree with no commits since the marker", %{dir: dir} do
+      init_repo_with_commit!(dir)
+      head = git!(dir, ["rev-parse", "HEAD"])
+
+      assert {:ok, signals} = Git.working_tree_signals(dir, head)
+      assert signals.empty
+      assert signals.commits_since == 0
+      assert signals.head == head
+      assert String.match?(signals.hash, ~r/^[0-9a-f]{40}$/)
+    end
+
+    test "a dirty tree is non-empty and the hash captures untracked files", %{dir: dir} do
+      init_repo_with_commit!(dir)
+      {:ok, clean} = Git.working_tree_signals(dir, nil)
+
+      # The IDE-189 case: a brand-new untracked file must change the hash.
+      File.write!(Path.join(dir, "untracked.txt"), "new work\n")
+      {:ok, dirty} = Git.working_tree_signals(dir, nil)
+
+      refute dirty.empty
+      refute dirty.hash == clean.hash
+    end
+
+    test "identical content across probes yields a stable hash", %{dir: dir} do
+      init_repo_with_commit!(dir)
+      File.write!(Path.join(dir, "wip.txt"), "same\n")
+
+      {:ok, a} = Git.working_tree_signals(dir, nil)
+      {:ok, b} = Git.working_tree_signals(dir, nil)
+      assert a.hash == b.hash
+    end
+
+    test "counts commits made since the dispatch marker", %{dir: dir} do
+      init_repo_with_commit!(dir)
+      marker = git!(dir, ["rev-parse", "HEAD"])
+
+      File.write!(Path.join(dir, "a.txt"), "a\n")
+      git!(dir, ["add", "a.txt"])
+      git!(dir, ["commit", "-q", "-m", "second"])
+      File.write!(Path.join(dir, "b.txt"), "b\n")
+      git!(dir, ["add", "b.txt"])
+      git!(dir, ["commit", "-q", "-m", "third"])
+
+      assert {:ok, %{commits_since: 2}} = Git.working_tree_signals(dir, marker)
+    end
+
+    test "is non-destructive: HEAD, branch, and status are untouched", %{dir: dir} do
+      init_repo_with_commit!(dir)
+      File.write!(Path.join(dir, "tracked.txt"), "v2\n")
+      File.write!(Path.join(dir, "untracked.txt"), "new\n")
+      head_before = git!(dir, ["rev-parse", "HEAD"])
+      status_before = git!(dir, ["status", "--porcelain"])
+
+      assert {:ok, _signals} = Git.working_tree_signals(dir, head_before)
+
+      assert git!(dir, ["rev-parse", "HEAD"]) == head_before
+      assert git!(dir, ["status", "--porcelain"]) == status_before
+    end
+
+    test "errors on a non-git directory", %{dir: dir} do
+      assert {:error, :not_a_git_repo} = Git.working_tree_signals(dir, nil)
+    end
+  end
 end

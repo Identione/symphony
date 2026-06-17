@@ -102,6 +102,22 @@ agent:
   # preserve_uncommitted_work_branch: false
   # cutoff_timeout_ms: timeout for the preservation git-shell invocation.
   # cutoff_timeout_ms: 60000
+  # Deterministic per-turn progress signals (IDE-211 / Layer 1). At each turn
+  # boundary a cheap non-mutating git probe classifies the issue as
+  # progressing/stuck/oscillating/repeated_error plus an independent
+  # `at_risk_no_commits` flag. Reported + logged + on the dashboard only — never
+  # acted on (Layers 0/2 own enforcement). See docs/progress_signals.md.
+  # progress_signal_enabled: master switch.
+  # progress_signal_enabled: true
+  # progress_signal_window_k: consecutive-turn window K (>= 2) before
+  # stuck/repeated_error fire and the turn floor for at_risk_no_commits.
+  # progress_signal_window_k: 4
+  # progress_signal_git_timeout_ms: per-turn probe timeout; a slow/locked repo
+  # degrades to "unknown" (assessment unchanged) rather than stalling the loop.
+  # progress_signal_git_timeout_ms: 2000
+  # progress_trigger_min_turns: turn floor for the at_risk_no_commits arm of the
+  # Layer-2 trigger predicate.
+  # progress_trigger_min_turns: 4
   # Claude Agent SDK adapter (SPEC.md §10.8). Switch to `codex` to use the
   # legacy Codex App-Server adapter — the nested `agent.codex` block below
   # is preserved so the swap is one-line.

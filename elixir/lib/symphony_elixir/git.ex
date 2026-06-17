@@ -59,6 +59,124 @@ defmodule SymphonyElixir.Git do
     end
   end
 
+  @typedoc "Per-turn working-tree probe result (IDE-211 Layer 1 progress signals)."
+  @type tree_signals :: %{
+          hash: String.t(),
+          empty: boolean(),
+          head: String.t() | nil,
+          commits_since: non_neg_integer()
+        }
+
+  @doc """
+  Read the cheap per-turn progress signals off a workspace in a single
+  non-mutating `sh` invocation (IDE-211 Layer 1).
+
+  Returns:
+
+    * `hash` — a content hash of the full working tree (tracked **and**
+      untracked), computed via `git write-tree` against a throwaway index so the
+      real index/HEAD/working tree are never touched. Identical across turns ⇔
+      the agent changed nothing.
+    * `empty` — `true` when `git status --porcelain` is empty (clean tree). This
+      is the empty-tree guard `:stuck_state` depends on.
+    * `head` — the current `HEAD` sha (or `nil` on an unborn branch).
+    * `commits_since` — `git rev-list --count <marker>..HEAD` when `marker` is a
+      non-empty sha reachable from HEAD; `0` when `marker` is `nil` (first probe,
+      before a dispatch marker is captured) or the range can't be computed.
+
+  Best-effort and side-effect-free: like `preserve_uncommitted_work/4` it runs
+  under a `Task` timeout so a slow/locked repo degrades to `{:error, _}` (the
+  caller leaves the prior assessment unchanged) rather than wedging the loop.
+  """
+  @spec working_tree_signals(Path.t(), String.t() | nil, worker_host(), pos_integer()) ::
+          {:ok, tree_signals()} | {:error, term()}
+  def working_tree_signals(workspace, marker, worker_host \\ nil, timeout_ms \\ @default_timeout_ms)
+      when is_binary(workspace) do
+    script = build_signals_script(marker)
+
+    case run_script(workspace, script, worker_host, timeout_ms) do
+      {:ok, {output, 0}} -> parse_signals(output)
+      {:ok, {output, status}} -> {:error, {:git_failed, status, String.trim(output)}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # One `sh` script: capture porcelain (empty bit), snapshot the tree to a sha
+  # via the throwaway-index `write-tree` primitive (captures untracked files,
+  # mutates nothing), read HEAD, and — only when a marker was supplied — count
+  # commits since dispatch. Machine-readable markers keep the Elixir side off
+  # git's human output.
+  @spec build_signals_script(String.t() | nil) :: String.t()
+  defp build_signals_script(marker) do
+    marker_literal = esc(marker || "")
+
+    """
+    if [ ! -d .git ] && ! git rev-parse --git-dir >/dev/null 2>&1; then
+      echo __SYMPHONY_NOT_GIT__
+      exit 0
+    fi
+    PORC=$(git status --porcelain)
+    TMPIDX="$(mktemp)"
+    trap 'rm -f "$TMPIDX"' EXIT
+    rm -f "$TMPIDX"
+    cp "$(git rev-parse --git-dir)/index" "$TMPIDX" 2>/dev/null || true
+    export GIT_INDEX_FILE="$TMPIDX"
+    git add -A >/dev/null 2>&1 || true
+    TREE=$(git write-tree)
+    HEAD=$(git rev-parse --verify -q HEAD 2>/dev/null || true)
+    MARKER=#{marker_literal}
+    COUNT=0
+    if [ -n "$HEAD" ] && [ -n "$MARKER" ]; then
+      COUNT=$(git rev-list --count "$MARKER"..HEAD 2>/dev/null || echo 0)
+    fi
+    printf '__SYMPHONY_TREE__ %s\\n' "$TREE"
+    if [ -z "$PORC" ]; then printf '__SYMPHONY_EMPTY__ 1\\n'; else printf '__SYMPHONY_EMPTY__ 0\\n'; fi
+    printf '__SYMPHONY_HEAD__ %s\\n' "$HEAD"
+    printf '__SYMPHONY_COUNT__ %s\\n' "$COUNT"
+    """
+  end
+
+  @spec parse_signals(String.t()) :: {:ok, tree_signals()} | {:error, term()}
+  defp parse_signals(output) do
+    if String.contains?(output, "__SYMPHONY_NOT_GIT__") do
+      {:error, :not_a_git_repo}
+    else
+      parse_signal_fields(output)
+    end
+  end
+
+  @spec parse_signal_fields(String.t()) :: {:ok, tree_signals()} | {:error, term()}
+  defp parse_signal_fields(output) do
+    with [_, tree] <- Regex.run(~r/__SYMPHONY_TREE__\s+([0-9a-f]{7,64})/, output),
+         [_, empty] <- Regex.run(~r/__SYMPHONY_EMPTY__\s+([01])/, output) do
+      {:ok,
+       %{
+         hash: tree,
+         empty: empty == "1",
+         head: parse_head(output),
+         commits_since: parse_count(output)
+       }}
+    else
+      _ -> {:error, {:git_unexpected_output, String.trim(output)}}
+    end
+  end
+
+  @spec parse_head(String.t()) :: String.t() | nil
+  defp parse_head(output) do
+    case Regex.run(~r/__SYMPHONY_HEAD__\s+([0-9a-f]{7,64})/, output) do
+      [_, sha] -> sha
+      _ -> nil
+    end
+  end
+
+  @spec parse_count(String.t()) :: non_neg_integer()
+  defp parse_count(output) do
+    case Regex.run(~r/__SYMPHONY_COUNT__\s+(\d+)/, output) do
+      [_, n] -> String.to_integer(n)
+      _ -> 0
+    end
+  end
+
   # Distinct from `Workspace.safe_identifier/1` (which preserves case and forbids
   # `/`): a ref path component is lowercased and keeps `/` as a path separator.
   @spec safe_ref_component(String.t()) :: String.t()

@@ -268,12 +268,26 @@ defmodule SymphonyElixirWeb.Presenter do
       session_id: entry.session_id,
       agent_kind: agent_kind_string(entry),
       turn_count: Map.get(entry, :turn_count, 0),
+      progress: progress_payload(entry),
       last_event: entry.last_codex_event,
       last_message: summarize_message(entry.last_codex_message),
       started_at: iso8601(entry.started_at),
       last_event_at: iso8601(entry.last_codex_timestamp),
       tokens: tokens_payload(entry)
     }
+  end
+
+  # IDE-211 Layer 1 progress assessment (status + the independent
+  # `at_risk_no_commits` flag). The orchestrator snapshot always carries an
+  # assessment (neutral default before the first turn); JSON-friendly map only.
+  defp progress_payload(entry) do
+    case Map.get(entry, :progress_assessment) do
+      %{status: status, at_risk_no_commits: at_risk} ->
+        %{status: status, at_risk_no_commits: at_risk}
+
+      _ ->
+        %{status: :progressing, at_risk_no_commits: false}
+    end
   end
 
   defp retry_entry_payload(entry) do
