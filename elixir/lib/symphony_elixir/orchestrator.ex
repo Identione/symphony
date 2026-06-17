@@ -2352,9 +2352,20 @@ defmodule SymphonyElixir.Orchestrator do
 
     base_merge = %{
       last_codex_timestamp: timestamp,
-      last_codex_message: summarize_codex_update(update),
+      # `:assistant_delta` is a per-token liveness ping — it refreshes the stall
+      # timestamp but must not overwrite the dashboard's "last message"/event
+      # cells with partial fragments, so preserve the prior values for it.
+      last_codex_message:
+        if(event == :assistant_delta,
+          do: Map.get(running_entry, :last_codex_message),
+          else: summarize_codex_update(update)
+        ),
       session_id: session_id_for_update(running_entry.session_id, update),
-      last_codex_event: event,
+      last_codex_event:
+        if(event == :assistant_delta,
+          do: Map.get(running_entry, :last_codex_event),
+          else: event
+        ),
       claude_app_server_pid: claude_app_server_pid_for_update(claude_app_server_pid, update),
       claude_input_tokens: Map.get(running_entry, :claude_input_tokens, 0) + token_delta.input_tokens,
       claude_output_tokens: Map.get(running_entry, :claude_output_tokens, 0) + token_delta.output_tokens,

@@ -115,8 +115,12 @@ defmodule SymphonyElixir.LinearRateLimitTest do
     ExUnit.CaptureLog.capture_log(fn ->
       assert RateLimit.record_rate_limited(3_600_000) == 3_600_000
       # A subsequent shorter arm (e.g. a bare 429 with no body duration) must
-      # not stomp the longer active window down to 60s.
-      assert RateLimit.record_rate_limited(60_000) == 3_600_000
+      # not stomp the longer active window down to 60s. The return is the
+      # *remaining* window, so a few ms have elapsed since the deadline was set
+      # — assert it still reflects the hour-long window rather than the 60s arm,
+      # tolerating elapsed time (a tight `== 3_600_000` flakes on a 1ms tick).
+      effective = RateLimit.record_rate_limited(60_000)
+      assert effective > 3_540_000 and effective <= 3_600_000
     end)
 
     retry_after = RateLimit.retry_after_ms()

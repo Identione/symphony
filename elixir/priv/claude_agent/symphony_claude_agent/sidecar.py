@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sys
+import time
 import traceback
 import uuid
 from dataclasses import dataclass, field
@@ -44,6 +45,20 @@ try:  # pragma: no cover - import-time guard
     _SDK_AVAILABLE = True
 except ImportError:  # pragma: no cover - exercised only when SDK missing
     _SDK_AVAILABLE = False
+
+
+# Partial-message streaming type. Imported separately from the core SDK block so
+# that a future SDK build which renames/drops it degrades to "no deltas
+# forwarded" instead of disabling the whole sidecar.
+try:  # pragma: no cover - import-time guard
+    from claude_agent_sdk import StreamEvent  # type: ignore[import-not-found]
+except ImportError:  # pragma: no cover
+    StreamEvent = None  # type: ignore[assignment]
+
+# Minimum wall-clock gap between forwarded partial-stream activity envelopes. 1s
+# keeps the orchestrator's stall watchdog (default 300s) well fed while
+# coalescing token-rate deltas down to a trickle.
+_STREAM_ACTIVITY_MIN_INTERVAL_S = 1.0
 
 
 CLAUDE_CODE_SYSTEM_PROMPT_PRESET = {"type": "preset", "preset": "claude_code"}
@@ -204,6 +219,8 @@ class SessionState:
     client: Any | None = None  # ClaudeSDKClient when SDK present
     pending_tool_calls: PendingToolCalls = field(default_factory=PendingToolCalls)
     tool_schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
+    # Monotonic timestamp of the last forwarded `assistant_delta`, for throttling.
+    stream_activity_monotonic: float = 0.0
 
 
 # ---------------------------------------------------------------------------
@@ -664,7 +681,48 @@ async def _handle_turn(state: SessionState, env: dict[str, Any]) -> None:
         )
 
 
+def _stream_event_text(message: Any) -> str | None:
+    """Best-effort incremental text from a StreamEvent.
+
+    Returns delta text for `content_block_delta` text/thinking events, or `None`
+    for structural events (message_start, ping, content_block_stop, …) — those
+    still count as activity but carry no display text.
+    """
+    event = getattr(message, "event", None)
+    if not isinstance(event, dict) or event.get("type") != "content_block_delta":
+        return None
+    delta = event.get("delta")
+    if not isinstance(delta, dict):
+        return None
+    if delta.get("type") == "text_delta":
+        return delta.get("text") or None
+    if delta.get("type") == "thinking_delta":
+        return delta.get("thinking") or None
+    return None
+
+
 async def _forward_message(state: SessionState, message: Any) -> None:
+    # Partial-message streaming: forward a throttled `assistant_delta` so the
+    # orchestrator sees continuous activity during long model generations.
+    # Without it, Symphony only hears discrete message boundaries and the stall
+    # watchdog can fire mid-turn. StreamEvents flow because
+    # `include_partial_messages` is set in build_options_payload.
+    # SCOPE: this covers model-generation silence only — a long *native tool*
+    # call (e.g. a container build) emits no StreamEvents and still needs
+    # separate tool-lifecycle forwarding.
+    if _SDK_AVAILABLE and StreamEvent is not None and isinstance(message, StreamEvent):
+        now = time.monotonic()
+        if now - state.stream_activity_monotonic >= _STREAM_ACTIVITY_MIN_INTERVAL_S:
+            state.stream_activity_monotonic = now
+            envelope: dict[str, Any] = {
+                "type": "assistant_delta",
+                "session_id": state.session_id,
+            }
+            text = _stream_event_text(message)
+            if text:
+                envelope["text"] = text[:500]
+            emit(envelope)
+        return
     if _SDK_AVAILABLE and isinstance(message, SystemMessage):
         if getattr(message, "subtype", None) == "init":
             data = getattr(message, "data", {}) or {}
