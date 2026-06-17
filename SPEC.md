@@ -863,6 +863,14 @@ not require recognizing or validating extension fields unless that extension is 
   `symphony/wip/<id>` branch alongside the ref
 - `agent.cutoff_timeout_ms`: positive integer, default `60000` — timeout for the preservation
   git-shell invocation
+- `agent.progress_signal_enabled`: boolean, default `true` — compute deterministic per-turn
+  progress signals (Layer 1, see §19)
+- `agent.progress_signal_window_k`: integer `>= 2`, default `4` — consecutive-turn window `K` for
+  the `:stuck_state`/`:repeated_error` streaks and the `at_risk_no_commits` turn gate
+- `agent.progress_signal_git_timeout_ms`: positive integer, default `2000` — timeout for the
+  read-only progress git probe; on expiry the prior assessment is kept
+- `agent.progress_trigger_min_turns`: positive integer, default `4` — turn gate for the Layer-2
+  trigger's `at_risk_no_commits` arm (see §19)
 - `agent.kind`: enum (`codex` | `claude`), default `codex`
 - `agent.codex.command`: shell command string, default `codex app-server`
 - `agent.codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
@@ -2898,6 +2906,51 @@ Use the same validation profiles as Section 17:
 - Verify hook execution and workflow path resolution on the target host OS/shell environment.
 - If the OPTIONAL HTTP server is shipped, verify the configured port behavior and loopback/default
   bind expectations on the target environment.
+
+## 19. Progress Signals (Layer 1) (RECOMMENDED)
+
+Layer 1 (IDE-189) computes cheap, deterministic per-turn progress signals so an issue that is
+making no real progress can be detected without an expensive AI judgement. It sits beside the
+non-destructive cutoff (§9.4) and the deterministic-failure taxonomy (token-exhaustion handling):
+those *act*; Layer 1 only *reports*.
+
+The signals are computed once per **turn boundary** per running issue — adapter-agnostic by
+construction, because the boundary is the orchestrator's existing `turn_count` increment
+(claude `turn_completed`, codex new-session `session_started`). A single read-only git probe yields:
+
+- a **working-tree fingerprint** `sha256(git status --porcelain ++ git diff)` plus an
+  **empty-tree** bit (the porcelain being empty), and
+- **commits since dispatch**, counted on `dispatch_head..HEAD` (the dispatch-time HEAD is captured
+  once on the first probe).
+
+From the rolling per-issue streaks the classifier emits one **status** (most → least severe):
+
+| status | condition |
+| -- | -- |
+| `:oscillating` | last 4 fingerprints form `A,B,A,B` with `A != B` |
+| `:repeated_error` | a terminal error signature repeated `>= K` turns |
+| `:stuck_state` | identical fingerprint `>= K` turns **AND the working tree is empty** |
+| `:progressing` | otherwise |
+
+The **empty-tree guard** on `:stuck_state` is required: an issue with real pending work leaves a
+*dirty* tree, so an identical-dirty-tree run (e.g. builds that stop editing once a final state is
+reached) stays `:progressing`, never `:stuck`. Only an *empty* tree repeated `K` turns means the
+agent genuinely did nothing.
+
+Separately, `at_risk_no_commits` is an **independent boolean flag** (NOT a status value):
+`commits_since == 0 AND turn_count >= K`. It coexists with `:progressing`, which is the motivating
+IDE-189 case — progressing-but-0-commits must not be reported as stuck.
+
+`K` is `agent.progress_signal_window_k` (default `4`, min `2`). Error signatures are per-adapter
+(`{:claude, code}` / `{:codex, code}`); a `nil` signature (no terminal error that turn) resets the
+error streak. The probe runs under a timeout (`agent.progress_signal_git_timeout_ms`); on expiry or
+git error the prior assessment is kept rather than stalling the orchestrator loop.
+
+**Non-enforcement contract.** Layer 1 MUST NOT kill a session, move a Linear state, or gate
+continuation. It exposes a single Layer-2 trigger predicate —
+`status in [:stuck_state, :oscillating, :repeated_error] OR (at_risk_no_commits AND turn_count >=
+agent.progress_trigger_min_turns)` — and surfaces the full assessment verbatim through the snapshot
+API and a deterministic per-turn log line. Acting on the trigger is Layer 2's responsibility.
 
 ## Appendix A. SSH Worker Extension (OPTIONAL)
 

@@ -16,6 +16,8 @@ Either adapter can opt into account-quota-aware dispatch pausing (`agent.<provid
 
 When a run approaches its continuation cap (`agent.max_turns`), Symphony steers the agent to commit its in-progress work, and — as a safety net independent of whether the agent obeys — non-destructively snapshots any uncommitted work (modified, staged, and untracked files) to a `refs/symphony/wip/<id>` commit before stopping the session, so converging work is never silently discarded. See SPEC.md §6 and §9.4.1.
 
+Symphony also computes cheap, deterministic per-turn progress signals (Layer 1): at each turn boundary a read-only git probe yields a status (`:progressing` / `:stuck_state` / `:oscillating` / `:repeated_error`) plus an independent `at_risk_no_commits` flag, surfaced on the dashboard and in logs. These are reported only — they drive no enforcement on their own and feed a future AI overseer (`agent.progress_signal_*`). See SPEC.md §19.
+
 > [!WARNING]
 > Symphony is a low-key engineering preview for testing in trusted environments.
 

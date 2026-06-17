@@ -99,6 +99,16 @@ agent:
   # preserve_uncommitted_work_branch: false
   # cutoff_timeout_ms: timeout for the preservation git-shell invocation.
   # cutoff_timeout_ms: 60000
+  # Deterministic per-turn progress signals (Layer 1, IDE-189 — SPEC.md §19 /
+  # docs/progress_signals.md). Computed once per turn boundary from a read-only
+  # git probe; reported + logged only (no kills, state moves, or continuation
+  # gating). progress_signal_window_k is the consecutive-turn window K (min 2):
+  # `:stuck_state` needs K identical EMPTY-tree turns (a dirty tree stays
+  # `:progressing`), and `at_risk_no_commits` fires at turn >= K with 0 commits.
+  # progress_signal_enabled: true
+  # progress_signal_window_k: 4
+  # progress_signal_git_timeout_ms: 2000
+  # progress_trigger_min_turns: 4
   # Claude Agent SDK adapter (SPEC.md §10.8). Switch to `codex` to use the
   # legacy Codex App-Server adapter — the nested `agent.codex` block below
   # is preserved so the swap is one-line.

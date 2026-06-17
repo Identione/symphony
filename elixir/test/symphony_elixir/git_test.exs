@@ -111,4 +111,58 @@ defmodule SymphonyElixir.GitTest do
       assert ref == "refs/symphony/wip/feature/ab_12"
     end
   end
+
+  describe "working_tree_probe/4" do
+    test "reports an empty tree with a stable hash and HEAD", %{dir: dir} do
+      init_repo_with_commit!(dir)
+      head = git!(dir, ["rev-parse", "HEAD"])
+
+      assert {:ok, probe} = Git.working_tree_probe(dir)
+      assert probe.empty
+      assert probe.head == head
+      assert probe.commits_since == 0
+      assert is_binary(probe.hash) and byte_size(probe.hash) == 64
+
+      # Repeating on the same clean tree yields the same hash.
+      assert {:ok, again} = Git.working_tree_probe(dir)
+      assert again.hash == probe.hash
+    end
+
+    test "a modified tracked file flips empty=false and changes the hash", %{dir: dir} do
+      init_repo_with_commit!(dir)
+      assert {:ok, clean} = Git.working_tree_probe(dir)
+
+      File.write!(Path.join(dir, "tracked.txt"), "v2\n")
+      assert {:ok, dirty} = Git.working_tree_probe(dir)
+
+      refute dirty.empty
+      assert dirty.hash != clean.hash
+    end
+
+    test "an untracked file also makes the tree dirty", %{dir: dir} do
+      init_repo_with_commit!(dir)
+      File.write!(Path.join(dir, "new.txt"), "x\n")
+
+      assert {:ok, probe} = Git.working_tree_probe(dir)
+      refute probe.empty
+    end
+
+    test "counts commits since a marker", %{dir: dir} do
+      init_repo_with_commit!(dir)
+      marker = git!(dir, ["rev-parse", "HEAD"])
+
+      File.write!(Path.join(dir, "tracked.txt"), "v2\n")
+      git!(dir, ["commit", "-aqm", "second"])
+      File.write!(Path.join(dir, "tracked.txt"), "v3\n")
+      git!(dir, ["commit", "-aqm", "third"])
+
+      assert {:ok, probe} = Git.working_tree_probe(dir, marker)
+      assert probe.commits_since == 2
+      assert probe.empty
+    end
+
+    test "returns :not_a_git_repo for a non-git directory", %{dir: dir} do
+      assert {:error, :not_a_git_repo} = Git.working_tree_probe(dir)
+    end
+  end
 end

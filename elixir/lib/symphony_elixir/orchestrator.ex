@@ -12,6 +12,7 @@ defmodule SymphonyElixir.Orchestrator do
     Config,
     DeterministicFailure,
     Git,
+    ProgressSignal,
     ProviderQuota,
     StatusDashboard,
     Tracker,
@@ -2008,6 +2009,13 @@ defmodule SymphonyElixir.Orchestrator do
             claude_turn_provisional_cache_creation_input_tokens: 0,
             claude_turn_provisional_cache_read_input_tokens: 0,
             turn_count: 0,
+            # Layer 1 per-turn progress signals (IDE-189). `dispatch_head` is
+            # captured lazily on the first git probe (workspace_path can still
+            # be nil at spawn); `progress` holds the rolling streak/history
+            # state and `progress_assessment` the last classifier result.
+            dispatch_head: nil,
+            progress: ProgressSignal.new(),
+            progress_assessment: ProgressSignal.default_assessment(),
             retry_attempt: normalize_retry_attempt(attempt),
             started_at: DateTime.utc_now()
           })
@@ -2606,6 +2614,7 @@ defmodule SymphonyElixir.Orchestrator do
           claude_cache_creation_input_tokens: Map.get(metadata, :claude_cache_creation_input_tokens, 0),
           claude_cache_read_input_tokens: Map.get(metadata, :claude_cache_read_input_tokens, 0),
           turn_count: Map.get(metadata, :turn_count, 0),
+          progress_assessment: Map.get(metadata, :progress_assessment, ProgressSignal.default_assessment()),
           started_at: metadata.started_at,
           last_codex_timestamp: metadata.last_codex_timestamp,
           last_codex_message: metadata.last_codex_message,
@@ -2712,6 +2721,7 @@ defmodule SymphonyElixir.Orchestrator do
   # so existing fixtures and codex-only tests keep working.
   defp handle_worker_update(state, running, issue_id, running_entry, %{agent_kind: :claude} = update) do
     {updated_running_entry, token_delta} = integrate_claude_update(running_entry, update)
+    updated_running_entry = maybe_assess_progress(running_entry, updated_running_entry, issue_id, update)
 
     state
     |> apply_claude_token_delta(token_delta)
@@ -2720,11 +2730,129 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp handle_worker_update(state, running, issue_id, running_entry, update) do
     {updated_running_entry, token_delta} = integrate_codex_update(running_entry, update)
+    updated_running_entry = maybe_assess_progress(running_entry, updated_running_entry, issue_id, update)
 
     state
     |> apply_codex_token_delta(token_delta)
     |> apply_codex_rate_limits(update)
     |> Map.put(:running, Map.put(running, issue_id, updated_running_entry))
+  end
+
+  # Layer 1 (IDE-189): when an integrate_* merge advanced `turn_count`, a turn
+  # boundary just closed. Run the read-only git probe, roll the streaks forward,
+  # reclassify, and log. Gated on `agent.progress_signal_enabled` and a known
+  # `workspace_path`; the probe degrades to "unchanged assessment" on timeout or
+  # git error so a pathological repo can't stall the orchestrator loop. Reports
+  # only — never kills, moves Linear state, or gates continuation.
+  @spec maybe_assess_progress(map(), map(), String.t(), map()) :: map()
+  defp maybe_assess_progress(prev_entry, updated_entry, issue_id, update) do
+    boundary? = Map.get(updated_entry, :turn_count, 0) > Map.get(prev_entry, :turn_count, 0)
+    workspace = Map.get(updated_entry, :workspace_path)
+
+    if boundary? and Config.progress_signal_enabled?() and is_binary(workspace) do
+      assess_progress(updated_entry, issue_id, workspace, update)
+    else
+      updated_entry
+    end
+  end
+
+  @spec assess_progress(map(), String.t(), String.t(), map()) :: map()
+  defp assess_progress(entry, issue_id, workspace, update) do
+    settings = Config.settings!()
+    timeout = settings.agent.progress_signal_git_timeout_ms
+    worker_host = Map.get(entry, :worker_host)
+    marker = Map.get(entry, :dispatch_head)
+
+    case Git.working_tree_probe(workspace, marker, worker_host, timeout) do
+      {:ok, probe} ->
+        dispatch_head = marker || probe.head
+        commits_since = if is_nil(marker), do: 0, else: probe.commits_since
+        turn_count = Map.get(entry, :turn_count, 0)
+        error_sig = turn_error_signature(update)
+
+        progress =
+          entry
+          |> Map.get(:progress, ProgressSignal.new())
+          |> ProgressSignal.advance(%{
+            hash: probe.hash,
+            empty: probe.empty,
+            commits_since: commits_since,
+            error_sig: error_sig,
+            turn_count: turn_count
+          })
+
+        config = ProgressSignal.config(settings)
+        assessment = ProgressSignal.assess(progress, config)
+
+        log_progress_assessment(entry, issue_id, assessment, config)
+
+        entry
+        |> Map.put(:dispatch_head, dispatch_head)
+        |> Map.put(:progress, progress)
+        |> Map.put(:progress_assessment, assessment)
+
+      {:error, reason} ->
+        Logger.debug("Progress probe failed; keeping prior assessment #{progress_issue_context(entry, issue_id)} reason=#{inspect(reason)}")
+
+        entry
+    end
+  end
+
+  # Per-adapter terminal-error signature for a turn boundary, or `nil` when the
+  # turn ended without a classified error. Claude stamps `error_code`/`category`
+  # on its error envelope; codex surfaces a classified `error_code`. In the
+  # current wiring terminal errors do not arrive as turn-boundary worker updates
+  # (acknowledged Layer-1 gap), so this is `nil` for normal turns — the streak
+  # mechanism and `:repeated_error` status remain in place for when they do.
+  @spec turn_error_signature(map()) :: ProgressSignal.error_sig()
+  defp turn_error_signature(%{agent_kind: :claude} = update) do
+    case progress_error_code(update) do
+      nil -> nil
+      code -> {:claude, code}
+    end
+  end
+
+  defp turn_error_signature(update) do
+    case progress_error_code(update) do
+      nil -> nil
+      code -> {:codex, code}
+    end
+  end
+
+  @spec progress_error_code(map()) :: term() | nil
+  defp progress_error_code(update) do
+    Map.get(update, :error_code) ||
+      case Map.get(update, :payload) do
+        %{} = payload -> Map.get(payload, :error_code)
+        _ -> nil
+      end
+  end
+
+  @spec log_progress_assessment(map(), String.t(), ProgressSignal.assessment(), ProgressSignal.config()) ::
+          :ok
+  defp log_progress_assessment(entry, issue_id, assessment, config) do
+    ev = assessment.evidence
+
+    message =
+      "Progress assessment status=#{assessment.status} at_risk_no_commits=#{assessment.at_risk_no_commits} " <>
+        "trigger=#{ProgressSignal.trigger?(assessment, config)} tree_streak=#{ev.tree_hash_streak} " <>
+        "commits_since=#{ev.commits_since} error_sig=#{inspect(ev.error_sig)} turn=#{ev.turn_count} " <>
+        progress_issue_context(entry, issue_id)
+
+    # Noisy at info on every healthy turn; surface only meaningful events at
+    # info and keep the steady `:progressing` stream at debug.
+    if assessment.status != :progressing or assessment.at_risk_no_commits do
+      Logger.info(message)
+    else
+      Logger.debug(message)
+    end
+  end
+
+  @spec progress_issue_context(map(), String.t()) :: String.t()
+  defp progress_issue_context(entry, issue_id) do
+    identifier = Map.get(entry, :identifier, "unknown")
+    session_id = Map.get(entry, :session_id) || "unknown"
+    "issue_id=#{issue_id} issue_identifier=#{identifier} session_id=#{session_id}"
   end
 
   # Three event paths share the same envelope-level merge (last_event, pid,
