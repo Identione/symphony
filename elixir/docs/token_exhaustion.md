@@ -267,7 +267,7 @@ visibility gap.**
 After `agent.deterministic_failure_alert_threshold` (default 3) consecutive
 failures carrying the same structured `error_code` (IDE-71 taxonomy —
 `quota_exceeded`, `context_window_exhausted`, `invalid_request`,
-`claude_sidecar_exit`, `port_exit`, `max_turns_reached`),
+`claude_sidecar_exit`, `port_exit`, `max_turns_reached`, `budget_exhausted`),
 `SymphonyElixir.DeterministicFailure`
 appends a summary section to the existing `## Symphony Workpad` comment —
 or, if no workpad is found, posts a standalone blocker comment in line
@@ -275,6 +275,34 @@ with the workflow's blocked-access escape hatch. After
 `agent.deterministic_failure_escalation_threshold` (default 5), it moves
 the issue to `agent.deterministic_failure_escalation_state` (default
 `"Human Review"`) so the polling loop stops re-dispatching it.
+
+`budget_exhausted` is the exception to the consecutive-threshold rule: it is an
+**immediate-escalation** code (escalates on the first occurrence). It is raised
+when a Claude session breaches `agent.claude.max_budget_usd` — the SDK *returns*
+a `ResultMessage(subtype="error_max_budget_usd", is_error=True)` which the
+sidecar re-emits as an `error` envelope (rather than a bare `turn_end` that
+Elixir would read as a clean finish), mapping to `:budget_exhausted` in
+`Claude.AppServer.to_error_code/1`. Because it is also `:no_retry`, it never
+accumulates a streak, so confirming it over N sessions would only burn budget —
+hence first-occurrence escalation. (`max_budget_usd` is unset by default; the
+halt path is wired and tested but dormant until an operator sets a cap.)
+
+A Claude **subscription usage-limit** is the same shape of trap as the budget
+breach: the SDK does *not* raise it — it delivers an `AssistantMessage` with
+`error="rate_limit"` set (one of the `AssistantMessageError` literals
+`authentication_failed` / `billing_error` / `rate_limit` / `invalid_request` /
+`server_error`) followed by a normal `ResultMessage`. Rendering that as a clean
+`assistant_message` made Elixir re-prompt the continuation loop up to
+`agent.max_turns` times, burning the whole multi-hour window. The sidecar now
+forwards the **raw literal** as an `error` envelope (`error_code: "rate_limit"`,
+…), suppressing the plain message; `Claude.AppServer.to_error_code/1` maps the
+literals (`rate_limit → :rate_limited`, `billing_error → :quota_exceeded`,
+`server_error → :overloaded`, `authentication_failed → :invalid_request`). The
+sidecar also parses any `"resets <h:mm><am|pm> (<tz>)"` notice into an embedded
+`retry-after <seconds>` hint, which the existing `AgentRunner` retry-after
+parser honors; `RetryPolicy` lets `:rate_limited` back off up to a 6h ceiling
+(vs `:overloaded`'s 15-min cap) so it waits out the real reset instead of
+re-hitting the wall.
 
 Transient codes (`rate_limited`, `overloaded`, `turn_timeout`,
 `response_timeout`, `unknown`) reset the counter so a brief upstream blip
@@ -289,6 +317,36 @@ side-effect contract is idempotent — the workpad failure block is
 sentinel-bounded so a re-post replaces rather than stacks, and once the
 issue has been moved to the escalation state the polling loop has already
 stopped re-dispatching it.
+
+### Cumulative per-issue session cap (`agent.max_sessions_per_issue`)
+
+The deterministic-failure streak only counts *consecutive same-code failures*
+and resets on a clean `:normal` exit or a transient blip. That leaves a gap: an
+issue can keep finishing turns cleanly yet never leave the active set — the
+poll-only / blocked-parent loop — burning a session per continuation forever
+without ever advancing a streak. The cumulative session cap (P1/R1(a)) is the
+failure-mode-agnostic backstop for exactly that.
+
+The orchestrator counts every session it launches for an issue (initial
+dispatch and every relaunch) in an episode-scoped tally. When a clean exit
+finds the tally at or above `agent.max_sessions_per_issue` (default 8), the
+issue escalates through the same DeterministicFailure side-effect path
+(workpad comment + move to `deterministic_failure_escalation_state`) instead of
+scheduling another continuation.
+
+Unlike the streak counter, this tally is **restart-durable**: it is mirrored to
+a DETS store under the instance `run/` directory (derived from `--logs-root`,
+the same root as the disk log), so a daemon restart or `make upgrade` — the
+operational event most correlated with runaway spend — does not reset it. The
+store survives everything except `make clean` (which also wipes the workspace,
+so the episode is moot). When no instance `run/` dir is wired (dev/test), the
+cap still works in-memory for the daemon's lifetime; it just doesn't persist.
+
+The tally is **episode-scoped** via a `{generation, count}` record: it zeroes
+and advances the generation whenever the issue leaves the active set (terminal,
+escalated, or otherwise released), so a human moving an escalated issue back to
+`Todo`/`Rework` gets a fresh budget rather than re-escalating off the stale
+count.
 
 ## Desired Behavior
 

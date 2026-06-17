@@ -105,6 +105,12 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
     # so the SDK loads all filesystem settings (.claude/settings.json,
     # project .mcp.json, CLAUDE.md). Set [] to restore deterministic isolation.
     assert settings.agent.claude.setting_sources == nil
+    # Level-1 belt (P0.4): bounds SDK turns within a single continuation. 40
+    # sits above the observed 2–4 norm; max_budget_usd stays unset.
+    assert settings.agent.claude.max_turns == 40
+    assert settings.agent.claude.max_budget_usd == nil
+    # R2b: native-tool output cap (PostToolUse truncation hook). 16 KiB default.
+    assert settings.agent.claude.tool_output_limit == 16_384
     assert settings.agent.claude.turn_timeout_ms == 3_600_000
     assert settings.agent.claude.read_timeout_ms == 30_000
     assert settings.agent.claude.stall_timeout_ms == 300_000
@@ -287,6 +293,13 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
     resolved = AppServer.resolve_config(claude_with_overrides(), nil)
     assert resolved.model == "claude-sonnet-4-6"
     assert resolved.effort == "high"
+  end
+
+  test "resolve_config carries the native-tool output cap through to the sidecar (R2b)" do
+    resolved = AppServer.resolve_config(claude_with_overrides(), "Merging")
+    # write_init/3 forwards this verbatim into the init envelope's
+    # `tool_output_limit`, which arms the sidecar's PostToolUse truncation hook.
+    assert resolved.tool_output_limit == 16_384
   end
 
   test "agent.claude.config_dir defaults to nil" do

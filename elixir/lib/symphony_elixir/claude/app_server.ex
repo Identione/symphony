@@ -181,6 +181,7 @@ defmodule SymphonyElixir.Claude.AppServer do
       setting_sources: claude.setting_sources,
       max_turns: claude.max_turns,
       max_budget_usd: claude.max_budget_usd,
+      tool_output_limit: claude.tool_output_limit,
       effort: resolve_by_state(claude.effort_by_state, state_key, claude.effort),
       extra_env: claude.extra_env,
       config_dir: claude.config_dir,
@@ -339,6 +340,7 @@ defmodule SymphonyElixir.Claude.AppServer do
         setting_sources: Map.get(config, :setting_sources),
         max_turns: Map.get(config, :max_turns),
         max_budget_usd: Map.get(config, :max_budget_usd),
+        tool_output_limit: Map.get(config, :tool_output_limit),
         effort: Map.get(config, :effort),
         verbose_logging: Map.get(config, :verbose_logging, false),
         # Push the canonical Codex `linear_graphql` schema (and any future
@@ -517,6 +519,18 @@ defmodule SymphonyElixir.Claude.AppServer do
   defp to_error_code("overloaded"), do: :overloaded
   defp to_error_code("quota_exceeded"), do: :quota_exceeded
   defp to_error_code("invalid_request"), do: :invalid_request
+  # Raw `AssistantMessageError` literals the sidecar forwards verbatim when the
+  # SDK sets `AssistantMessage.error` (a usage-limit/auth/billing/server failure
+  # that is *returned*, not raised). Mapping the vocabulary lives only here, the
+  # same split as the budget path's `error_max_budget_usd`.
+  defp to_error_code("rate_limit"), do: :rate_limited
+  defp to_error_code("billing_error"), do: :quota_exceeded
+  defp to_error_code("server_error"), do: :overloaded
+  defp to_error_code("authentication_failed"), do: :invalid_request
+  # The SDK *returns* (does not raise) a ResultMessage with this subtype on a
+  # `max_budget_usd` breach; the sidecar re-emits it as an error envelope so it
+  # reaches this path instead of looking like a clean turn_end.
+  defp to_error_code("error_max_budget_usd"), do: :budget_exhausted
   defp to_error_code(_), do: :unknown
 
   defp dispatch_tool_call(session, env, tool_executor) do

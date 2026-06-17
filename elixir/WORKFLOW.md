@@ -69,6 +69,14 @@ agent:
   # deterministic_failure_alert_threshold: 3
   # deterministic_failure_escalation_threshold: 5
   # deterministic_failure_escalation_state: "Human Review"
+  # Cumulative, episode-scoped ceiling on agent sessions per issue (P1/R1(a)).
+  # Failure-mode-agnostic backstop for the deterministic-failure streak: it
+  # catches an issue that keeps finishing turns cleanly yet never leaves the
+  # active set (poll-only / blocked-parent loop). On breach the issue escalates
+  # to `deterministic_failure_escalation_state`. The count persists per issue
+  # under the instance `run/` (survives daemon restart / `make upgrade`; wiped
+  # by `make clean`) and resets when the issue leaves the active set. Default 8.
+  # max_sessions_per_issue: 8
   # Claude Agent SDK adapter (SPEC.md §10.8). Switch to `codex` to use the
   # legacy Codex App-Server adapter — the nested `agent.codex` block below
   # is preserved so the swap is one-line.
@@ -94,10 +102,22 @@ agent:
     # Under (A), writes to this dir land in jai's COW overlay and are lost on
     # session end — accepted tradeoff (auth reads still pass through).
     config_dir: ~/.claude-identione
-    model: claude-opus-4-7
+    # Model is intentionally unpinned → the Claude CLI / Max-subscription
+    # default applies. Uncomment to pin a specific model.
+    # model: claude-opus-4-7
     # Reasoning effort: low|medium|high|xhigh|max. Unset → SDK default (high).
     # `xhigh` is Opus 4.7-only (the parallel to Codex's model_reasoning_effort).
     # effort: xhigh
+    # Level-1 belt: caps SDK model turns *within a single continuation*.
+    # Defaults to 40 (well above the observed 2–4 norm) so a within-query tool
+    # runaway can't march unbounded. Distinct from the top-level
+    # `agent.max_turns` (the Level-2 continuation cap). Uncomment to override.
+    # max_turns: 40
+    # R2b: per-call cap (bytes) on native-tool output (Read/Bash/Grep/Glob). A
+    # PostToolUse hook shrinks oversized results head+tail so a large output
+    # isn't re-paid as cache_read on every later turn; the model is told it can
+    # re-read a narrower slice. Default 16384 (16 KiB); set 0 to disable.
+    # tool_output_limit: 16384
     # `dontAsk` denies anything not in `allowed_tools` without prompting,
     # which is what we want for unattended runs. The whitelist below mirrors
     # what Codex's `approval_policy: never` + workspace-write sandbox grants:

@@ -59,7 +59,14 @@ defmodule SymphonyElixir.DeterministicFailure do
           | {:alert, code :: atom(), count :: pos_integer()}
           | {:escalate, code :: atom(), count :: pos_integer()}
 
-  @deterministic_codes ~w(quota_exceeded context_window_exhausted invalid_request claude_sidecar_exit port_exit max_turns_reached)a
+  @deterministic_codes ~w(quota_exceeded context_window_exhausted invalid_request claude_sidecar_exit port_exit max_turns_reached budget_exhausted)a
+
+  # Codes that escalate on the *first* occurrence rather than after the
+  # configured consecutive-failure threshold. A `max_budget_usd` breach is a
+  # hard, operator-visible stop — there is no value in burning N more sessions
+  # to "confirm" it, and `:budget_exhausted` is `:no_retry` so it would never
+  # accumulate a streak anyway.
+  @immediate_escalation_codes ~w(budget_exhausted)a
 
   @doc """
   Returns the deterministic code set as a list. Exposed for tests/docs.
@@ -166,12 +173,23 @@ defmodule SymphonyElixir.DeterministicFailure do
 
     ### #{header}
 
-    Symphony has seen **#{count}** consecutive failures with the same structured error code (`#{code}`) for this issue. \
-    See `elixir/docs/token_exhaustion.md` for the deterministic-failure taxonomy.
+    #{summary_line(code, count)}
     #{move_line}
     """
     |> String.trim_trailing()
     |> Kernel.<>("\n")
+  end
+
+  # The cumulative session cap (P1) is not a "same-code failure" streak — it's a
+  # ceiling on total sessions run for one issue — so it gets its own sentence.
+  defp summary_line(:max_sessions_per_issue, count) do
+    "Symphony ran **#{count}** agent sessions for this issue without it leaving the active set " <>
+      "(the `agent.max_sessions_per_issue` cap). See `elixir/docs/token_exhaustion.md`."
+  end
+
+  defp summary_line(code, count) do
+    "Symphony has seen **#{count}** consecutive failures with the same structured error code (`#{code}`) for this issue. " <>
+      "See `elixir/docs/token_exhaustion.md` for the deterministic-failure taxonomy."
   end
 
   # ── internals ──────────────────────────────────────────────────────────────
@@ -190,7 +208,7 @@ defmodule SymphonyElixir.DeterministicFailure do
     count = entry.count
 
     cond do
-      is_integer(escalate) and count >= escalate and not entry.notified_escalation? ->
+      not entry.notified_escalation? and escalate_now?(entry, escalate, count) ->
         {entry, {:escalate, entry.code, count}}
 
       is_integer(alert) and count >= alert and not entry.notified_alert? ->
@@ -199,6 +217,13 @@ defmodule SymphonyElixir.DeterministicFailure do
       true ->
         {entry, :no_action}
     end
+  end
+
+  # Escalate either when the code is in the immediate-escalation set (first
+  # occurrence) or when the consecutive-failure count reaches the configured
+  # threshold.
+  defp escalate_now?(entry, escalate, count) do
+    entry.code in @immediate_escalation_codes or (is_integer(escalate) and count >= escalate)
   end
 
   defp post_failure_comment(issue, code, count, severity, settings) do

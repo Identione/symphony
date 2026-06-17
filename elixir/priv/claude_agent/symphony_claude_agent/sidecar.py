@@ -13,11 +13,18 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 import traceback
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
 from typing import Any
+
+try:  # pragma: no cover - py<3.9 only
+    from zoneinfo import ZoneInfo
+except ImportError:  # pragma: no cover - py<3.9 only
+    ZoneInfo = None  # type: ignore[assignment]
 
 # ``claude_agent_sdk`` is a runtime dependency. Importing it lazily lets the
 # unit-level smoke test verify the wire-protocol helpers without requiring the
@@ -27,6 +34,7 @@ try:  # pragma: no cover - import-time guard
         AssistantMessage,
         ClaudeAgentOptions,
         ClaudeSDKClient,
+        HookMatcher,
         ResultMessage,
         SystemMessage,
         create_sdk_mcp_server,
@@ -46,6 +54,21 @@ CLAUDE_CODE_SYSTEM_PROMPT_PRESET = {"type": "preset", "preset": "claude_code"}
 # per-key log line. Symphony's Logger handler caps further on its end (256
 # chars per value) per `elixir/docs/logging.md`.
 _RENDER_TEXT_LIMIT = 1024
+
+# Length cap for a tool *result* that Claude actually consumes (not just logs).
+# A linear_graphql result is pasted into the conversation and re-read on every
+# subsequent turn, so an uncapped body is paid for ~Σ(turns) times via
+# cache_read. 8 KiB keeps a generous head+tail while bounding that cost. This is
+# deliberately distinct from `_RENDER_TEXT_LIMIT` (log-only) and `fold_text`.
+_TOOL_RESULT_LIMIT = 8192
+
+# Default per-call cap (bytes) for *native* tool output (Read/Bash/Grep/Glob)
+# applied by the PostToolUse truncation hook (R2b). Same cache_read reasoning as
+# `_TOOL_RESULT_LIMIT` — a returned tool result is re-sent on every later turn,
+# so a large output is paid for ~Σ(turns) times — but more generous than the
+# linear_graphql cap because a source-file Read needs room. Overridable per
+# session via `init.tool_output_limit`; 0 disables the hook entirely.
+_NATIVE_TOOL_OUTPUT_LIMIT = 16384
 
 # Keywords for mapping exception messages to structured error codes.
 _CONTEXT_WINDOW_KEYWORDS = frozenset(
@@ -213,6 +236,115 @@ def fold_text(value: Any, *, limit: int = _RENDER_TEXT_LIMIT) -> str:
     return f"{text[:limit]}…({omitted} more chars)"
 
 
+def _elide_head_tail(text: str, limit: int, marker: str) -> str:
+    """Drop the middle of `text` to fit `limit`, keeping the head (where
+    structure/keys usually live) and the tail (e.g. error suffixes). `marker` is
+    formatted with `omitted` (the dropped char count) and spliced in between."""
+
+    omitted = len(text) - limit
+    head_len = limit // 2
+    tail_len = limit - head_len
+    return f"{text[:head_len]}{marker.format(omitted=omitted)}{text[-tail_len:]}"
+
+
+def cap_tool_result_text(text: str, *, limit: int = _TOOL_RESULT_LIMIT) -> str:
+    """Elide an oversized tool-result body head+tail with a visible marker.
+
+    Unlike `fold_text` (log-only, tail-dropping), this caps what Claude *sees*.
+    """
+
+    if len(text) <= limit:
+        return text
+
+    return _elide_head_tail(text, limit, "\n…({omitted} chars elided)…\n")
+
+
+def _elide_native_output(text: str, limit: int) -> str:
+    """Head+tail elision for a native-tool output leaf, with a marker that tells
+    the model the cut was Symphony's (not the tool's) and that it can re-read a
+    narrower slice if it needs the elided portion."""
+
+    return _elide_head_tail(
+        text,
+        limit,
+        "\n…[Symphony elided {omitted} chars to bound cache-read cost; "
+        "re-read a narrower range/offset if you need the rest]…\n",
+    )
+
+
+def _truncate_tool_response(value: Any, limit: int) -> tuple[Any, bool]:
+    """Recursively shrink long string leaves in a tool response while preserving
+    its structure (keys, list shape, scalar types). Keeping the shape intact is
+    what lets the SDK accept the replacement for built-in tools, whose
+    `updatedToolOutput` must match the tool's output schema. Returns
+    `(new_value, truncated?)`.
+    """
+
+    if isinstance(value, str):
+        if len(value) <= limit:
+            return value, False
+        return _elide_native_output(value, limit), True
+
+    if isinstance(value, dict):
+        changed = False
+        out: dict[Any, Any] = {}
+        for key, item in value.items():
+            new_item, item_changed = _truncate_tool_response(item, limit)
+            out[key] = new_item
+            changed = changed or item_changed
+        return out, changed
+
+    if isinstance(value, list):
+        changed = False
+        out_list = []
+        for item in value:
+            new_item, item_changed = _truncate_tool_response(item, limit)
+            out_list.append(new_item)
+            changed = changed or item_changed
+        return out_list, changed
+
+    return value, False
+
+
+def _make_post_tool_use_truncator(limit: int):
+    """Build a PostToolUse hook callback that caps oversized native-tool output."""
+
+    async def _truncate_hook(input_data: Any, _tool_use_id: Any, _context: Any) -> dict[str, Any]:
+        response = input_data.get("tool_response") if isinstance(input_data, dict) else None
+        if response is None:
+            return {}
+
+        new_response, changed = _truncate_tool_response(response, limit)
+        if not changed:
+            return {}
+
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": "PostToolUse",
+                "updatedToolOutput": new_response,
+            }
+        }
+
+    return _truncate_hook
+
+
+def build_post_tool_use_hooks(limit: int):
+    """Assemble the `hooks` mapping for `ClaudeAgentOptions`. Returns `None` when
+    truncation is disabled (`limit <= 0`) or the SDK is unavailable."""
+
+    if not isinstance(limit, int) or limit <= 0 or not _SDK_AVAILABLE:
+        return None
+
+    return {
+        "PostToolUse": [
+            HookMatcher(
+                matcher="Bash|Read|Grep|Glob",
+                hooks=[_make_post_tool_use_truncator(limit)],
+            )
+        ]
+    }
+
+
 def translate_symphony_tool_result(result: Any) -> dict[str, Any]:
     """Translate a Symphony ``tool_result.result`` payload into an MCP tool response.
 
@@ -246,7 +378,10 @@ def translate_symphony_tool_result(result: Any) -> dict[str, Any]:
         # if `success=false`, since this is a shape issue not a tool failure.
         text = json.dumps(result, separators=(",", ":"))
 
-    return {"content": [{"type": "text", "text": text}], "is_error": is_error}
+    return {
+        "content": [{"type": "text", "text": cap_tool_result_text(text)}],
+        "is_error": is_error,
+    }
 
 
 async def forward_tool_call_to_symphony(
@@ -463,6 +598,13 @@ async def _handle_init(state: SessionState, env: dict[str, Any]) -> None:
     payload = build_options_payload(env)
     state.tool_schemas = extract_tool_schemas(env)
     payload["mcp_servers"] = {"symphony": _build_symphony_mcp_server(state)}
+
+    # R2b: cap oversized native-tool output (Read/Bash/Grep/Glob) so a single
+    # large result isn't re-paid as cache_read on every subsequent turn.
+    tool_output_limit = env.get("tool_output_limit", _NATIVE_TOOL_OUTPUT_LIMIT)
+    hooks = build_post_tool_use_hooks(tool_output_limit)
+    if hooks:
+        payload["hooks"] = hooks
     # The underlying `claude` CLI is always launched with `--verbose` by the
     # SDK, so its stderr is unconditionally chatty. Forward it back to
     # Symphony as `log` envelopes only when `init.verbose_logging` is on;
@@ -525,6 +667,23 @@ async def _forward_message(state: SessionState, message: Any) -> None:
         return
 
     if _SDK_AVAILABLE and isinstance(message, ResultMessage):
+        # A budget (or other terminal) breach is *returned*, not raised: the SDK
+        # sets is_error=True with an `error_*` subtype. Emitting a bare turn_end
+        # for it makes Elixir treat the breach as a clean finish and relaunch
+        # forever. Surface it as a structured error so the orchestrator can map
+        # the subtype to a deterministic code and escalate instead.
+        if getattr(message, "is_error", False):
+            subtype = getattr(message, "subtype", None) or "unknown"
+            emit(
+                {
+                    "type": "error",
+                    "error": subtype,
+                    "error_code": subtype,
+                    "session_id": state.session_id,
+                }
+            )
+            return
+
         emit(
             {
                 "type": "turn_end",
@@ -537,6 +696,29 @@ async def _forward_message(state: SessionState, message: Any) -> None:
         return
 
     if _SDK_AVAILABLE and isinstance(message, AssistantMessage):
+        # A Claude subscription usage-limit (and sibling auth/billing/server
+        # failures) is *not raised* — the SDK sets ``AssistantMessage.error`` to
+        # a literal from ``AssistantMessageError`` and then yields a normal
+        # ResultMessage. Rendering it as an ``assistant_message`` makes Elixir
+        # treat the continuation as clean and re-prompt up to ``agent.max_turns``
+        # times, burning the whole rate-limit window. Surface it as a structured
+        # error (raw literal as error_code; atom mapping lives in Elixir
+        # ``to_error_code``) and suppress the plain message. Embed any parseable
+        # reset wall-clock as ``retry-after <seconds>`` so the existing Elixir
+        # retry-after parser honors the real window with no wire-schema change.
+        sdk_error = getattr(message, "error", None)
+        if sdk_error:
+            prose = render_message_text(message) or str(sdk_error)
+            emit(
+                {
+                    "type": "error",
+                    "error": _embed_retry_after(prose),
+                    "error_code": sdk_error,
+                    "session_id": state.session_id,
+                }
+            )
+            return
+
         text = render_message_text(message)
         if text is not None:
             emit({"type": "assistant_message", "text": text, "session_id": state.session_id})
@@ -560,6 +742,61 @@ async def _forward_message(state: SessionState, message: Any) -> None:
     text = render_message_text(message)
     if text is not None:
         emit({"type": "assistant_message", "text": text, "session_id": state.session_id})
+
+
+# Matches the subscription usage-limit reset notice, e.g.
+# "You've hit your limit · resets 11:20am (Europe/Stockholm)".
+_RESET_RE = re.compile(
+    r"resets\s+(\d{1,2}):(\d{2})\s*([ap]m)\s*\(([^)]+)\)", re.IGNORECASE
+)
+
+
+def _parse_reset_seconds(text: str, now: datetime | None = None) -> int | None:
+    """Parse a ``resets <h:mm><am|pm> (<tz>)`` notice into seconds-from-now.
+
+    Returns the delay to the *next future* occurrence of that wall-clock time in
+    the named timezone, or ``None`` if the notice is absent/unparseable or the
+    timezone is unknown — callers then omit the hint rather than guess.
+    """
+
+    if ZoneInfo is None:
+        return None
+    match = _RESET_RE.search(text or "")
+    if match is None:
+        return None
+
+    hour12, minute, meridiem, tz_name = match.groups()
+    try:
+        tz = ZoneInfo(tz_name.strip())
+    except Exception:  # unknown/invalid tz name
+        return None
+
+    hour = int(hour12) % 12
+    if meridiem.lower() == "pm":
+        hour += 12
+
+    now = now or datetime.now(timezone.utc)
+    now_tz = now.astimezone(tz)
+    target = now_tz.replace(
+        hour=hour, minute=int(minute), second=0, microsecond=0
+    )
+    if target <= now_tz:
+        target += timedelta(days=1)
+
+    return int((target - now_tz).total_seconds())
+
+
+def _embed_retry_after(prose: str) -> str:
+    """Append a ``retry-after <seconds>`` hint to the error prose when the reset
+    wall-clock is parseable, so the existing Elixir parser
+    (``agent_runner.parse_retry_after/1``) honors the real window without any
+    wire-schema change. Leaves the prose untouched otherwise.
+    """
+
+    seconds = _parse_reset_seconds(prose)
+    if seconds is None or seconds <= 0:
+        return prose
+    return f"{prose} retry-after {seconds}"
 
 
 def render_message_text(message: Any) -> str | None:

@@ -65,6 +65,24 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert response["contentItems"] == [%{"type" => "inputText", "text" => response["output"]}]
   end
 
+  test "linear_graphql encodes responses compactly (no pretty-print whitespace)" do
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{"query" => "query Viewer { viewer { id } }"},
+        linear_client: fn _query, _variables, _opts ->
+          {:ok, %{"data" => %{"viewer" => %{"id" => "usr_123", "name" => "Ada"}}}}
+        end
+      )
+
+    # Pretty-printing inflates every linear_graphql result (1,327 calls in the
+    # spend window). The compact encoding must carry no newline-indentation and
+    # no indentation runs, while still round-tripping to the same payload.
+    refute response["output"] =~ "\n"
+    refute response["output"] =~ ~r/:\s/
+    assert Jason.decode!(response["output"]) == %{"data" => %{"viewer" => %{"id" => "usr_123", "name" => "Ada"}}}
+  end
+
   test "linear_graphql accepts a raw GraphQL query string" do
     test_pid = self()
 

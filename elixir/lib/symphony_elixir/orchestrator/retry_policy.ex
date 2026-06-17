@@ -30,6 +30,7 @@ defmodule SymphonyElixir.Orchestrator.RetryPolicy do
     context_window_exhausted
     quota_exceeded
     invalid_request
+    budget_exhausted
     max_turns_reached
     unknown
   )a
@@ -89,11 +90,19 @@ defmodule SymphonyElixir.Orchestrator.RetryPolicy do
     min(base_ms * (1 <<< power), max_ms)
   end
 
-  defp built_in_for(code, cap) when code in [:rate_limited, :overloaded],
+  # A Claude subscription usage-limit can be hours away — honor the real reset
+  # (carried as the sidecar-embedded `retry-after <seconds>`) up to a 6h ceiling
+  # rather than re-hitting the wall after 15 min. Kept separate from
+  # `:overloaded` so a transient 503's seconds-scale `retry-after` can't be
+  # widened by a malformed hint into a multi-hour strand.
+  defp built_in_for(:rate_limited, _cap),
+    do: %{strategy: :backoff, base_ms: 30_000, max_ms: 6 * 3_600_000, honor_retry_after: true}
+
+  defp built_in_for(:overloaded, cap),
     do: %{strategy: :backoff, base_ms: 30_000, max_ms: max(cap, 900_000), honor_retry_after: true}
 
   defp built_in_for(code, _cap)
-       when code in [:context_window_exhausted, :quota_exceeded, :invalid_request],
+       when code in [:context_window_exhausted, :quota_exceeded, :invalid_request, :budget_exhausted],
        do: %{strategy: :no_retry, base_ms: 0, max_ms: 0, honor_retry_after: false}
 
   # IDE-74: max_turns_reached is the "ran out of agent.max_turns budget" signal.
