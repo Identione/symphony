@@ -359,6 +359,13 @@ defmodule SymphonyElixir.Config.Schema do
       # 30 s gives comfortable headroom over that without masking real hangs.
       field(:read_timeout_ms, :integer, default: 30_000)
       field(:stall_timeout_ms, :integer, default: 300_000)
+      # While a native tool (e.g. a long `Bash` build) is in flight the agent
+      # legitimately emits no events, so the idle `stall_timeout_ms` would
+      # misread it as a hang. `tool_stall_timeout_ms` grants the in-flight
+      # window a longer leash (default 30 min); raise it for builds that run
+      # longer. Bounded in practice by `turn_timeout_ms` (a tool can't outlive
+      # its turn). Codex needs no analogue — it streams exec output natively.
+      field(:tool_stall_timeout_ms, :integer, default: 1_800_000)
       # When set, Symphony scopes Claude auth to this CLAUDE_CONFIG_DIR — both
       # for preflight (looks for `<config_dir>/.credentials.json`) and at run
       # time (sidecar Port inherits CLAUDE_CONFIG_DIR=<config_dir>). Useful
@@ -410,6 +417,7 @@ defmodule SymphonyElixir.Config.Schema do
           :turn_timeout_ms,
           :read_timeout_ms,
           :stall_timeout_ms,
+          :tool_stall_timeout_ms,
           :config_dir,
           :verbose_logging
         ],
@@ -427,6 +435,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:turn_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
+      |> validate_number(:tool_stall_timeout_ms, greater_than_or_equal_to: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:tool_output_limit, greater_than_or_equal_to: 0)
     end

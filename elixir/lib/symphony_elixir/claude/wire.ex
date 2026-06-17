@@ -17,6 +17,8 @@ defmodule SymphonyElixir.Claude.Wire do
     assistant_message
     assistant_delta
     tool_call
+    tool_started
+    tool_finished
     permission_request
     token_usage
     turn_end
@@ -90,6 +92,8 @@ defmodule SymphonyElixir.Claude.Wire do
   defp envelope_type_atom("assistant_message"), do: :assistant_message
   defp envelope_type_atom("assistant_delta"), do: :assistant_delta
   defp envelope_type_atom("tool_call"), do: :tool_call
+  defp envelope_type_atom("tool_started"), do: :tool_started
+  defp envelope_type_atom("tool_finished"), do: :tool_finished
   defp envelope_type_atom("permission_request"), do: :permission_request
   defp envelope_type_atom("token_usage"), do: :token_usage
   defp envelope_type_atom("turn_end"), do: :turn_end

@@ -121,6 +121,21 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @doc """
+  Stall-detection timeout (ms) applied while a native tool call is in flight.
+
+  Only meaningful for the Claude adapter, whose long native-tool calls (e.g. a
+  `Bash` build) are silent to Symphony; Codex streams exec output, so its
+  running command keeps the idle timer fresh on its own and needs no tier.
+  """
+  @spec active_tool_stall_timeout_ms(Schema.t()) :: non_neg_integer()
+  def active_tool_stall_timeout_ms(%Schema{} = settings) do
+    case settings.agent.kind do
+      "claude" -> settings.agent.claude.tool_stall_timeout_ms
+      _ -> settings.codex.stall_timeout_ms
+    end
+  end
+
   @spec validate!() :: :ok | {:error, term()}
   def validate! do
     with {:ok, settings} <- settings() do

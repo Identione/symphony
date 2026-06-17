@@ -370,6 +370,67 @@ def build_post_tool_use_hooks(limit: int):
     }
 
 
+# Native tools whose execution can be long enough to matter for stall detection.
+_TOOL_LIFECYCLE_MATCHER = "Bash|Read|Grep|Glob"
+
+
+def _make_tool_lifecycle_hook(event_type: str):
+    """Build a hook that emits a `tool_started`/`tool_finished` envelope.
+
+    These let the orchestrator tell a long *native* tool call (e.g. a build) —
+    which is silent on the wire while it runs — apart from a genuine stall, so
+    it can apply the longer tool-stall window instead of restarting the
+    session. The hook is a pure notification: it returns `{}` (no directive).
+    """
+
+    async def _hook(input_data: Any, tool_use_id: Any, _context: Any) -> dict[str, Any]:
+        name = input_data.get("tool_name") if isinstance(input_data, dict) else None
+        envelope: dict[str, Any] = {"type": event_type, "tool_use_id": tool_use_id}
+        if name:
+            envelope["name"] = name
+        emit(envelope)
+        return {}
+
+    return _hook
+
+
+def build_tool_lifecycle_hooks():
+    """PreToolUse/PostToolUse hooks emitting native-tool lifecycle envelopes.
+    Returns `None` when the SDK is unavailable."""
+
+    if not _SDK_AVAILABLE:
+        return None
+
+    return {
+        "PreToolUse": [
+            HookMatcher(
+                matcher=_TOOL_LIFECYCLE_MATCHER,
+                hooks=[_make_tool_lifecycle_hook("tool_started")],
+            )
+        ],
+        "PostToolUse": [
+            HookMatcher(
+                matcher=_TOOL_LIFECYCLE_MATCHER,
+                hooks=[_make_tool_lifecycle_hook("tool_finished")],
+            )
+        ],
+    }
+
+
+def merge_hook_maps(*hook_maps):
+    """Combine several `{event: [HookMatcher, …]}` maps into one, concatenating
+    the matcher lists per event. Returns `None` when nothing is contributed."""
+
+    merged: dict[str, list[Any]] = {}
+    for hook_map in hook_maps:
+        if not hook_map:
+            continue
+        for event, matchers in hook_map.items():
+            merged.setdefault(event, []).extend(matchers)
+
+    return merged or None
+
+
 def translate_symphony_tool_result(result: Any) -> dict[str, Any]:
     """Translate a Symphony ``tool_result.result`` payload into an MCP tool response.
 
@@ -627,7 +688,12 @@ async def _handle_init(state: SessionState, env: dict[str, Any]) -> None:
     # R2b: cap oversized native-tool output (Read/Bash/Grep/Glob) so a single
     # large result isn't re-paid as cache_read on every subsequent turn.
     tool_output_limit = env.get("tool_output_limit", _NATIVE_TOOL_OUTPUT_LIMIT)
-    hooks = build_post_tool_use_hooks(tool_output_limit)
+    # Always register native-tool lifecycle hooks (stall keepalive); add the
+    # output-truncation hook on top when a positive limit is configured.
+    hooks = merge_hook_maps(
+        build_tool_lifecycle_hooks(),
+        build_post_tool_use_hooks(tool_output_limit),
+    )
     if hooks:
         payload["hooks"] = hooks
     # The underlying `claude` CLI is always launched with `--verbose` by the

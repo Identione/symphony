@@ -1098,10 +1098,12 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_stalled_running_issues(%State{} = state) do
-    timeout_ms = Config.active_stall_timeout_ms(Config.settings!())
+    settings = Config.settings!()
+    idle_timeout_ms = Config.active_stall_timeout_ms(settings)
+    tool_timeout_ms = Config.active_tool_stall_timeout_ms(settings)
 
     cond do
-      timeout_ms <= 0 ->
+      idle_timeout_ms <= 0 ->
         state
 
       map_size(state.running) == 0 ->
@@ -1111,8 +1113,20 @@ defmodule SymphonyElixir.Orchestrator do
         now = DateTime.utc_now()
 
         Enum.reduce(state.running, state, fn {issue_id, running_entry}, state_acc ->
+          timeout_ms = stall_timeout_for_entry(running_entry, idle_timeout_ms, tool_timeout_ms)
           maybe_restart_stalled_issue(state_acc, issue_id, running_entry, now, timeout_ms)
         end)
+    end
+  end
+
+  # A native tool call (e.g. a long `Bash` build) is silent to Symphony while it
+  # runs, so the tight idle window would misread it as a hang. When one is in
+  # flight, fall back to the longer tool-stall window (never shorter than idle).
+  defp stall_timeout_for_entry(running_entry, idle_timeout_ms, tool_timeout_ms) do
+    if Map.get(running_entry, :claude_tools_in_flight, 0) > 0 do
+      max(idle_timeout_ms, tool_timeout_ms)
+    else
+      idle_timeout_ms
     end
   end
 
@@ -1169,11 +1183,12 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp last_activity_timestamp(running_entry) when is_map(running_entry) do
+  # Running entries are always maps; the stall reaper now reads other keys off
+  # the same entry (`claude_tools_in_flight`), so dialyzer can prove the prior
+  # non-map fallback was dead — a single clause is sufficient.
+  defp last_activity_timestamp(running_entry) do
     Map.get(running_entry, :last_codex_timestamp) || Map.get(running_entry, :started_at)
   end
-
-  defp last_activity_timestamp(_running_entry), do: nil
 
   defp input_required_blocker?(running_entry) when is_map(running_entry) do
     Map.get(running_entry, :last_codex_event) in [:turn_input_required, :approval_required] or
@@ -1725,6 +1740,10 @@ defmodule SymphonyElixir.Orchestrator do
             claude_total_tokens: 0,
             claude_cache_creation_input_tokens: 0,
             claude_cache_read_input_tokens: 0,
+            # Count of native Claude tool calls (Bash/Read/…) currently
+            # executing, tracked from sidecar tool_started/tool_finished hooks.
+            # While > 0 the stall watchdog uses the longer tool-stall window.
+            claude_tools_in_flight: 0,
             claude_turn_provisional_input_tokens: 0,
             claude_turn_provisional_output_tokens: 0,
             claude_turn_provisional_total_tokens: 0,
@@ -2339,7 +2358,27 @@ defmodule SymphonyElixir.Orchestrator do
   defp integrate_claude_update(running_entry, %{event: :turn_completed} = update) do
     result_usage = extract_claude_token_delta(update)
     correction = compute_turn_correction(running_entry, result_usage)
-    integrate_claude_envelope(running_entry, update, correction, &reset_provisional/1)
+    {entry, delta} = integrate_claude_envelope(running_entry, update, correction, &reset_provisional/1)
+    # The turn is over; clear any in-flight tool count so a missed tool_finished
+    # (e.g. a permission-denied tool with no PostToolUse) can't strand the entry
+    # on the longer tool-stall window into the next turn.
+    {Map.put(entry, :claude_tools_in_flight, 0), delta}
+  end
+
+  defp integrate_claude_update(running_entry, %{event: :tool_started} = update) do
+    count = Map.get(running_entry, :claude_tools_in_flight, 0) + 1
+
+    running_entry
+    |> Map.put(:claude_tools_in_flight, count)
+    |> integrate_claude_envelope(update, zero_token_delta(), &noop_provisional/1)
+  end
+
+  defp integrate_claude_update(running_entry, %{event: :tool_finished} = update) do
+    count = max(Map.get(running_entry, :claude_tools_in_flight, 0) - 1, 0)
+
+    running_entry
+    |> Map.put(:claude_tools_in_flight, count)
+    |> integrate_claude_envelope(update, zero_token_delta(), &noop_provisional/1)
   end
 
   defp integrate_claude_update(running_entry, update) do

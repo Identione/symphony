@@ -868,6 +868,13 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.claude.turn_timeout_ms`: integer, default `3600000`
 - `agent.claude.read_timeout_ms`: integer, default `5000`
 - `agent.claude.stall_timeout_ms`: integer, default `300000`
+- `agent.claude.tool_stall_timeout_ms`: integer, default `1800000`. While a
+  native Claude tool call (e.g. a long `Bash` build) is in flight the agent is
+  silent on the wire, so the idle `stall_timeout_ms` would misread it as a hang.
+  This longer window applies instead whenever ≥1 native tool is executing,
+  tracked via the sidecar's `tool_started`/`tool_finished` lifecycle hooks.
+  Bounded in practice by `turn_timeout_ms`. Codex needs no analogue — it streams
+  exec output natively, keeping the idle timer fresh. See §10.8 / §5.3.5.
 - `agent.claude.verbose_logging`: boolean, default `false`. When `true`, opt
   into the Claude debug feed (SDK partial-message + hook-event streams, the
   underlying `claude` CLI's stderr forwarded as `log` envelopes, and the
@@ -1098,6 +1105,11 @@ Part A: Stall detection
 - If `elapsed_ms` exceeds the active adapter's `stall_timeout_ms` (`agent.codex.stall_timeout_ms`
   or `agent.claude.stall_timeout_ms` per `agent.kind` — see §5.3.5), terminate the worker and
   queue a retry.
+- For the Claude adapter, when ≥1 native tool call is in flight (tracked from the
+  sidecar's `tool_started`/`tool_finished` hooks), the longer
+  `agent.claude.tool_stall_timeout_ms` window applies instead of `stall_timeout_ms`:
+  a long native tool (e.g. a build) is silent on the wire and must not be misread
+  as a hang. The count resets at each `turn_end`.
 - If the resolved `stall_timeout_ms <= 0`, skip stall detection entirely.
 
 Part B: Tracker state refresh
@@ -1522,7 +1534,10 @@ Sidecar wire protocol (Symphony ↔ sidecar over stdio, line-delimited JSON):
 - Symphony → sidecar: `init`, `turn`, `tool_result`, `permission_response`, `interrupt`,
   `shutdown`.
 - Sidecar → Symphony: `ready`, `system_init`, `assistant_message` (and/or deltas), `tool_call`,
-  `permission_request`, `token_usage`, `turn_end`, `error`, `log`.
+  `tool_started`, `tool_finished`, `permission_request`, `token_usage`, `turn_end`, `error`, `log`.
+- `tool_started`/`tool_finished` are native-tool lifecycle notifications (from the SDK's
+  PreToolUse/PostToolUse hooks) that let the orchestrator apply the longer
+  `agent.claude.tool_stall_timeout_ms` window while a tool runs (see §5.3.5 stall detection).
 - The concrete envelope shape is implementation-defined within the MUSTs above; implementations
   MUST document and version their envelope.
 
