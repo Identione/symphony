@@ -77,6 +77,14 @@ defmodule SymphonyElixir.Config do
   @spec cutoff_timeout_ms() :: pos_integer()
   def cutoff_timeout_ms, do: settings!().agent.cutoff_timeout_ms
 
+  @doc "Whether deterministic per-turn progress signals (Layer 1) are computed."
+  @spec progress_signal_enabled?() :: boolean()
+  def progress_signal_enabled?, do: settings!().agent.progress_signal_enabled
+
+  @doc "Timeout (ms) for the read-only progress git probe."
+  @spec progress_signal_git_timeout_ms() :: pos_integer()
+  def progress_signal_git_timeout_ms, do: settings!().agent.progress_signal_git_timeout_ms
+
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
     case Schema.resolve_runtime_turn_sandbox_policy(settings!(), workspace) do

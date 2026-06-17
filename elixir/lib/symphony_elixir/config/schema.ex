@@ -517,6 +517,23 @@ defmodule SymphonyElixir.Config.Schema do
       field(:preserve_uncommitted_work_branch, :boolean, default: false)
       # Timeout for the preservation git-shell invocation.
       field(:cutoff_timeout_ms, :integer, default: 60_000)
+      # Deterministic per-turn progress signals (IDE-189 / Layer 1). Computed
+      # once per turn boundary from a read-only git probe; reported + logged
+      # only (no kills, no Linear state moves, no continuation gating). Global
+      # `agent.*` because the turn-boundary hook lives in the adapter-agnostic
+      # orchestrator, so codex and claude are covered by construction.
+      #
+      # K — consecutive-turn window: drives `:stuck_state`/`:repeated_error`
+      # streak thresholds and the `at_risk_no_commits` turn gate. Tuned from the
+      # IDE-189 replay (fires at_risk by turn 4 of a 20-turn budget). Min 2.
+      field(:progress_signal_window_k, :integer, default: 4)
+      # Master switch for computing the signals at all.
+      field(:progress_signal_enabled, :boolean, default: true)
+      # Timeout for the read-only progress git probe; on expiry the prior
+      # assessment is kept rather than stalling the orchestrator loop.
+      field(:progress_signal_git_timeout_ms, :integer, default: 2_000)
+      # Turn gate for the Layer-2 trigger's `at_risk_no_commits` arm.
+      field(:progress_trigger_min_turns, :integer, default: 4)
       embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
       embeds_one(:claude, Claude, on_replace: :update, defaults_to_struct: true)
     end
@@ -543,7 +560,11 @@ defmodule SymphonyElixir.Config.Schema do
           :budget_pressure_turns,
           :preserve_uncommitted_work,
           :preserve_uncommitted_work_branch,
-          :cutoff_timeout_ms
+          :cutoff_timeout_ms,
+          :progress_signal_window_k,
+          :progress_signal_enabled,
+          :progress_signal_git_timeout_ms,
+          :progress_trigger_min_turns
         ],
         empty_values: []
       )
@@ -558,6 +579,9 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:max_sessions_per_issue, greater_than: 0)
       |> validate_number(:budget_pressure_turns, greater_than_or_equal_to: 0)
       |> validate_number(:cutoff_timeout_ms, greater_than: 0)
+      |> validate_number(:progress_signal_window_k, greater_than_or_equal_to: 2)
+      |> validate_number(:progress_signal_git_timeout_ms, greater_than: 0)
+      |> validate_number(:progress_trigger_min_turns, greater_than: 0)
       |> validate_thresholds_order()
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)
