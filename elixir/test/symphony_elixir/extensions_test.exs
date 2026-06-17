@@ -657,6 +657,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "session_id" => "thread-http",
                  "agent_kind" => "codex",
                  "turn_count" => 7,
+                 "progress" => %{"status" => "progressing", "at_risk_no_commits" => false},
                  "last_event" => "notification",
                  "last_message" => "rendered",
                  "started_at" => state_payload["running"] |> List.first() |> Map.fetch!("started_at"),

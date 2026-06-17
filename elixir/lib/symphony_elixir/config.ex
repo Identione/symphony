@@ -77,6 +77,22 @@ defmodule SymphonyElixir.Config do
   @spec cutoff_timeout_ms() :: pos_integer()
   def cutoff_timeout_ms, do: settings!().agent.cutoff_timeout_ms
 
+  @doc "Whether per-turn deterministic progress signals (IDE-211 Layer 1) are computed."
+  @spec progress_signal_enabled?() :: boolean()
+  def progress_signal_enabled?, do: settings!().agent.progress_signal_enabled
+
+  @doc "Window K for progress-signal streaks and the `at_risk_no_commits` turn floor."
+  @spec progress_signal_window_k() :: pos_integer()
+  def progress_signal_window_k, do: settings!().agent.progress_signal_window_k
+
+  @doc "Timeout (ms) for the per-turn progress-signal git probe."
+  @spec progress_signal_git_timeout_ms() :: pos_integer()
+  def progress_signal_git_timeout_ms, do: settings!().agent.progress_signal_git_timeout_ms
+
+  @doc "Turn floor for the `at_risk_no_commits` arm of `ProgressSignal.trigger?/2`."
+  @spec progress_trigger_min_turns() :: pos_integer()
+  def progress_trigger_min_turns, do: settings!().agent.progress_trigger_min_turns
+
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
     case Schema.resolve_runtime_turn_sandbox_policy(settings!(), workspace) do

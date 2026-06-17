@@ -198,6 +198,16 @@ repo:
   working tree. Recover stranded work with `git log refs/symphony/wip/<ID>` (or
   `git branch --list 'symphony/wip/*'` when `agent.preserve_uncommitted_work_branch`
   is enabled). The git-shell timeout is `agent.cutoff_timeout_ms` (default `60000`).
+- `agent.progress_signal_enabled` (default `true`) computes deterministic
+  per-turn progress signals (IDE-211 / Layer 1): at each turn boundary a cheap
+  non-mutating git probe classifies the issue as
+  progressing/stuck/oscillating/repeated_error plus an independent
+  `at_risk_no_commits` flag, surfaced on the dashboard and logged. This layer
+  only *reports* — it never kills a session or moves state.
+  `agent.progress_signal_window_k` (default `4`, `>= 2`) is the consecutive-turn
+  window; `agent.progress_signal_git_timeout_ms` (default `2000`) bounds the
+  probe; `agent.progress_trigger_min_turns` (default `4`) is the turn floor for
+  the overseer trigger. See `docs/progress_signals.md`.
 - `agent.codex.quota` / `agent.claude.quota` (both OPTIONAL, disabled by
   default) add account-quota-aware dispatch pausing: when `enabled`, Symphony
   stops dispatching *new* issues while the active provider's usage is at/above

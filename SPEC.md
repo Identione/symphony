@@ -863,6 +863,14 @@ not require recognizing or validating extension fields unless that extension is 
   `symphony/wip/<id>` branch alongside the ref
 - `agent.cutoff_timeout_ms`: positive integer, default `60000` — timeout for the preservation
   git-shell invocation
+- `agent.progress_signal_enabled`: boolean, default `true` — compute deterministic per-turn
+  progress signals (see §13.5)
+- `agent.progress_signal_window_k`: integer `>= 2`, default `4` — consecutive-turn window `K`
+  before `:stuck_state`/`:repeated_error` fire and the turn floor for `at_risk_no_commits`
+- `agent.progress_signal_git_timeout_ms`: positive integer, default `2000` — timeout for the
+  per-turn progress git probe; a slow/locked repo degrades to "unknown" (assessment unchanged)
+- `agent.progress_trigger_min_turns`: integer `>= 1`, default `4` — turn floor for the
+  `at_risk_no_commits` arm of the Layer-2 trigger predicate
 - `agent.kind`: enum (`codex` | `claude`), default `codex`
 - `agent.codex.command`: shell command string, default `codex app-server`
 - `agent.codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
@@ -2257,6 +2265,55 @@ API design notes:
 - API errors SHOULD use a JSON envelope such as `{"error":{"code":"...","message":"..."}}`.
 - If the dashboard is a client-side app, it SHOULD consume this API rather than duplicating state
   logic.
+
+### 13.5 Deterministic Per-Turn Progress Signals (IDE-189, Layer 1)
+
+Layer 1 of the agent-run robustness defense (alongside the Layer-0 budget cutoff in §6/§9.4 and
+the Layer-2 AI overseer). At each **turn boundary** — the `:turn_completed` envelope for the
+claude adapter, a new-`session_id` `:session_started` envelope for codex — the orchestrator runs a
+single cheap, non-mutating git probe and rolls forward per-issue progress signals. Gated on
+`agent.progress_signal_enabled`; bounded by `agent.progress_signal_git_timeout_ms` so a
+slow/locked repo degrades to "assessment unchanged" rather than stalling the orchestration loop.
+The probe runs in the orchestrator process *after* the turn completes — off the agent's critical
+path.
+
+Per turn the probe observes three raw inputs:
+
+- **working-tree hash** — a content hash of the full tree (tracked **and** untracked, via
+  `git write-tree` on a throwaway index so HEAD/index/working tree are untouched). Identical hash
+  across turns ⇔ the agent changed nothing.
+- **empty** — whether `git status --porcelain` is empty (clean tree).
+- **commits_since** — commits on `HEAD` since a dispatch marker captured lazily on the first probe.
+
+plus an optional adapter-tagged terminal-error signature (or `nil` when the turn ended cleanly).
+
+From the rolling streaks the orchestrator derives a **status** (most→least severe) and an
+**independent** boolean, where `K = agent.progress_signal_window_k`:
+
+```
+:oscillating     last 4 hashes are A,B,A,B with A != B
+:repeated_error  error_sig != nil AND its streak >= K
+:stuck_state     identical hash for >= K turns AND the tree is empty   ← empty-tree guard
+:progressing     otherwise
+
+at_risk_no_commits = commits_since == 0 AND turn_count >= K
+```
+
+The **empty-tree guard** is load-bearing: an issue holding a *dirty* tree (real pending work) for
+many turns without committing is `:progressing` + `at_risk_no_commits`, **never** `:stuck`.
+`at_risk_no_commits` is therefore a parallel flag that coexists with `:progressing`; it is not a
+status value.
+
+**Non-enforcement contract.** Layer 1 only *reports*: the status and flag are logged (§13 logging
+conventions: `issue_id` + `issue_identifier` + `session_id`, `key=value`, deterministic wording)
+and exposed verbatim through the orchestrator snapshot (dashboard + `/api/v1/*`). Layer 1 takes no
+action — no session kill, no Linear state move, no continuation gating; those belong to Layers 0/2.
+The trigger predicate Layer 2 consumes is:
+
+```
+status in [:stuck_state, :oscillating, :repeated_error]
+OR (at_risk_no_commits AND turn_count >= agent.progress_trigger_min_turns)
+```
 
 ## 14. Failure Model and Recovery Strategy
 
