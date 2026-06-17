@@ -79,6 +79,14 @@ _OVERLOADED_KEYWORDS = frozenset(["overloaded", "overload"])
 _QUOTA_KEYWORDS = frozenset(["credit balance", "quota exceeded", "quota_exceeded", "billing"])
 _INVALID_REQUEST_KEYWORDS = frozenset(["invalid request", "invalid_request"])
 
+# Claude Code sometimes reports subscription exhaustion as ordinary assistant
+# prose without setting AssistantMessage.error. Keep this deliberately narrow so
+# normal product text containing "limit" does not become a synthetic failure.
+_USAGE_LIMIT_PROSE_RE = re.compile(
+    r"\b(?:you(?:'|’)ve|you have)\s+hit\s+your\s+limit\b.*\bresets\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
 
 def _classify_from_message(msg: str) -> str:
     """Return an error code by scanning the lowercased message for known keywords."""
@@ -720,6 +728,18 @@ async def _forward_message(state: SessionState, message: Any) -> None:
             return
 
         text = render_message_text(message)
+        prose_error = _assistant_prose_error_code(text)
+        if prose_error:
+            emit(
+                {
+                    "type": "error",
+                    "error": _embed_retry_after(text or prose_error),
+                    "error_code": prose_error,
+                    "session_id": state.session_id,
+                }
+            )
+            return
+
         if text is not None:
             emit({"type": "assistant_message", "text": text, "session_id": state.session_id})
 
@@ -797,6 +817,22 @@ def _embed_retry_after(prose: str) -> str:
     if seconds is None or seconds <= 0:
         return prose
     return f"{prose} retry-after {seconds}"
+
+
+def _assistant_prose_error_code(prose: str | None) -> str | None:
+    """Classify SDK assistant prose that actually represents a terminal error.
+
+    The SDK normally sets ``AssistantMessage.error`` for this, but observed
+    Claude Code traces also show the same usage-limit notice arriving as plain
+    text with ``error=None``. Returning the raw SDK-compatible literal lets the
+    existing Elixir mapping and retry policy handle it as ``:rate_limited``.
+    """
+
+    if not prose:
+        return None
+    if _USAGE_LIMIT_PROSE_RE.search(prose):
+        return "rate_limit"
+    return None
 
 
 def render_message_text(message: Any) -> str | None:

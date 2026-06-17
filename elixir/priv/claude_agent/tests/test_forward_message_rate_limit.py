@@ -78,6 +78,33 @@ async def test_rate_limit_emits_error_envelope_not_assistant_message() -> None:
 
 
 @pytest.mark.asyncio
+async def test_rate_limit_prose_without_sdk_error_still_emits_error_envelope() -> None:
+    """Observed Claude traces sometimes omit AssistantMessage.error and carry
+    only the usage-limit reset notice as assistant prose."""
+
+    state = SessionState(session_id="sess-rl-prose")
+    msg = AssistantMessage(
+        content=[
+            TextBlock(text="You've hit your limit · resets 3:40pm (Europe/Stockholm)")
+        ],
+        model="claude-opus-4-8",
+        error=None,
+        stop_reason="stop_sequence",
+        session_id="sess-rl-prose",
+    )
+
+    captured, fake_emit = _record_emits()
+    with patch.object(sidecar, "emit", side_effect=fake_emit):
+        await _forward_message(state, msg)
+
+    [err] = [env for env in captured if env["type"] == "error"]
+    assert err["error_code"] == "rate_limit"
+    assert err["session_id"] == "sess-rl-prose"
+    assert "retry-after" in err["error"]
+    assert not any(env["type"] == "assistant_message" for env in captured)
+
+
+@pytest.mark.asyncio
 async def test_assistant_message_without_error_still_renders_normally() -> None:
     """Control case: a normal turn keeps emitting assistant_message, no error."""
 
