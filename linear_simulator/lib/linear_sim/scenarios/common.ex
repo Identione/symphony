@@ -48,11 +48,18 @@ defmodule LinearSim.Scenarios.Common do
         name: "Engineering"
       })
 
+    # The full set of workflow states symphony's default workflow references
+    # (active: Todo/In Progress/Merging/Rework; terminal: Canceled/Duplicate/Done),
+    # plus In Review. Keeps `make preflight` state-coverage green out of the box.
     states = %{
       todo: insert_state!(team, "state_todo", "Todo", "unstarted", 1),
       in_progress: insert_state!(team, "state_in_progress", "In Progress", "started", 2),
       in_review: insert_state!(team, "state_in_review", "In Review", "started", 3),
-      done: insert_state!(team, "state_done", "Done", "completed", 4)
+      merging: insert_state!(team, "state_merging", "Merging", "started", 4),
+      rework: insert_state!(team, "state_rework", "Rework", "started", 5),
+      done: insert_state!(team, "state_done", "Done", "completed", 6),
+      canceled: insert_state!(team, "state_canceled", "Canceled", "canceled", 7),
+      duplicate: insert_state!(team, "state_duplicate", "Duplicate", "canceled", 8)
     }
 
     project =
