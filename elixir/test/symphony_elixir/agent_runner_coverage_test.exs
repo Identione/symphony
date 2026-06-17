@@ -362,6 +362,66 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
     end
   end
 
+  describe "rebase-on-resume directive" do
+    test "prepend_resume_after_block_directive/2 prepends the pull-skill directive with blocker ids" do
+      prompt =
+        AgentRunner.prepend_resume_after_block_directive("ORIGINAL PROMPT", %{blockers: ["BLK-1", "BLK-2"]})
+
+      assert prompt =~ "Rebase-on-resume guidance:"
+      assert prompt =~ "previously paused because it was blocked"
+      assert prompt =~ "BLK-1, BLK-2"
+      assert prompt =~ "`pull` skill"
+      # The original prompt is preserved verbatim, after the directive.
+      assert String.ends_with?(prompt, "ORIGINAL PROMPT")
+      assert String.starts_with?(prompt, "Rebase-on-resume guidance:")
+    end
+
+    test "prepend_resume_after_block_directive/2 falls back to a generic clause without blocker ids" do
+      prompt = AgentRunner.prepend_resume_after_block_directive("X", %{blockers: []})
+
+      assert prompt =~ "The issue that blocked it has now landed"
+      assert String.ends_with?(prompt, "X")
+    end
+
+    test "prepend_resume_after_block_directive/2 is a no-op when no resume info is given" do
+      assert AgentRunner.prepend_resume_after_block_directive("X", nil) == "X"
+    end
+
+    test "run/3 injects the directive into the turn-1 prompt when resume_after_block is set" do
+      ctx = setup_workspace!()
+      write_stub_workflow!(ctx, max_turns: 1)
+
+      fetcher = fn ["issue-cov-1"] -> {:ok, [%{issue() | state: "Done"}]} end
+
+      assert :ok =
+               AgentRunner.run(issue(), nil,
+                 adapter: StubAdapter,
+                 issue_state_fetcher: fetcher,
+                 resume_after_block: %{blockers: ["BLK-9"]}
+               )
+
+      assert_received {:stub_run_turn, prompt}
+      assert prompt =~ "Rebase-on-resume guidance:"
+      assert prompt =~ "BLK-9"
+    end
+
+    test "run/3 leaves the turn-1 prompt untouched without resume_after_block" do
+      ctx = setup_workspace!()
+      write_stub_workflow!(ctx, max_turns: 1)
+
+      fetcher = fn ["issue-cov-1"] -> {:ok, [%{issue() | state: "Done"}]} end
+
+      assert :ok =
+               AgentRunner.run(issue(), nil,
+                 adapter: StubAdapter,
+                 issue_state_fetcher: fetcher
+               )
+
+      assert_received {:stub_run_turn, prompt}
+      refute prompt =~ "Rebase-on-resume guidance:"
+    end
+  end
+
   describe "selected_worker_host/2" do
     test "returns nil when no host is preferred and none is configured" do
       assert AgentRunner.selected_worker_host(nil, []) == nil

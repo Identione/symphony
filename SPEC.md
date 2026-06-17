@@ -297,6 +297,13 @@ Fields:
   rebuilt wholesale on every successful candidate fetch so it self-heals once the upstream blocker
   reaches a terminal state. Last-known-good is kept on candidate-fetch failure / rate limit.
   In-memory only; cleared on restart.)
+- `rebase_pending` (map `issue_id -> %{blockers: [identifier]}`; issues that were paused mid-run
+  because they gained a non-terminal blocker per §8.2. When such an issue is later re-dispatched —
+  its blockers having landed — this entry is consumed to prepend a rebase-on-resume directive to the
+  turn-1 prompt, instructing the resuming agent to integrate the now-landed base branch (via the
+  `pull` skill) before continuing the ticket work, so it does not build on a stale base. The entry
+  is set when the running issue is paused and cleared when it is dispatched. In-memory only; cleared
+  on restart.)
 - `dependency_graph` (map `issue_id -> graph node projection`; observability-only node set for the
   dashboard dependency graph — active candidates plus their transitive blockers (`blockers of
   blockers`). Rebuilt per successful candidate fetch with last-known-good retained on failure.
@@ -1007,7 +1014,10 @@ An issue is dispatch-eligible only if all are true:
     surface them; the rule itself remains the source of truth for dispatch eligibility.
   - If a running issue gains a non-terminal blocker, stop the active worker without cleaning its
     workspace and release the claim. The issue remains dependency-blocked until the blocker reaches
-    a terminal state, then it can be dispatched again by the normal polling loop.
+    a terminal state, then it can be dispatched again by the normal polling loop. Because the
+    workspace is preserved (not re-cloned), the paused issue is recorded in `rebase_pending`
+    (§4.1.8); when it is re-dispatched, its turn-1 prompt carries a rebase-on-resume directive so the
+    agent integrates the now-landed blocker work onto its base before continuing.
   - If that running issue was moved out of the active state set while it was waiting on the blocker
     (for example to `Human Review`), the orchestrator SHOULD move it back to the previous active
     state, falling back to `Todo` when no previous active state is known.

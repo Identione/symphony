@@ -1299,6 +1299,11 @@ defmodule SymphonyElixir.OrchestratorCoverageTest do
     refute Map.has_key?(state.retry_attempts, original.id)
     refute Map.has_key?(state.deterministic_failures, original.id)
     refute Process.alive?(worker)
+
+    # The paused session is marked for a rebase-on-resume so that, once the
+    # blocker lands and it is re-dispatched, it integrates the landed base
+    # before continuing. The blocker identifier is captured for the directive.
+    assert %{blockers: ["BLK-IP"]} = Map.get(state.rebase_pending, original.id)
   end
 
   test "dependency-blocked running issue moved to review is restored to its active state" do
