@@ -30,11 +30,17 @@ defmodule LinearSim.Scenarios do
     "many_issues" => LinearSim.Scenarios.ManyIssues,
     "archived_issues" => LinearSim.Scenarios.ArchivedIssues,
     "webhook_demo" => LinearSim.Scenarios.WebhookDemo,
-    "rate_limited" => LinearSim.Scenarios.RateLimited
+    "rate_limited" => LinearSim.Scenarios.RateLimited,
+    "invalid_token" => LinearSim.Scenarios.InvalidToken,
+    "permission_denied" => LinearSim.Scenarios.PermissionDenied
   }
 
   # Scenarios that put the GraphQL endpoint into a non-normal response mode.
-  @modes %{"rate_limited" => :rate_limited}
+  @modes %{
+    "rate_limited" => :rate_limited,
+    "invalid_token" => :invalid_token,
+    "permission_denied" => :permission_denied
+  }
 
   @default_scenario "basic_workspace"
 

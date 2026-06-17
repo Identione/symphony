@@ -45,7 +45,9 @@ defmodule LinearSimWeb.GraphQL.Plugs.CaptureOperations do
     File.write!(base <> ".graphql", conn.params["query"])
 
     if Keyword.get(config, :include_variables, true) do
-      variables = redact(conn.params["variables"] || %{}, Keyword.get(config, :redact_variables, []))
+      variables =
+        redact(conn.params["variables"] || %{}, Keyword.get(config, :redact_variables, []))
+
       File.write!(base <> ".variables.json", Jason.encode!(variables, pretty: true))
     end
 

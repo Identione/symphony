@@ -19,7 +19,10 @@ defmodule LinearSimWeb.CaptureOperationsTest do
     {:ok, dir: dir}
   end
 
-  test "captures the operation document, variables (redacted), and metadata", %{conn: conn, dir: dir} do
+  test "captures the operation document, variables (redacted), and metadata", %{
+    conn: conn,
+    dir: dir
+  } do
     conn
     |> put_req_header("content-type", "application/json")
     |> put_req_header("authorization", "Bearer user_hakan")

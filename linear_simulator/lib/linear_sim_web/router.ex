@@ -9,7 +9,7 @@ defmodule LinearSimWeb.Router do
   # the Absinthe context; the request logger then records the (redacted) request.
   pipeline :graphql do
     plug :accepts, ["json"]
-    plug LinearSimWeb.GraphQL.Plugs.RateLimitMode
+    plug LinearSimWeb.GraphQL.Plugs.ResponseMode
     plug LinearSimWeb.GraphQL.Plugs.Context
     plug LinearSimWeb.GraphQL.Plugs.RequestLogger
     plug LinearSimWeb.GraphQL.Plugs.CaptureOperations
