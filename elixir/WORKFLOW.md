@@ -13,7 +13,10 @@ tracker:
     - Duplicate
     - Done
 polling:
-  interval_ms: 5000
+  # Each poll cycle issues several Linear GraphQL calls; intervals below the
+  # 30s schema default exhaust Linear's hourly budget and arm a 1-hour
+  # rate-limit back-off that stalls the daemon.
+  interval_ms: 30000
 workspace:
   root: ~/code/workspaces
 # Declarative repo metadata (SPEC.md §5.3.6). `repo.url` is consumed by
