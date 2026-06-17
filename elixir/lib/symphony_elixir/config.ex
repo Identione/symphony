@@ -61,6 +61,22 @@ defmodule SymphonyElixir.Config do
 
   def max_concurrent_agents_for_state(_state_name), do: settings!().agent.max_concurrent_agents
 
+  @doc "Turns-from-cap threshold at which budget-pressure steering is injected (`0` disables)."
+  @spec budget_pressure_turns() :: non_neg_integer()
+  def budget_pressure_turns, do: settings!().agent.budget_pressure_turns
+
+  @doc "Whether to snapshot a dirty working tree to a WIP commit/ref before a session stop."
+  @spec preserve_uncommitted_work?() :: boolean()
+  def preserve_uncommitted_work?, do: settings!().agent.preserve_uncommitted_work
+
+  @doc "Whether to also create a visible `symphony/wip/<id>` branch when preserving."
+  @spec preserve_uncommitted_work_branch?() :: boolean()
+  def preserve_uncommitted_work_branch?, do: settings!().agent.preserve_uncommitted_work_branch
+
+  @doc "Timeout (ms) for the non-destructive preservation git-shell invocation."
+  @spec cutoff_timeout_ms() :: pos_integer()
+  def cutoff_timeout_ms, do: settings!().agent.cutoff_timeout_ms
+
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
     case Schema.resolve_runtime_turn_sandbox_policy(settings!(), workspace) do

@@ -7,7 +7,17 @@ defmodule SymphonyElixir.Orchestrator do
   require Logger
   import Bitwise, only: [<<<: 2]
 
-  alias SymphonyElixir.{AgentRunner, Config, DeterministicFailure, ProviderQuota, StatusDashboard, Tracker, Workspace}
+  alias SymphonyElixir.{
+    AgentRunner,
+    Config,
+    DeterministicFailure,
+    Git,
+    ProviderQuota,
+    StatusDashboard,
+    Tracker,
+    Workspace
+  }
+
   alias SymphonyElixir.Linear.Issue
   alias SymphonyElixir.Orchestrator.{RetryPolicy, SessionBudget}
 
@@ -317,6 +327,16 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp handle_agent_down(reason, state, issue_id, running_entry, session_id) do
+    # IDE-189: the `:max_turns_reached` cutoff does not pass through
+    # `terminate_running_issue`. The task has already finished by the time this
+    # `:DOWN` arrives and the workspace persists for the 1s-cadence retry, so
+    # snapshot the converging work to a durable WIP ref before the fresh session
+    # (or a later operator) resumes on the same — still dirty — tree.
+    if extract_error_code(reason) == :max_turns_reached do
+      identifier = running_entry_identifier(running_entry, issue_id)
+      maybe_preserve_uncommitted_work(running_entry, issue_id, identifier, :max_turns)
+    end
+
     if input_required_blocker?(running_entry) do
       block_input_required_agent_down(state, issue_id, running_entry, session_id, reason)
     else
@@ -855,12 +875,12 @@ defmodule SymphonyElixir.Orchestrator do
       terminal_issue_state?(issue.state, terminal_states) ->
         Logger.info("Issue moved to terminal state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, true)
+        terminate_running_issue(state, issue.id, true, :terminal)
 
       !issue_routable_to_worker?(issue) ->
         Logger.info("Issue no longer routed to this worker: #{issue_context(issue)} assignee=#{inspect(issue.assignee_id)}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        terminate_running_issue(state, issue.id, false, :non_routed)
 
       issue_blocked_by_non_terminal?(issue, terminal_states) ->
         pause_dependency_blocked_running_issue(state, issue, active_states)
@@ -871,7 +891,7 @@ defmodule SymphonyElixir.Orchestrator do
       true ->
         Logger.info("Issue moved to non-active state: #{issue_context(issue)} state=#{issue.state}; stopping active agent")
 
-        terminate_running_issue(state, issue.id, false)
+        terminate_running_issue(state, issue.id, false, :non_active)
     end
   end
 
@@ -925,7 +945,7 @@ defmodule SymphonyElixir.Orchestrator do
         state_acc
       else
         log_missing_running_issue(state_acc, issue_id)
-        terminate_running_issue(state_acc, issue_id, false)
+        terminate_running_issue(state_acc, issue_id, false, :not_visible)
       end
     end)
   end
@@ -984,7 +1004,7 @@ defmodule SymphonyElixir.Orchestrator do
 
     Logger.info("Issue is waiting on non-terminal blockers: #{issue_context(issue)} state=#{inspect(issue.state)} blocked_by=#{length(issue.blocked_by)}; pausing active agent")
 
-    terminate_running_issue(state, issue.id, false)
+    terminate_running_issue(state, issue.id, false, :dependency_pause)
   end
 
   # Record that this paused session must rebase onto its (now-soon-to-land)
@@ -1066,7 +1086,7 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace) do
+  defp terminate_running_issue(%State{} = state, issue_id, cleanup_workspace, cutoff_reason) do
     case Map.get(state.running, issue_id) do
       nil ->
         release_issue_claim(state, issue_id)
@@ -1074,6 +1094,12 @@ defmodule SymphonyElixir.Orchestrator do
       %{pid: pid, ref: ref, identifier: identifier} = running_entry ->
         state = record_session_completion_totals(state, running_entry)
         worker_host = Map.get(running_entry, :worker_host)
+
+        # Non-destructive cutoff (IDE-189): snapshot any uncommitted work before
+        # the workspace can be reclaimed or the task stopped. Runs even when
+        # `cleanup_workspace` is false (the Backlog/non-active regression: the
+        # agent was stopped but its work was never committed).
+        maybe_preserve_uncommitted_work(running_entry, issue_id, identifier, cutoff_reason)
 
         if cleanup_workspace do
           cleanup_issue_workspace(identifier, worker_host)
@@ -1159,7 +1185,7 @@ defmodule SymphonyElixir.Orchestrator do
         next_attempt = next_retry_attempt_from_running(running_entry)
 
         state
-        |> terminate_running_issue(issue_id, false)
+        |> terminate_running_issue(issue_id, false, :stall_restart)
         |> schedule_issue_retry(issue_id, next_attempt, %{
           identifier: identifier,
           session_id: session_id,
@@ -2154,6 +2180,45 @@ defmodule SymphonyElixir.Orchestrator do
   defp handle_retry_issue_lookup(nil, state, issue_id, _attempt, _metadata) do
     Logger.debug("Issue no longer visible, removing claim issue_id=#{issue_id}")
     {:noreply, release_issue_claim(state, issue_id)}
+  end
+
+  # Best-effort non-destructive snapshot of uncommitted work before a cutoff
+  # (IDE-189). Gated on `agent.preserve_uncommitted_work`; failures are logged
+  # and swallowed so preservation can never block a stop or retry. Requires a
+  # known `workspace_path` (populated via `{:worker_runtime_info, ...}`).
+  defp maybe_preserve_uncommitted_work(running_entry, issue_id, identifier, cutoff_reason) do
+    if Config.preserve_uncommitted_work?() do
+      case Map.get(running_entry, :workspace_path) do
+        workspace when is_binary(workspace) ->
+          opts = [
+            branch: Config.preserve_uncommitted_work_branch?(),
+            reason: cutoff_reason,
+            timeout_ms: Config.cutoff_timeout_ms()
+          ]
+
+          log_preservation_result(
+            Git.preserve_uncommitted_work(workspace, identifier, Map.get(running_entry, :worker_host), opts),
+            issue_id,
+            identifier,
+            cutoff_reason
+          )
+
+        _ ->
+          Logger.debug("Skipping work preservation; no workspace_path issue_id=#{issue_id} issue_identifier=#{identifier} reason=#{cutoff_reason}")
+      end
+    end
+  end
+
+  defp log_preservation_result({:ok, :clean}, issue_id, identifier, reason) do
+    Logger.debug("Work preservation skipped clean tree issue_id=#{issue_id} issue_identifier=#{identifier} reason=#{reason}")
+  end
+
+  defp log_preservation_result({:ok, {:preserved, sha, ref}}, issue_id, identifier, reason) do
+    Logger.info("Preserved uncommitted work issue_id=#{issue_id} issue_identifier=#{identifier} reason=#{reason} commit=#{sha} ref=#{ref}")
+  end
+
+  defp log_preservation_result({:error, error}, issue_id, identifier, reason) do
+    Logger.warning("Failed to preserve uncommitted work issue_id=#{issue_id} issue_identifier=#{identifier} reason=#{reason} error=#{inspect(error)}")
   end
 
   defp cleanup_issue_workspace(identifier, worker_host \\ nil)

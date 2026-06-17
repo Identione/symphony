@@ -498,6 +498,25 @@ defmodule SymphonyElixir.Config.Schema do
       # escalated, or human-moved). Default 8 sits well above a normal
       # multi-turn issue.
       field(:max_sessions_per_issue, :integer, default: 8)
+      # Budget-pressure steering + non-destructive cutoff (IDE-189 / Layer 0).
+      # These knobs are global `agent.*` (not per-adapter) because both
+      # mechanisms live in the adapter-agnostic shared turn loop / orchestrator,
+      # so codex and claude are covered by construction.
+      #
+      # Inject budget-pressure steering into continuation prompts when within
+      # this many turns of `agent.max_turns`. The threshold must leave >=1
+      # actionable turn (the directive rides the *next* turn's prompt); `0`
+      # disables steering entirely.
+      field(:budget_pressure_turns, :integer, default: 2)
+      # Master switch for non-destructive cutoff: snapshot a dirty working tree
+      # to a `refs/symphony/wip/<id>` commit before any session stop or
+      # `max_turns` cutoff, so converging work is never silently discarded.
+      field(:preserve_uncommitted_work, :boolean, default: true)
+      # Also create a visible/diffable `symphony/wip/<id>` branch alongside the
+      # ref (the ref is always created when preservation runs).
+      field(:preserve_uncommitted_work_branch, :boolean, default: false)
+      # Timeout for the preservation git-shell invocation.
+      field(:cutoff_timeout_ms, :integer, default: 60_000)
       embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
       embeds_one(:claude, Claude, on_replace: :update, defaults_to_struct: true)
     end
@@ -520,7 +539,11 @@ defmodule SymphonyElixir.Config.Schema do
           :deterministic_failure_alert_threshold,
           :deterministic_failure_escalation_threshold,
           :deterministic_failure_escalation_state,
-          :max_sessions_per_issue
+          :max_sessions_per_issue,
+          :budget_pressure_turns,
+          :preserve_uncommitted_work,
+          :preserve_uncommitted_work_branch,
+          :cutoff_timeout_ms
         ],
         empty_values: []
       )
@@ -533,6 +556,8 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:deterministic_failure_alert_threshold, greater_than: 0)
       |> validate_number(:deterministic_failure_escalation_threshold, greater_than: 0)
       |> validate_number(:max_sessions_per_issue, greater_than: 0)
+      |> validate_number(:budget_pressure_turns, greater_than_or_equal_to: 0)
+      |> validate_number(:cutoff_timeout_ms, greater_than: 0)
       |> validate_thresholds_order()
       |> update_change(:max_concurrent_agents_by_state, &Schema.normalize_state_limits/1)
       |> Schema.validate_state_limits(:max_concurrent_agents_by_state)

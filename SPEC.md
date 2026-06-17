@@ -854,6 +854,15 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.max_turns`: integer, default `20`
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
+- `agent.budget_pressure_turns`: non-negative integer, default `2` — inject budget-pressure
+  steering into continuation prompts when within this many turns of `agent.max_turns`; must leave
+  >=1 actionable turn, `0` disables (see §6 continuation loop)
+- `agent.preserve_uncommitted_work`: boolean, default `true` — snapshot a dirty working tree to a
+  `refs/symphony/wip/<id>` commit before any session stop or `max_turns` cutoff (see §9.4)
+- `agent.preserve_uncommitted_work_branch`: boolean, default `false` — also create a visible
+  `symphony/wip/<id>` branch alongside the ref
+- `agent.cutoff_timeout_ms`: positive integer, default `60000` — timeout for the preservation
+  git-shell invocation
 - `agent.kind`: enum (`codex` | `claude`), default `codex`
 - `agent.codex.command`: shell command string, default `codex app-server`
 - `agent.codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
@@ -938,6 +947,15 @@ Important nuance:
 - The first turn SHOULD use the full rendered task prompt.
 - Continuation turns SHOULD send only continuation guidance to the existing thread, not resend the
   original task prompt that is already present in thread history.
+- **Budget-pressure steering (IDE-189).** When the continuation march is within
+  `agent.budget_pressure_turns` of `agent.max_turns`, the continuation guidance for the *next* turn
+  SHOULD carry an explicit directive to commit the current working state now (even if incomplete),
+  so converging work is captured before the cap forcibly stops the run. Because a prompt is atomic
+  once sent, the directive rides a turn the agent can still act on: the threshold MUST leave at
+  least one actionable turn (it is only appended while `max_turns - turn_number > 0`), and never on
+  the final turn where it would be useless. `agent.budget_pressure_turns: 0` disables this. This is
+  best-effort steering; durable correctness is guaranteed by the non-destructive cutoff (§9.4), not
+  by the agent obeying the directive.
 - Once the worker exits normally, the orchestrator still schedules a short continuation retry
   (about 1 second) so it can re-check whether the issue remains active and needs another worker
   session.
@@ -1226,6 +1244,30 @@ Failure semantics:
 - `before_run` failure or timeout is fatal to the current run attempt.
 - `after_run` failure or timeout is logged and ignored.
 - `before_remove` failure or timeout is logged and ignored.
+
+#### 9.4.1 Non-destructive cutoff (IDE-189)
+
+Distinct from `before_remove` (which fires only on workspace deletion), implementations SHOULD
+preserve uncommitted work whenever a session is stopped with a possibly-dirty tree — including stops
+that keep the workspace (Backlog/non-active stop, stall restart, dependency pause) and the
+`agent.max_turns` cutoff (which restarts a fresh session on the same workspace, so `before_remove`
+never runs). The IDE-189 regression was exactly this: an agent was stopped with converging work that
+was never committed and was therefore lost on the fresh restart.
+
+- Gated on `agent.preserve_uncommitted_work` (default `true`).
+- The snapshot MUST be non-destructive: it MUST NOT move HEAD, switch/modify the current branch, or
+  mutate the working tree (no `checkout`/`reset`/`stash`). A `git stash create` is non-conforming
+  because it silently drops *untracked* files — the IDE-189 stranded work was a new file.
+- A conforming implementation copies the index to a throwaway `GIT_INDEX_FILE`, `git add -A` (so
+  modified + staged + untracked files are all captured), `git write-tree`, then `git commit-tree`
+  parented on HEAD (omit the parent for a HEAD-less repo), and stores the result under
+  `refs/symphony/wip/<sanitized-id>`. When `agent.preserve_uncommitted_work_branch` is true, also
+  create a visible `symphony/wip/<id>` branch.
+- A clean tree (`git status --porcelain` empty) is a no-op (no empty WIP commit, no ref).
+- Preservation is best-effort: failures and timeouts (`agent.cutoff_timeout_ms`) are logged and
+  swallowed and MUST NOT block the stop or retry. Logs include `issue_id` + `issue_identifier`.
+- Operators recover preserved work with `git log refs/symphony/wip/<ID>` (or
+  `git branch --list 'symphony/wip/*'` when the branch option is enabled).
 
 ### 9.5 Safety Invariants
 
