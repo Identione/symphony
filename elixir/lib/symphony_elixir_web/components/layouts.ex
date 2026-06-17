@@ -23,6 +23,9 @@ defmodule SymphonyElixirWeb.Layouts do
         <script defer src="/vendor/cytoscape/cytoscape.min.js"></script>
         <script defer src="/vendor/dagre/dagre.min.js"></script>
         <script defer src="/vendor/cytoscape-dagre/cytoscape-dagre.js"></script>
+        <script defer src="/vendor/layout-base/layout-base.js"></script>
+        <script defer src="/vendor/cose-base/cose-base.js"></script>
+        <script defer src="/vendor/cytoscape-fcose/cytoscape-fcose.js"></script>
         <script defer src="/dashboard.js"></script>
         <script>
           window.addEventListener("DOMContentLoaded", function () {

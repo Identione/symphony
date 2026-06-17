@@ -2366,8 +2366,17 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
       }
     })
 
-    assert %{dependency_graph: [%{issue_id: ^issue_id, symphony_status: :running}]} =
-             GenServer.call(pid, :snapshot)
+    assert %{
+             dependency_graph: [
+               %{
+                 issue_id: ^issue_id,
+                 symphony_status: :running,
+                 session_id: "session-gs",
+                 workspace_path: nil,
+                 inactive_reason: nil
+               }
+             ]
+           } = GenServer.call(pid, :snapshot)
 
     seed_graph.(%{
       retry_attempts: %{
@@ -2376,26 +2385,45 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           timer_ref: nil,
           due_at_ms: System.monotonic_time(:millisecond) + 5_000,
           identifier: "GS-1",
-          error: nil
+          session_id: "session-retry",
+          workspace_path: "/workspaces/GS-1",
+          error: "agent exited: :timeout"
         }
       }
     })
 
-    assert %{dependency_graph: [%{issue_id: ^issue_id, symphony_status: :retrying}]} =
-             GenServer.call(pid, :snapshot)
+    assert %{
+             dependency_graph: [
+               %{
+                 issue_id: ^issue_id,
+                 symphony_status: :retrying,
+                 session_id: "session-retry",
+                 workspace_path: "/workspaces/GS-1",
+                 inactive_reason: "Retry 1: agent exited: :timeout"
+               }
+             ]
+           } = GenServer.call(pid, :snapshot)
 
     seed_graph.(%{
       blocked: %{
         issue_id => %{
           identifier: "GS-1",
           state: "In Progress",
+          error: "codex turn requires operator input",
           blocked_at: DateTime.utc_now()
         }
       }
     })
 
-    assert %{dependency_graph: [%{issue_id: ^issue_id, symphony_status: :blocked}]} =
-             GenServer.call(pid, :snapshot)
+    assert %{
+             dependency_graph: [
+               %{
+                 issue_id: ^issue_id,
+                 symphony_status: :blocked,
+                 inactive_reason: "codex turn requires operator input"
+               }
+             ]
+           } = GenServer.call(pid, :snapshot)
 
     seed_graph.(%{
       dependency_blocked: %{
@@ -2403,19 +2431,35 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
           identifier: "GS-1",
           title: "graph annotation issue",
           state: "Todo",
-          blocked_by: [],
+          blocked_by: [%{id: "iss-blocker", identifier: "GS-2", state: "Todo"}],
           observed_at: DateTime.utc_now()
         }
       }
     })
 
-    assert %{dependency_graph: [%{issue_id: ^issue_id, symphony_status: :waiting_on_blockers}]} =
-             GenServer.call(pid, :snapshot)
+    assert %{
+             dependency_graph: [
+               %{
+                 issue_id: ^issue_id,
+                 symphony_status: :waiting_on_blockers,
+                 inactive_reason: "Waiting on 1 blocker(s)"
+               }
+             ]
+           } = GenServer.call(pid, :snapshot)
 
     seed_graph.(%{})
 
-    assert %{dependency_graph: [%{issue_id: ^issue_id, symphony_status: nil}]} =
-             GenServer.call(pid, :snapshot)
+    assert %{
+             dependency_graph: [
+               %{
+                 issue_id: ^issue_id,
+                 symphony_status: nil,
+                 session_id: nil,
+                 workspace_path: nil,
+                 inactive_reason: "Idle — not yet dispatched"
+               }
+             ]
+           } = GenServer.call(pid, :snapshot)
   end
 
   defp graph_samples_for_stability_test(now_ms) do
