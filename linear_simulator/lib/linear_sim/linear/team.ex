@@ -7,6 +7,8 @@ defmodule LinearSim.Linear.Team do
   @foreign_key_type :string
   @timestamps_opts [type: :utc_datetime_usec]
 
+  @type t :: %__MODULE__{}
+
   schema "teams" do
     field :key, :string
     field :name, :string

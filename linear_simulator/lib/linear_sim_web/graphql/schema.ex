@@ -12,11 +12,13 @@ defmodule LinearSimWeb.GraphQL.Schema do
   import_types(LinearSimWeb.GraphQL.Types.CommonTypes)
   import_types(LinearSimWeb.GraphQL.Types.UserTypes)
   import_types(LinearSimWeb.GraphQL.Types.IssueTypes)
+  import_types(LinearSimWeb.GraphQL.Types.ProjectTypes)
   import_types(LinearSimWeb.GraphQL.Types.CommentTypes)
 
   query do
     import_fields(:viewer_queries)
     import_fields(:issue_queries)
+    import_fields(:project_queries)
 
     @desc "Simulator API version. Placeholder query used by skeleton smoke tests."
     field :api_version, non_null(:string) do

@@ -7,6 +7,8 @@ defmodule LinearSim.Linear.Project do
   @foreign_key_type :string
   @timestamps_opts [type: :utc_datetime_usec]
 
+  @type t :: %__MODULE__{}
+
   schema "projects" do
     field :name, :string
     field :slug_id, :string

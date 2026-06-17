@@ -12,6 +12,8 @@ defmodule LinearSim.Linear do
     Comment,
     Issue,
     Organization,
+    Project,
+    Team,
     User,
     WorkflowState
   }
@@ -110,6 +112,33 @@ defmodule LinearSim.Linear do
     |> Repo.one()
   end
 
+  @doc "Lists an organization's projects, optionally filtered by exact slug (slugId.eq)."
+  @spec list_projects(Organization.t() | nil, map()) :: [Project.t()]
+  def list_projects(nil, _filter), do: []
+
+  def list_projects(%Organization{} = org, filter) do
+    slug_eq = get_in(filter || %{}, [:slug_id, :eq])
+
+    Project
+    |> where([p], p.organization_id == ^org.id)
+    |> maybe_filter_slug(slug_eq)
+    |> order_by([p], asc: p.inserted_at, asc: p.id)
+    |> Repo.all()
+  end
+
+  @doc """
+  Lists the teams associated with a project. The simulator does not model
+  project↔team membership, so this returns every team in the project's
+  organization (sufficient for symphony's preflight state-coverage walk).
+  """
+  @spec list_project_teams(Project.t()) :: [Team.t()]
+  def list_project_teams(%Project{} = project) do
+    Team
+    |> where([t], t.organization_id == ^project.organization_id)
+    |> order_by([t], asc: t.inserted_at, asc: t.id)
+    |> Repo.all()
+  end
+
   @doc "Lists a team's workflow states, optionally filtered by exact name (name.eq)."
   @spec list_team_states(String.t(), String.t() | nil) :: [WorkflowState.t()]
   def list_team_states(team_id, name_eq \\ nil) do
@@ -204,6 +233,9 @@ defmodule LinearSim.Linear do
 
   defp maybe_filter_name(query, nil), do: query
   defp maybe_filter_name(query, name), do: where(query, [s], s.name == ^name)
+
+  defp maybe_filter_slug(query, nil), do: query
+  defp maybe_filter_slug(query, slug), do: where(query, [p], p.slug_id == ^slug)
 
   defp order_comments(query, :updated_at),
     do: order_by(query, [c], asc: c.updated_at, asc: c.id)
