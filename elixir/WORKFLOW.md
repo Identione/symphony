@@ -77,6 +77,28 @@ agent:
   # under the instance `run/` (survives daemon restart / `make upgrade`; wiped
   # by `make clean`) and resets when the issue leaves the active set. Default 8.
   # max_sessions_per_issue: 8
+  # Budget-pressure steering + non-destructive cutoff (IDE-189 / Layer 0).
+  # These knobs are global `agent.*` (not per-adapter): both mechanisms live in
+  # the adapter-agnostic shared turn loop / orchestrator, so codex and claude
+  # are covered identically.
+  #
+  # budget_pressure_turns: when the continuation march is within this many turns
+  # of `max_turns`, the *next* turn's prompt carries an explicit directive to
+  # commit the working state now (reusing the `commit` skill already defined in
+  # this prompt body) so converging work is captured before the cap forcibly
+  # stops the run. Must leave >=1 actionable turn; `0` disables steering.
+  # budget_pressure_turns: 2
+  # preserve_uncommitted_work: master switch for non-destructive cutoff. Before
+  # any session stop or `max_turns` cutoff, snapshot a dirty working tree to a
+  # `refs/symphony/wip/<id>` commit (captures modified + staged + UNTRACKED
+  # files via a temp-index commit-tree) without touching HEAD, the branch, or
+  # the working tree. Recover with `git log refs/symphony/wip/<ID>`.
+  # preserve_uncommitted_work: true
+  # preserve_uncommitted_work_branch: also create a visible/diffable
+  # `symphony/wip/<id>` branch alongside the ref (the ref is always created).
+  # preserve_uncommitted_work_branch: false
+  # cutoff_timeout_ms: timeout for the preservation git-shell invocation.
+  # cutoff_timeout_ms: 60000
   # Claude Agent SDK adapter (SPEC.md §10.8). Switch to `codex` to use the
   # legacy Codex App-Server adapter — the nested `agent.codex` block below
   # is preserved so the swap is one-line.

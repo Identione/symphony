@@ -1624,4 +1624,91 @@ defmodule SymphonyElixir.OrchestratorCoverageTest do
     assert Map.has_key?(state.dependency_graph, "iss-cycle-a")
     assert Map.has_key?(state.dependency_graph, "iss-cycle-b")
   end
+
+  # ── non-destructive cutoff: preserve uncommitted work (IDE-189) ───────────
+
+  # A real git workspace with one committed file plus a brand-new *untracked*
+  # file — exactly the IDE-189 shape (the stranded work was a new file). Returns
+  # the absolute workspace path.
+  defp dirty_workspace! do
+    dir = Path.join(System.tmp_dir!(), "symphony-orch-preserve-#{System.unique_integer([:positive])}")
+    File.mkdir_p!(dir)
+    on_exit(fn -> File.rm_rf(dir) end)
+
+    {_, 0} = System.cmd("git", ["init", "-q"], cd: dir, stderr_to_stdout: true)
+    {_, 0} = System.cmd("git", ["config", "user.email", "t@example.com"], cd: dir)
+    {_, 0} = System.cmd("git", ["config", "user.name", "T"], cd: dir)
+    File.write!(Path.join(dir, "tracked.txt"), "v1\n")
+    {_, 0} = System.cmd("git", ["add", "tracked.txt"], cd: dir)
+    {_, 0} = System.cmd("git", ["commit", "-q", "-m", "init"], cd: dir)
+    # Untracked new work that a stash-based snapshot would silently lose.
+    File.write!(Path.join(dir, "new_work.txt"), "stranded\n")
+
+    dir
+  end
+
+  defp git_out(dir, args) do
+    {out, _status} = System.cmd("git", args, cd: dir, stderr_to_stdout: true)
+    String.trim(out)
+  end
+
+  test "max_turns_reached DOWN preserves the dirty workspace to a WIP ref (IDE-189)" do
+    use_memory_tracker()
+    pid = start_orchestrator(:PreserveMaxTurns)
+
+    workspace = dirty_workspace!()
+    iss = issue("iss-preserve-mt", "PRES-1", state: "In Progress")
+    Application.put_env(:symphony_elixir, :memory_tracker_issues, [iss])
+
+    ref = make_ref()
+
+    seed(pid,
+      running: %{iss.id => running_entry(iss, ref: ref, workspace_path: workspace)},
+      claimed: MapSet.new([iss.id])
+    )
+
+    send(pid, {:DOWN, ref, :process, self(), {:agent_run_failed, :max_turns_reached, :max_turns_reached}})
+
+    # The retry is scheduled only after preservation has run synchronously.
+    wait_for_state(pid, fn s -> Map.has_key?(s.retry_attempts, iss.id) end, 2_000)
+
+    # Work preserved to a durable ref pointing at a commit that contains the
+    # untracked file, and the working tree is left untouched (non-destructive).
+    wip_sha = git_out(workspace, ["rev-parse", "refs/symphony/wip/pres-1"])
+    assert wip_sha =~ ~r/^[0-9a-f]{40}$/
+    assert git_out(workspace, ["ls-tree", "-r", "--name-only", wip_sha]) =~ "new_work.txt"
+    refute git_out(workspace, ["status", "--porcelain"]) == ""
+  end
+
+  test "non-active stop preserves work without deleting the workspace (IDE-189 regression)" do
+    use_memory_tracker()
+    pid = start_orchestrator(:PreserveNonActive)
+
+    workspace = dirty_workspace!()
+    iss = issue("iss-preserve-na", "PRES-2", state: "In Progress")
+
+    seed(pid,
+      running: %{iss.id => running_entry(iss, ref: make_ref(), workspace_path: workspace)},
+      claimed: MapSet.new([iss.id])
+    )
+
+    # Issue refreshes to a non-active, non-terminal state: the agent is stopped
+    # but the workspace is kept (cleanup_workspace=false) — the exact case where
+    # IDE-189 lost the work. Preservation must still capture it first.
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_issue_states_by_ids_response,
+      {:ok, [%{iss | state: "Backlog"}]}
+    )
+
+    send(pid, :run_poll_cycle)
+    wait_for_state(pid, fn s -> not Map.has_key?(s.running, iss.id) end, 2_000)
+
+    # Workspace still on disk and dirty, with the WIP ref capturing the work.
+    assert File.dir?(workspace)
+    wip_sha = git_out(workspace, ["rev-parse", "refs/symphony/wip/pres-2"])
+    assert wip_sha =~ ~r/^[0-9a-f]{40}$/
+    assert git_out(workspace, ["ls-tree", "-r", "--name-only", wip_sha]) =~ "new_work.txt"
+    refute git_out(workspace, ["status", "--porcelain"]) == ""
+  end
 end

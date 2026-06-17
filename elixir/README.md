@@ -185,6 +185,19 @@ repo:
   known good workflow.
 - `agent.max_turns` caps continuation turns per agent invocation when the
   issue stays in an active state after a turn ends normally. Default: `20`.
+- `agent.budget_pressure_turns` (default `2`) injects budget-pressure steering
+  into the continuation prompt when the run is within this many turns of
+  `agent.max_turns`: the next turn's guidance tells the agent to commit its
+  working state now (via the `commit` skill) before the cap stops the run. Must
+  leave ≥1 actionable turn; `0` disables.
+- `agent.preserve_uncommitted_work` (default `true`) is a non-destructive
+  cutoff: before any session stop (including a Backlog/non-active stop that
+  keeps the workspace) or the `max_turns` cutoff, Symphony snapshots a dirty
+  working tree — modified, staged, **and untracked** files — to a
+  `refs/symphony/wip/<id>` commit without touching HEAD, the branch, or the
+  working tree. Recover stranded work with `git log refs/symphony/wip/<ID>` (or
+  `git branch --list 'symphony/wip/*'` when `agent.preserve_uncommitted_work_branch`
+  is enabled). The git-shell timeout is `agent.cutoff_timeout_ms` (default `60000`).
 - `agent.codex.quota` / `agent.claude.quota` (both OPTIONAL, disabled by
   default) add account-quota-aware dispatch pausing: when `enabled`, Symphony
   stops dispatching *new* issues while the active provider's usage is at/above

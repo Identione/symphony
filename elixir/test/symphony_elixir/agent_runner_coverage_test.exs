@@ -104,6 +104,16 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
     )
   end
 
+  # Collect every prompt the StubAdapter forwarded via {:stub_run_turn, prompt},
+  # in turn order, so a test can inspect per-turn continuation prompts.
+  defp drain_turn_prompts(acc \\ []) do
+    receive do
+      {:stub_run_turn, prompt} -> drain_turn_prompts([prompt | acc])
+    after
+      0 -> Enum.reverse(acc)
+    end
+  end
+
   defp issue(state \\ "In Progress") do
     %Issue{
       id: "issue-cov-1",
@@ -387,6 +397,73 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
       assert_received {:stub_run_turn, _prompt}
       refute_received {:stub_run_turn, _other}
       assert_received :stub_stop_session
+    end
+  end
+
+  describe "budget-pressure steering (IDE-189)" do
+    test "append_budget_pressure_directive/2 appends a pluralized directive when turns remain" do
+      prompt = AgentRunner.append_budget_pressure_directive("BASE", 2)
+
+      assert prompt =~ "Budget-pressure guidance (IMPORTANT):"
+      assert prompt =~ "only 2 continuation turns left"
+      assert prompt =~ "`commit` skill"
+      # The base prompt is preserved verbatim, before the directive.
+      assert String.starts_with?(prompt, "BASE")
+    end
+
+    test "append_budget_pressure_directive/2 uses singular wording for the last actionable turn" do
+      prompt = AgentRunner.append_budget_pressure_directive("BASE", 1)
+
+      assert prompt =~ "only 1 continuation turn left"
+      refute prompt =~ "continuation turns left"
+    end
+
+    test "append_budget_pressure_directive/2 is a no-op when turns_left is 0" do
+      assert AgentRunner.append_budget_pressure_directive("BASE", 0) == "BASE"
+    end
+
+    test "run/3 injects the directive on near-cap continuation turns but not the final turn" do
+      ctx = setup_workspace!()
+      # max_turns: 3 with the default budget_pressure_turns (2):
+      #   turn 2 -> turns_left 1 -> directive; turn 3 -> turns_left 0 -> none.
+      write_stub_workflow!(ctx, max_turns: 3)
+
+      # Issue stays active across every refresh so the run marches to the cap.
+      fetcher = fn ["issue-cov-1"] -> {:ok, [issue()]} end
+
+      catch_exit(
+        AgentRunner.run(issue(), nil,
+          adapter: StubAdapter,
+          issue_state_fetcher: fetcher
+        )
+      )
+
+      prompts = drain_turn_prompts()
+      assert length(prompts) == 3
+
+      [_turn1, turn2, turn3] = prompts
+      assert turn2 =~ "Budget-pressure guidance (IMPORTANT):"
+      assert turn2 =~ "only 1 continuation turn left"
+      refute turn3 =~ "Budget-pressure guidance"
+    end
+
+    test "run/3 does not inject the directive far from the cap" do
+      ctx = setup_workspace!()
+      # max_turns: 5, default K=2: turns 2-3 have turns_left 3/2; only turn 3
+      # (turns_left 2) is within K, turn 2 (turns_left 3) is not.
+      write_stub_workflow!(ctx, max_turns: 5)
+
+      fetcher = fn ["issue-cov-1"] -> {:ok, [issue()]} end
+
+      catch_exit(
+        AgentRunner.run(issue(), nil,
+          adapter: StubAdapter,
+          issue_state_fetcher: fetcher
+        )
+      )
+
+      [_turn1, turn2 | _rest] = drain_turn_prompts()
+      refute turn2 =~ "Budget-pressure guidance"
     end
   end
 

@@ -365,7 +365,7 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
-    """
+    base = """
     Continuation guidance:
 
     - The previous Codex turn completed normally, but the Linear issue is still in an active state.
@@ -373,6 +373,48 @@ defmodule SymphonyElixir.AgentRunner do
     - Resume from the current workspace and workpad state instead of restarting from scratch.
     - The original task instructions and prior turn context are already present in this thread, so do not restate them before acting.
     - Focus on the remaining ticket work and do not end the turn while the issue stays active unless you are truly blocked.
+    """
+
+    k = Config.budget_pressure_turns()
+    turns_left = max_turns - turn_number
+
+    if turns_left > 0 and turns_left <= k,
+      do: append_budget_pressure_directive(base, turns_left),
+      else: base
+  end
+
+  # Budget-pressure steering (IDE-189 / Layer 0). When the orchestrator's
+  # continuation march is within `agent.budget_pressure_turns` of the
+  # `agent.max_turns` cap, the *next* turn's prompt carries an explicit
+  # directive to commit the working state now, so converging work is captured
+  # before the cap forcibly stops the run. The prompt is atomic once sent, so
+  # the directive must ride a turn the agent can still act on — `turns_left > 0`
+  # guarantees we never append on the useless final turn.
+  #
+  # This is a `@doc false` public seam mirroring
+  # `prepend_resume_after_block_directive/2`: Layer 2 reuses it (and may add
+  # sibling `append_*_directive/2` functions following the same shape) so the
+  # continuation branch becomes a small append/prepend composition pipeline
+  # without re-touching the threshold logic above.
+  @doc false
+  @spec append_budget_pressure_directive(String.t(), non_neg_integer()) :: String.t()
+  def append_budget_pressure_directive(prompt, turns_left)
+      when is_binary(prompt) and is_integer(turns_left) and turns_left > 0 do
+    prompt <> "\n\n" <> budget_pressure_directive(turns_left)
+  end
+
+  def append_budget_pressure_directive(prompt, _turns_left) when is_binary(prompt), do: prompt
+
+  defp budget_pressure_directive(turns_left) do
+    turn_word = if turns_left == 1, do: "turn", else: "turns"
+
+    """
+    Budget-pressure guidance (IMPORTANT):
+
+    - You have only #{turns_left} continuation #{turn_word} left before this run is forcibly stopped.
+    - Commit your current working state NOW using the `commit` skill, even if incomplete — partial committed progress beats losing uncommitted work at the cap.
+    - Do not start work you cannot finish AND commit in the remaining #{turn_word}.
+    - If everything is already committed, continue normally.
     """
   end
 

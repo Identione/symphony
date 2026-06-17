@@ -14,6 +14,8 @@ Symphony's coding-agent runtime is pluggable (SPEC.md §10). Two adapters ship w
 
 Either adapter can opt into account-quota-aware dispatch pausing (`agent.<provider>.quota`, off by default): Symphony surfaces provider usage on the dashboard and, when enabled, stops dispatching new work while usage is near the account limit — see SPEC.md §5.3.5.3.
 
+When a run approaches its continuation cap (`agent.max_turns`), Symphony steers the agent to commit its in-progress work, and — as a safety net independent of whether the agent obeys — non-destructively snapshots any uncommitted work (modified, staged, and untracked files) to a `refs/symphony/wip/<id>` commit before stopping the session, so converging work is never silently discarded. See SPEC.md §6 and §9.4.1.
+
 > [!WARNING]
 > Symphony is a low-key engineering preview for testing in trusted environments.
 
