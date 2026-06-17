@@ -1349,6 +1349,12 @@ Optional client-side tool extension:
   - invalid input, missing auth, or transport failure -> `success=false` with an error payload
 - Return the GraphQL response or error payload as structured tool output that the model can
   inspect in-session.
+- Implementations MAY attach a corrective `hint` (in the error payload) or `symphony_hint` (in a
+  200-body carrying `errors`) for known, recurring mistake classes, alongside — never replacing —
+  the verbatim `errors[]`. The tool MUST NOT rewrite the agent's call. (Reference implementation:
+  the `IssueRelationType` enum has only `blocks`; `blocked_by` is rejected at variable coercion, so
+  the hint explains that direction is encoded by operand order and the agent must swap
+  `issueId`/`relatedIssueId` rather than change the type value.)
 
 User-input-required policy:
 

@@ -309,6 +309,109 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
            }
   end
 
+  test "linear_graphql hints IssueRelationType enum coercion errors without rewriting (HTTP 400)" do
+    # Literal symptom (2026-06-17): a batched issueRelationCreate aliased two
+    # relations; $input2 used the non-existent enum value "blocked_by". Linear
+    # rejected it at variable-value coercion (BAD_USER_INPUT, HTTP 400).
+    body = %{
+      "errors" => [
+        %{
+          "message" =>
+            ~s|Variable "$input2" got invalid value "blocked_by" at "input2.type"; | <>
+              ~s|Value "blocked_by" does not exist in "IssueRelationType" enum. | <>
+              ~s|Did you mean the enum value "blocks"?|,
+          "extensions" => %{"code" => "BAD_USER_INPUT"}
+        }
+      ]
+    }
+
+    result =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{
+          "query" => "mutation { input2: issueRelationCreate(input: {issueId: \"A\", relatedIssueId: \"B\", type: \"blocked_by\"}) { success } }"
+        },
+        linear_client: fn _q, _v, _opts -> {:error, {:linear_api_status, 400, body}} end
+      )
+
+    assert result["success"] == false
+    decoded = Jason.decode!(result["output"])
+    assert decoded["error"]["status"] == 400
+
+    # Verbatim forwarding is preserved alongside the hint.
+    assert hd(decoded["error"]["errors"])["message"] =~
+             "Value \"blocked_by\" does not exist in \"IssueRelationType\" enum"
+
+    # An actionable hint is attached.
+    hints = decoded["error"]["hint"]
+    assert is_list(hints)
+    hint = Enum.join(hints, "\n")
+    assert hint =~ "only `blocks`"
+    assert hint =~ "no `blocked_by`"
+    assert hint =~ "swap the operands"
+    assert hint =~ ~s(type: "blocks")
+
+    # P3 is deliberately NOT auto-rewritten: the rejected value is still
+    # present verbatim (no silent substitution to "blocks"), and the hint tells
+    # the agent to swap operands rather than presenting a corrected mutation.
+    refute decoded["error"]["errors"] |> hd() |> Map.has_key?("rewritten")
+    assert hint =~ "swap"
+    refute hint =~ "we have corrected"
+  end
+
+  test "linear_graphql hints IssueRelationType enum coercion errors on HTTP 200 bodies" do
+    body = %{
+      "data" => nil,
+      "errors" => [
+        %{
+          "message" => "Value \"blocked_by\" does not exist in \"IssueRelationType\" enum.",
+          "extensions" => %{"code" => "BAD_USER_INPUT"}
+        }
+      ]
+    }
+
+    result =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{"query" => "mutation { issueRelationCreate(input: {type: \"blocked_by\"}) { success } }"},
+        linear_client: fn _q, _v, _opts -> {:ok, body} end
+      )
+
+    assert result["success"] == false
+    decoded = Jason.decode!(result["output"])
+
+    # Linear's data/errors stay verbatim; the hint lands under a namespaced key.
+    assert decoded["data"] == nil
+    assert is_list(decoded["errors"])
+    hints = decoded["symphony_hint"]
+    assert is_list(hints)
+    assert Enum.join(hints, "\n") =~ "swap the operands"
+  end
+
+  test "linear_graphql does not attach IssueRelationType hints to unrelated errors" do
+    # A GRAPHQL_VALIDATION_FAILED error (distinct class) must not trigger the
+    # enum hint — no false positives.
+    body = %{
+      "errors" => [
+        %{
+          "message" => "Cannot query field \"resolved\" on type \"Comment\". Did you mean \"resolvedAt\"?",
+          "extensions" => %{"code" => "GRAPHQL_VALIDATION_FAILED"}
+        }
+      ]
+    }
+
+    result =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{"query" => "query { issue(id: \"X\") { comments { nodes { resolved } } } }"},
+        linear_client: fn _q, _v, _opts -> {:error, {:linear_api_status, 400, body}} end
+      )
+
+    decoded = Jason.decode!(result["output"])
+    refute Map.has_key?(decoded["error"], "hint")
+    refute Map.has_key?(decoded, "symphony_hint")
+  end
+
   test "linear_graphql formats unexpected failures from the client" do
     response =
       DynamicTool.execute(

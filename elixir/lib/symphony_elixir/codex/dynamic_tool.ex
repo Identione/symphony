@@ -26,6 +26,30 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     }
   }
 
+  # Corrective hints attached to Linear GraphQL `errors[]` for known,
+  # recurring mistake classes. Each rule matches an error `message` and adds an
+  # actionable hint *alongside* the verbatim `errors[]` — we never rewrite the
+  # agent's call. For the `IssueRelationType` enum case the intended direction is
+  # genuinely unknowable from the failed request (the bad value lives in the
+  # `variables` payload), so auto-substituting `blocks` could silently invert the
+  # dependency. Hint, never rewrite.
+  #
+  # Live-API fact (authoritative — do not "correct" against stale docs):
+  # `IssueRelationType` has NO `blocked_by` member. The only directional value is
+  # `blocks`; direction is encoded purely by operand order.
+  @linear_error_hint_rules [
+    %{
+      match: ~r/does not exist in "IssueRelationType" enum/,
+      hint:
+        ~s|IssueRelationType has only `blocks` — there is no `blocked_by` member. | <>
+          ~s|Direction is expressed by operand order, never by a type value: | <>
+          ~s|issueRelationCreate(input: { issueId, relatedIssueId, type: "blocks" }) | <>
+          ~s|means issueId BLOCKS relatedIssueId. To express "A is blocked by B", | <>
+          ~s|swap the operands: set issueId to B and relatedIssueId to A, with | <>
+          ~s|type "blocks". Do not pass "blocked_by".|
+    }
+  ]
+
   @spec execute(String.t() | nil, term(), keyword()) :: map()
   def execute(tool, arguments, opts \\ []) do
     case tool do
@@ -111,14 +135,25 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   end
 
   defp graphql_response(response) do
-    success =
+    errors =
       case response do
-        %{"errors" => errors} when is_list(errors) and errors != [] -> false
-        %{errors: errors} when is_list(errors) and errors != [] -> false
-        _ -> true
+        %{"errors" => errors} when is_list(errors) and errors != [] -> errors
+        %{errors: errors} when is_list(errors) and errors != [] -> errors
+        _ -> []
       end
 
-    dynamic_tool_response(success, encode_payload(response))
+    success = errors == []
+
+    # Even on HTTP 200 Linear can return `errors[]` (partial/execution errors).
+    # Attach corrective hints under a namespaced key so Linear's `data`/`errors`
+    # stay verbatim.
+    payload =
+      case linear_error_hints(errors) do
+        [] -> response
+        hints -> Map.put(response, "symphony_hint", hints)
+      end
+
+    dynamic_tool_response(success, encode_payload(payload))
   end
 
   defp failure_response(payload) do
@@ -187,8 +222,13 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     # only sees "HTTP 400" with no actionable detail.
     error =
       case body do
-        %{"errors" => [_ | _] = errors} -> Map.put(base, "errors", errors)
-        _ -> base
+        %{"errors" => [_ | _] = errors} ->
+          base
+          |> Map.put("errors", errors)
+          |> maybe_put_hint(linear_error_hints(errors))
+
+        _ ->
+          base
       end
 
     %{"error" => error}
@@ -219,6 +259,27 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       }
     }
   end
+
+  defp maybe_put_hint(map, []), do: map
+  defp maybe_put_hint(map, hints), do: Map.put(map, "hint", hints)
+
+  # Scans an `errors[]` list against `@linear_error_hint_rules` and returns the
+  # de-duplicated list of matching corrective hints (or `[]`). Handles string-
+  # and atom-keyed error maps, mirroring `graphql_response/1`.
+  defp linear_error_hints(errors) when is_list(errors) do
+    messages = Enum.map(errors, &error_message/1)
+
+    @linear_error_hint_rules
+    |> Enum.filter(fn rule -> Enum.any?(messages, &Regex.match?(rule.match, &1)) end)
+    |> Enum.map(& &1.hint)
+    |> Enum.uniq()
+  end
+
+  defp linear_error_hints(_errors), do: []
+
+  defp error_message(%{"message" => message}) when is_binary(message), do: message
+  defp error_message(%{message: message}) when is_binary(message), do: message
+  defp error_message(_error), do: ""
 
   defp supported_tool_names do
     Enum.map(tool_specs(), & &1["name"])
