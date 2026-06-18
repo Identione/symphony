@@ -26,13 +26,20 @@ Derived status (most→least severe) and an independent flag, with
 `K = agent.progress_signal_window_k`:
 
 ```
-:oscillating     last 4 hashes are A,B,A,B with A != B
+:oscillating     current hash reappears from earlier in a bounded window
+                 (revisit detection), excluding the immediately-previous turn
 :repeated_error  error_sig != nil AND its streak >= K
 :stuck_state     identical hash for >= K turns AND the tree is empty
 :progressing     otherwise
 
 at_risk_no_commits = commits_since == 0 AND turn_count >= K
 ```
+
+**Revisit (cycle) detection (IDE-230).** A naive period-2 rule (`A,B,A,B`) misses
+longer cycles like `A→B→C→A→B→C`. Instead a bounded ring of the last
+`agent.progress_signal_revisit_window` content hashes is kept, and the turn is
+`:oscillating` when the current hash reappears from earlier in the window
+(excluding the immediately-previous turn, which is the `:stuck_state` domain).
 
 ## The empty-tree guard (the IDE-189 lesson)
 
@@ -66,6 +73,15 @@ status in [:stuck_state, :oscillating, :repeated_error]
 OR (at_risk_no_commits AND turn_count >= agent.progress_trigger_min_turns)
 ```
 
+**IDE-230 worker-side consumption.** When the Layer-2 turn-budget controller
+(§13.6 / [token_exhaustion.md](token_exhaustion.md)) is armed, the worker also
+runs this same probe at each turn boundary and feeds the assessment into a
+run-scoped consecutive-fail **streak** (held in `Overseer.Session`): a tripping
+turn increments it, a passing turn resets it to 0, a probe error leaves it
+unchanged. The streak is what pulls a Layer-2 LLM consult forward once it reaches
+`agent.overseer.streak_to_llm`. The reporting contract above is unchanged — Layer
+1 still only *reports*; the binding decision stays in Layer 2.
+
 ## Config knobs (`agent.*`)
 
 These are global `agent.*` (not per-adapter) because the signals live in the
@@ -76,6 +92,7 @@ construction.
 | -- | -- | -- |
 | `progress_signal_enabled` | `true` | master switch for the probe + assessment |
 | `progress_signal_window_k` | `4` | window `K`; validated `>= 2`. Tuned from the IDE-189 replay: fires by turn 4 of a 20-turn budget (early enough to warn, late enough to avoid noise on a normal 2–3 turn issue) and never trips `:stuck_state` on IDE-189's dirty tree |
+| `progress_signal_revisit_window` | `10` | size of the bounded ring used for `:oscillating` revisit detection; validated `>= 2` |
 | `progress_signal_git_timeout_ms` | `2000` | per-turn probe timeout; a slow/locked repo degrades to "unknown" (assessment unchanged) |
 | `progress_trigger_min_turns` | `4` | turn floor for the `at_risk_no_commits` arm of `trigger?/2`; validated `>= 1` |
 

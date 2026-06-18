@@ -74,6 +74,33 @@ defmodule SymphonyElixir.ProgressSignalTest do
       assert state.assessment.status == :oscillating
     end
 
+    test ":oscillating on a period-3 cycle A,B,C,A,B,C (IDE-230 revisit detection)" do
+      # A naive period-2 rule sees only distinct consecutive hashes here and
+      # misses the cycle. Revisit detection flags the turn the prior state
+      # reappears from earlier in the window.
+      seq =
+        for {h, t} <- Enum.with_index(~w(a b c a b c), 1), do: {h, false, t, nil}
+
+      state = run(seq, settings(%{progress_signal_revisit_window: 10}))
+      assert state.assessment.status == :oscillating
+    end
+
+    test "an identical *immediately-previous* hash stays in the :stuck domain, not :oscillating" do
+      # current == prev is the stuck/held-tree domain; revisit detection
+      # explicitly excludes it so a held tree isn't misread as a cycle.
+      seq = [{"a", false, 1, nil}, {"b", false, 1, nil}, {"b", false, 1, nil}]
+      state = run(seq, settings(%{progress_signal_revisit_window: 10}))
+      refute state.assessment.status == :oscillating
+    end
+
+    test "a revisit older than the bounded window is not flagged" do
+      # window=2 only retains [current, prev]; the earlier "a" has fallen out so
+      # the returning "a" can't be detected as a revisit.
+      seq = [{"a", false, 1, nil}, {"b", false, 1, nil}, {"c", false, 1, nil}, {"a", false, 1, nil}]
+      state = run(seq, settings(%{progress_signal_revisit_window: 2}))
+      refute state.assessment.status == :oscillating
+    end
+
     test ":repeated_error once the same signature streaks to K" do
       seq = List.duplicate({"h", false, 1, {:claude, :invalid_request}}, 4)
       state = run(seq, settings())

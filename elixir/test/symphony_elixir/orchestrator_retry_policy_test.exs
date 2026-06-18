@@ -87,11 +87,21 @@ defmodule SymphonyElixir.OrchestratorRetryPolicyTest do
       assert {:retry, 900_000} = RetryPolicy.decide(:overloaded, 1, 5_000_000, nil)
     end
 
-    test "context_window_exhausted, quota_exceeded, invalid_request, budget_exhausted never retry" do
-      for code <- [:context_window_exhausted, :quota_exceeded, :invalid_request, :budget_exhausted] do
+    test "context_window_exhausted, quota_exceeded, invalid_request, budget_exhausted, overseer_escalation never retry" do
+      for code <- [
+            :context_window_exhausted,
+            :quota_exceeded,
+            :invalid_request,
+            :budget_exhausted,
+            :overseer_escalation
+          ] do
         assert RetryPolicy.decide(code, 1, nil, nil) == :no_retry, "code=#{code}"
         assert RetryPolicy.decide(code, 7, 60_000, nil) == :no_retry, "code=#{code} retry_after"
       end
+
+      # IDE-230: :overseer_escalation must be a recognized code (not silently
+      # routed through the :unknown backoff fallback).
+      assert :overseer_escalation in RetryPolicy.recognized_codes()
     end
 
     test "unknown code falls back to the historical exponential backoff" do

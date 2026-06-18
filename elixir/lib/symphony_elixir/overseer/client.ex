@@ -34,7 +34,19 @@ defmodule SymphonyElixir.Overseer.Client do
         "enum" => ["continue", "nudge", "recommend_extend_budget", "escalate", "abort"]
       },
       "steering_message" => %{"type" => ["string", "null"]},
-      "rationale" => %{"type" => "string"}
+      "rationale" => %{"type" => "string"},
+      # Optional structured supporting findings (IDE-230). Populated on a hard
+      # give-up (escalate/abort) so the Linear escalation comment carries a
+      # human-triage brief; null/absent otherwise.
+      "findings" => %{
+        "type" => ["object", "null"],
+        "additionalProperties" => false,
+        "properties" => %{
+          "summary" => %{"type" => "string"},
+          "blockers" => %{"type" => "array", "items" => %{"type" => "string"}},
+          "next_steps_for_human" => %{"type" => "array", "items" => %{"type" => "string"}}
+        }
+      }
     }
   }
 

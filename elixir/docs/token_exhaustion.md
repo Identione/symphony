@@ -141,7 +141,8 @@ opaque too — the OS exit code is forwarded but never inspected.
 |---|---|---|---|
 | Context-window exhaustion | `turn/failed` with a `params.error` describing context length | `{:error, {:turn_failed, params}}` | Only by inspecting `params` content |
 | Per-turn output cap | `turn/completed` (Codex doesn't crash; the model just stops) | `{:ok, :turn_completed}` | No structured signal at the adapter — token-usage events (`elixir/docs/token_accounting.md`) are the only hint |
-| `agent.max_turns` (Symphony-level) | n/a — orchestrator-side cap | `exit({:agent_run_failed, :max_turns_reached, :max_turns_reached})` from `AgentRunner.run/3` (IDE-74) | Yes — flows through the IDE-73 deterministic-failure counter (workpad alert at N, escalation at M); retry cadence is 1s constant via `RetryPolicy` |
+| Turn-budget cap (Symphony-level) | n/a — Layer-2 controller / absolute ceiling (IDE-230) | `exit({:agent_run_failed, :max_turns_reached, :max_turns_reached})` from `AgentRunner.run/3` (IDE-74) | Yes — absolute ceiling (`agent.overseer.absolute_max_turns`) or keyless fallback (`agent.max_turns`); flows through the IDE-73 counter; retry cadence 1s constant via `RetryPolicy` |
+| Overseer hard give-up (Symphony-level) | n/a — Layer-2 `escalate`/`abort` verdict (IDE-230) | `exit({:agent_run_failed, :overseer_escalation, {:overseer_escalation, rationale}})` from `AgentRunner.run/3` | Yes — `:no_retry` + immediate escalation to Human Review with structured `findings` |
 | Account/quota | `turn/failed` or `codex/event/error` with HTTP 429/402 in `params` | `{:error, {:turn_failed, …}}` or `{:error, {:codex_error_notification, …}}` | Substring match on `inspect(params)` only |
 | Rate limit (transient) | Same as quota | Same as quota | **Indistinguishable from quota exhaustion** |
 | Codex CLI crash / `bash` exit | Port `:exit_status` (any code) | `{:error, {:port_exit, status}}` | Status forwarded but not interpreted; clean shutdown (`status=0`) and crash (`status!=0`) coalesce by the time orchestrator sees them |
@@ -210,21 +211,30 @@ terminates the worker and re-schedules a retry with the same backoff
 events for 5 min is therefore reaped even if it would have eventually
 returned.
 
-`agent.max_turns` (default 20, `config/schema.ex:280`) is enforced inside
-`AgentRunner.handle_turn_continuation/3`. When the cap is hit while the
-issue is still active, `AgentRunner` returns `:max_turns_reached` from
-the turn loop and `run/3` exits with
-`{:agent_run_failed, :max_turns_reached, :max_turns_reached}` (IDE-74).
-The orchestrator's `:DOWN` handler picks up the structured code and runs
-it through the same IDE-73 deterministic-failure pipeline that handles
-`:quota_exceeded` / `:context_window_exhausted` / etc., so consecutive
-cap-hits advance the per-issue counter and surface a workpad alert once
-`agent.deterministic_failure_alert_threshold` is crossed (and move the
-issue out of the active set once
-`agent.deterministic_failure_escalation_threshold` is crossed). The
-retry cadence between cap-hits matches the existing `:normal`-exit
-continuation delay (1 second constant, set via the `:max_turns_reached`
-entry in `Orchestrator.RetryPolicy`).
+**Turn budget (IDE-230).** A single governed session runs turns
+1…`agent.overseer.absolute_max_turns` (default 500); the Layer-2 overseer
+turn-budget controller (SPEC §13.6) decides at each turn boundary whether
+the run may continue. `agent.max_turns` (default 20) is **no longer the
+active cutoff** — it survives only as the *keyless-fallback* ceiling: when
+the overseer is disabled, unkeyed, or out of call budget, the run caps
+there (and posts exactly one "could not judge" comment, post-once) rather
+than auto-extending. Two terminal turn-budget outcomes flow into the IDE-73
+pipeline:
+
+- `:max_turns_reached` — hitting the absolute ceiling or the keyless cap.
+  After a graceful wind-down turn (commit + workpad update), `run/3` exits
+  `{:agent_run_failed, :max_turns_reached, :max_turns_reached}` (IDE-74).
+  Consecutive cap-hits advance the per-issue counter (workpad alert at
+  `agent.deterministic_failure_alert_threshold`, escalation at
+  `agent.deterministic_failure_escalation_threshold`); the retry cadence is
+  the 1 s constant set via the `:max_turns_reached` `RetryPolicy` entry.
+- `:overseer_escalation` — the overseer issued a hard give-up
+  (`escalate`/`abort`). After the wind-down turn, `run/3` exits
+  `{:agent_run_failed, :overseer_escalation, {:overseer_escalation, rationale}}`.
+  This code is **`:no_retry`** and immediate-escalation: it moves the issue
+  to `agent.deterministic_failure_escalation_state` (Human Review) on the
+  first occurrence, with the LLM's structured `findings` in the comment.
+  The orchestrator fires `preserve_uncommitted_work` on this code too.
 
 ## Logging Conformance
 
@@ -267,7 +277,8 @@ visibility gap.**
 After `agent.deterministic_failure_alert_threshold` (default 3) consecutive
 failures carrying the same structured `error_code` (IDE-71 taxonomy —
 `quota_exceeded`, `context_window_exhausted`, `invalid_request`,
-`claude_sidecar_exit`, `port_exit`, `max_turns_reached`, `budget_exhausted`),
+`claude_sidecar_exit`, `port_exit`, `max_turns_reached`, `budget_exhausted`,
+`overseer_escalation`),
 `SymphonyElixir.DeterministicFailure`
 appends a summary section to the existing `## Symphony Workpad` comment —
 or, if no workpad is found, posts a standalone blocker comment in line

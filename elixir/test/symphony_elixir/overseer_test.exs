@@ -115,6 +115,41 @@ defmodule SymphonyElixir.OverseerTest do
     test "rejects a non-map" do
       assert {:error, :overseer_verdict_not_a_map} = Overseer.parse("nope")
     end
+
+    test "normalizes a well-formed findings object (IDE-230)" do
+      raw = %{
+        "verdict" => "blocked",
+        "confidence" => 0.9,
+        "recommended_action" => "escalate",
+        "steering_message" => nil,
+        "rationale" => "needs a human",
+        "findings" => %{
+          "summary" => "missing upstream credentials",
+          "blockers" => ["no API key", "repo not provisioned", 42],
+          "next_steps_for_human" => ["grant credentials"]
+        }
+      }
+
+      assert {:ok, %{findings: findings}} = Overseer.parse(raw)
+      assert findings.summary == "missing upstream credentials"
+      # non-string list elements are filtered out
+      assert findings.blockers == ["no API key", "repo not provisioned"]
+      assert findings.next_steps_for_human == ["grant credentials"]
+    end
+
+    test "absent or malformed findings collapse to nil without failing the parse" do
+      base = %{
+        "verdict" => "converging",
+        "confidence" => 0.8,
+        "recommended_action" => "continue",
+        "steering_message" => nil,
+        "rationale" => "ok"
+      }
+
+      assert {:ok, %{findings: nil}} = Overseer.parse(base)
+      assert {:ok, %{findings: nil}} = Overseer.parse(Map.put(base, "findings", nil))
+      assert {:ok, %{findings: nil}} = Overseer.parse(Map.put(base, "findings", "not-an-object"))
+    end
   end
 
   describe "decide_action/2" do

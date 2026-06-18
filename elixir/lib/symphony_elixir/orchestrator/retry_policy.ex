@@ -32,6 +32,7 @@ defmodule SymphonyElixir.Orchestrator.RetryPolicy do
     invalid_request
     budget_exhausted
     max_turns_reached
+    overseer_escalation
     unknown
   )a
 
@@ -101,8 +102,19 @@ defmodule SymphonyElixir.Orchestrator.RetryPolicy do
   defp built_in_for(:overloaded, cap),
     do: %{strategy: :backoff, base_ms: 30_000, max_ms: max(cap, 900_000), honor_retry_after: true}
 
+  # IDE-230: `:overseer_escalation` is a high-confidence Layer-2 verdict that a
+  # human is needed now (thrashing / blocked). Retrying would burn another full
+  # session against a run the overseer already judged unsalvageable, so it is a
+  # hard `:no_retry` — the deterministic-failure path moves the issue to Human
+  # Review on the first occurrence.
   defp built_in_for(code, _cap)
-       when code in [:context_window_exhausted, :quota_exceeded, :invalid_request, :budget_exhausted],
+       when code in [
+              :context_window_exhausted,
+              :quota_exceeded,
+              :invalid_request,
+              :budget_exhausted,
+              :overseer_escalation
+            ],
        do: %{strategy: :no_retry, base_ms: 0, max_ms: 0, honor_retry_after: false}
 
   # IDE-74: max_turns_reached is the "ran out of agent.max_turns budget" signal.

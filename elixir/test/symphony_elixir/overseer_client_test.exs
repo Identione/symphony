@@ -119,4 +119,16 @@ defmodule SymphonyElixir.Overseer.ClientTest do
     assert Enum.sort(schema["required"]) ==
              Enum.sort(["verdict", "confidence", "recommended_action", "steering_message", "rationale"])
   end
+
+  test "exposes an optional findings object (IDE-230) that is not required" do
+    schema = Client.verdict_tool_schema()
+    findings = schema["properties"]["findings"]
+
+    assert findings["type"] == ["object", "null"]
+    assert Map.has_key?(findings["properties"], "summary")
+    assert Map.has_key?(findings["properties"], "blockers")
+    assert Map.has_key?(findings["properties"], "next_steps_for_human")
+    # findings stays optional — the give-up triage brief is best-effort.
+    refute "findings" in schema["required"]
+  end
 end

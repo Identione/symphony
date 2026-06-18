@@ -28,13 +28,24 @@ defmodule SymphonyElixir.Overseer do
   @verdicts ~w(converging thrashing blocked)
   @actions ~w(continue nudge recommend_extend_budget escalate abort)
 
+  @typedoc """
+  Optional structured supporting findings (IDE-230) carried on a hard give-up so
+  the escalation comment can present a human-triage brief.
+  """
+  @type findings :: %{
+          summary: String.t() | nil,
+          blockers: [String.t()],
+          next_steps_for_human: [String.t()]
+        }
+
   @typedoc "Parsed, validated verdict (atomized enums)."
   @type verdict :: %{
           verdict: atom(),
           confidence: float(),
           recommended_action: atom(),
           steering_message: String.t() | nil,
-          rationale: String.t()
+          rationale: String.t(),
+          findings: findings() | nil
         }
 
   @typedoc "Trigger context supplied by the worker at a turn boundary."
@@ -114,7 +125,8 @@ defmodule SymphonyElixir.Overseer do
          confidence: confidence,
          recommended_action: action_atom(action),
          steering_message: steering,
-         rationale: rationale
+         rationale: rationale,
+         findings: findings(raw)
        }}
     end
   end
@@ -206,6 +218,42 @@ defmodule SymphonyElixir.Overseer do
       nil -> {:ok, nil}
       value when is_binary(value) -> {:ok, value}
       _ -> {:error, {:overseer_bad_field, "steering_message"}}
+    end
+  end
+
+  # `findings` is optional and best-effort: a well-formed object is normalized to
+  # the atom-keyed `t:findings/0` shape; absent / null / a non-object / a
+  # malformed object all collapse to `nil` rather than failing the parse (the
+  # findings are advisory triage content, not a hard contract). String-typed
+  # subfields survive; anything else in a subfield is dropped.
+  @spec findings(map()) :: findings() | nil
+  defp findings(raw) do
+    case Map.get(raw, "findings") do
+      obj when is_map(obj) ->
+        %{
+          summary: optional_string(obj, "summary"),
+          blockers: string_list(obj, "blockers"),
+          next_steps_for_human: string_list(obj, "next_steps_for_human")
+        }
+
+      _ ->
+        nil
+    end
+  end
+
+  @spec optional_string(map(), String.t()) :: String.t() | nil
+  defp optional_string(obj, key) do
+    case Map.get(obj, key) do
+      value when is_binary(value) -> value
+      _ -> nil
+    end
+  end
+
+  @spec string_list(map(), String.t()) :: [String.t()]
+  defp string_list(obj, key) do
+    case Map.get(obj, key) do
+      list when is_list(list) -> Enum.filter(list, &is_binary/1)
+      _ -> []
     end
   end
 end

@@ -476,9 +476,11 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
-      # Master switch (opt-in). When false the overseer never runs and the turn
-      # loop is byte-for-byte unchanged.
-      field(:enabled, :boolean, default: false)
+      # Master switch. On by default (IDE-230); still dormant without a resolved
+      # `ANTHROPIC_API_KEY` (the key gate in `Config.overseer_enabled?/0` is
+      # unchanged). When inactive the turn loop caps at `agent.max_turns` as
+      # before.
+      field(:enabled, :boolean, default: true)
       # Engine selection (SPEC §10 a-vs-b). Only "api" (direct Anthropic
       # one-shot, read-only) is implemented; "sidecar" is accepted for
       # forward-compat and currently fails open (treated as disabled).
@@ -491,13 +493,31 @@ defmodule SymphonyElixir.Config.Schema do
       # unset (mirrors `tracker.api_key`/`$LINEAR_API_KEY`). Absent key ⇒ the
       # overseer is treated as disabled.
       field(:api_key, :string, default: "$ANTHROPIC_API_KEY")
-      # Budget-threshold trigger: fire when `turn >= max_turns - budget_threshold_k`.
+      # IDE-230 binding turn-budget controller. A single session runs turn
+      # 1..`absolute_max_turns`, governed by a cheap per-turn deterministic
+      # progress check (Layer 1) plus periodic / loss-triggered LLM judgement.
+      #
+      # Consult the LLM overseer when the consecutive deterministic-fail streak
+      # reaches `streak_to_llm`, OR every `mandatory_llm_every` turns.
+      field(:streak_to_llm, :integer, default: 5)
+      field(:mandatory_llm_every, :integer, default: 40)
+      # Hard ceiling: the run winds down + surfaces `:max_turns_reached` here even
+      # if the overseer keeps approving.
+      field(:absolute_max_turns, :integer, default: 500)
+      # Bounded final wind-down turn timeout (commit + workpad update before a
+      # worker-side give-up / absolute-ceiling teardown).
+      field(:winddown_timeout_ms, :integer, default: 120_000)
+      # Legacy IDE-212 budget-threshold trigger (`turn >= max_turns -
+      # budget_threshold_k`). Superseded by the streak/cadence trigger above;
+      # retained for forward/backward config compat.
       field(:budget_threshold_k, :integer, default: 4)
-      # De-dup/cooldown so the budget trigger does not re-fire every turn from K
-      # down to 0: at most one call per `min_turns_between` turns, hard-capped at
-      # `max_calls_per_session` calls per agent run.
+      # Legacy IDE-212 cooldown knob (superseded by the streak/cadence trigger).
       field(:min_turns_between, :integer, default: 3)
-      field(:max_calls_per_session, :integer, default: 2)
+      # Hard cap on overseer calls per agent run. A perpetually-failing run
+      # consults ~every `streak_to_llm` turns; the cap bounds the call volume and,
+      # once hit, *stops extending* (the run caps at `agent.max_turns` and posts a
+      # "could not judge" comment) rather than silently extending with no judge.
+      field(:max_calls_per_session, :integer, default: 25)
       # Bounded transcript ring-buffer size (normalized envelopes) fed as evidence.
       field(:transcript_window, :integer, default: 40)
       # Workspace-relative globs whose tails are read as build/test evidence.
@@ -527,6 +547,10 @@ defmodule SymphonyElixir.Config.Schema do
           :model,
           :effort,
           :api_key,
+          :streak_to_llm,
+          :mandatory_llm_every,
+          :absolute_max_turns,
+          :winddown_timeout_ms,
           :budget_threshold_k,
           :min_turns_between,
           :max_calls_per_session,
@@ -540,6 +564,10 @@ defmodule SymphonyElixir.Config.Schema do
         empty_values: []
       )
       |> validate_inclusion(:engine, @engines)
+      |> validate_number(:streak_to_llm, greater_than: 0)
+      |> validate_number(:mandatory_llm_every, greater_than: 0)
+      |> validate_number(:absolute_max_turns, greater_than: 0)
+      |> validate_number(:winddown_timeout_ms, greater_than: 0)
       |> validate_number(:budget_threshold_k, greater_than_or_equal_to: 0)
       |> validate_number(:min_turns_between, greater_than_or_equal_to: 0)
       |> validate_number(:max_calls_per_session, greater_than_or_equal_to: 0)
@@ -616,6 +644,12 @@ defmodule SymphonyElixir.Config.Schema do
       # fire and the turn floor for `at_risk_no_commits`. Tuned from the IDE-189
       # replay (fires by turn 4 of a 20-turn budget). Validated `>= 2`.
       field(:progress_signal_window_k, :integer, default: 4)
+      # Bounded ring of recent working-tree hashes for revisit/cycle detection
+      # (IDE-230). When the current hash reappears from earlier in this window
+      # (excluding the immediately-previous turn, which is `:stuck_state`) the
+      # turn is classified `:oscillating` — catching period-2/3/N and non-strict
+      # "returned to a prior state" churn, not just A,B,A,B. Validated `>= 2`.
+      field(:progress_signal_revisit_window, :integer, default: 10)
       # Timeout for the per-turn progress git probe; a slow/locked repo degrades
       # to "unknown" (assessment unchanged) rather than stalling the loop.
       field(:progress_signal_git_timeout_ms, :integer, default: 2_000)
@@ -654,6 +688,7 @@ defmodule SymphonyElixir.Config.Schema do
           :cutoff_timeout_ms,
           :progress_signal_enabled,
           :progress_signal_window_k,
+          :progress_signal_revisit_window,
           :progress_signal_git_timeout_ms,
           :progress_trigger_min_turns
         ],
@@ -672,6 +707,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> validate_number(:budget_pressure_turns, greater_than_or_equal_to: 0)
       |> validate_number(:cutoff_timeout_ms, greater_than: 0)
       |> validate_number(:progress_signal_window_k, greater_than_or_equal_to: 2)
+      |> validate_number(:progress_signal_revisit_window, greater_than_or_equal_to: 2)
       |> validate_number(:progress_signal_git_timeout_ms, greater_than: 0)
       |> validate_number(:progress_trigger_min_turns, greater_than_or_equal_to: 1)
       |> validate_thresholds_order()

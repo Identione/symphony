@@ -37,6 +37,10 @@ defmodule SymphonyElixir.Overseer.PromptBuilder do
     - "escalate": route to a human; no automated nudge resolves this.
     - "abort": high-confidence wasted spend; stop now. Reserve for clear thrashing.
 
+  You are judging this run against the issue's plan and acceptance criteria (the
+  "## Symphony Workpad" section, when present) plus the deterministic Layer-1
+  progress assessment. Decide whether more progress is genuinely expected.
+
   Hard rules:
     - steering_message MUST be non-null if and only if recommended_action is
       "nudge"; otherwise it MUST be null.
@@ -44,6 +48,10 @@ defmodule SymphonyElixir.Overseer.PromptBuilder do
       the evidence clearly shows wasted effort.
     - confidence is your calibrated probability (0..1) that the verdict is correct.
     - rationale is one short paragraph citing the concrete evidence.
+    - When recommended_action is "escalate" or "abort", populate the optional
+      "findings" object so a human can triage quickly: a one-line "summary", the
+      concrete "blockers" you observed, and "next_steps_for_human". For
+      continue/nudge/recommend_extend_budget, leave "findings" null.
   """
 
   @typedoc """
@@ -53,6 +61,7 @@ defmodule SymphonyElixir.Overseer.PromptBuilder do
   @type evidence :: %{
           optional(:issue_title) => String.t() | nil,
           optional(:issue_description) => String.t() | nil,
+          optional(:workpad) => String.t() | nil,
           optional(:turn) => non_neg_integer(),
           optional(:max_turns) => non_neg_integer(),
           optional(:signals) => map() | nil,
@@ -75,6 +84,7 @@ defmodule SymphonyElixir.Overseer.PromptBuilder do
   defp render_user(evidence) do
     [
       section("ISSUE", render_issue(evidence)),
+      section("PLAN / WORKPAD", present(evidence[:workpad])),
       section("BUDGET / SIGNALS", render_signals(evidence)),
       section("GIT DIFF (HEAD)", present(evidence[:git_diff])),
       section("BUILD / TEST LOGS", render_logs(evidence[:logs])),

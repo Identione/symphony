@@ -183,8 +183,11 @@ repo:
 - If `WORKFLOW.md` is missing or invalid at boot, Symphony refuses to
   start. If a later reload fails, Symphony keeps running with the last
   known good workflow.
-- `agent.max_turns` caps continuation turns per agent invocation when the
-  issue stays in an active state after a turn ends normally. Default: `20`.
+- `agent.max_turns` (default `20`) is **no longer the active continuation cutoff**
+  (IDE-230). It survives only as the *keyless-fallback* ceiling used when the
+  Layer-2 overseer turn-budget controller (below) is disabled, unkeyed, or out of
+  call budget. When the overseer is armed, the active budget is
+  `agent.overseer.absolute_max_turns` (default `500`).
 - `agent.budget_pressure_turns` (default `2`) injects budget-pressure steering
   into the continuation prompt when the run is within this many turns of
   `agent.max_turns`: the next turn's guidance tells the agent to commit its
@@ -205,20 +208,30 @@ repo:
   `at_risk_no_commits` flag, surfaced on the dashboard and logged. This layer
   only *reports* — it never kills a session or moves state.
   `agent.progress_signal_window_k` (default `4`, `>= 2`) is the consecutive-turn
-  window; `agent.progress_signal_git_timeout_ms` (default `2000`) bounds the
-  probe; `agent.progress_trigger_min_turns` (default `4`) is the turn floor for
-  the overseer trigger. See `docs/progress_signals.md`.
-- `agent.overseer` (OPTIONAL, disabled by default) is the Layer-2 AI overseer
-  (IDE-212): a gated, **read-only** Anthropic call made at most a couple of times
-  late in the budget (never per turn) that semantically classifies the run
-  (converging/thrashing/blocked) and recommends one action — `nudge` (steers the
-  next turn's prompt + a Linear comment), `recommend_extend_budget` (comment +
-  log only, **never** changes `max_turns`), `escalate` (routed through the
-  deterministic-failure pipeline), or `abort` (treated as `escalate` unless
-  `allow_abort`). A verdict below `confidence_floor` (default `0.6`) is downgraded
-  to a comment-only continue. Enable with `agent.overseer.enabled: true` and a
-  resolvable `agent.overseer.api_key` (defaults to `$ANTHROPIC_API_KEY`); every
-  error path fails open, leaving the run untouched. See SPEC.md §13.6.
+  window; `agent.progress_signal_revisit_window` (default `10`, `>= 2`) sizes the
+  ring used for `:oscillating` revisit (cycle) detection;
+  `agent.progress_signal_git_timeout_ms` (default `2000`) bounds the probe;
+  `agent.progress_trigger_min_turns` (default `4`) is the turn floor for the
+  overseer trigger. See `docs/progress_signals.md`.
+- `agent.overseer` (**enabled by default**, dormant without an `ANTHROPIC_API_KEY`)
+  is the Layer-2 AI overseer / turn-budget controller (IDE-212 / IDE-230). Its
+  Anthropic call is **read-only**, but its verdict is now **binding** on the
+  budget: a single session runs up to `agent.overseer.absolute_max_turns`
+  (default `500`), governed by a cheap per-turn deterministic Layer-1 check
+  (free). The LLM is consulted when the consecutive-fail streak reaches
+  `agent.overseer.streak_to_llm` (default `5`) or every
+  `agent.overseer.mandatory_llm_every` turns (default `40`), bounded by
+  `agent.overseer.max_calls_per_session` (default `25`). It classifies the run
+  (converging/thrashing/blocked) and the worker maps the verdict to either an
+  **APPROVE** (`continue` / `nudge` / `recommend_extend_budget` / a sub-floor
+  `confidence` → comment-only continue, all of which reset the fail streak) or a
+  **hard give-up** (`escalate`, or `abort` unless `allow_abort`): a give-up runs
+  one graceful wind-down turn (commit + update the `## Symphony Workpad` comment),
+  then escalates to Human Review via the `:overseer_escalation` code with **no
+  retry** and the LLM's structured `findings` in the comment. When the controller
+  is disabled, unkeyed, or out of call budget it does **not** auto-extend — it
+  caps at `agent.max_turns` and posts exactly one "could not judge" comment.
+  Every engine error path fails open. See SPEC.md §13.6.
 - `agent.codex.quota` / `agent.claude.quota` (both OPTIONAL, disabled by
   default) add account-quota-aware dispatch pausing: when `enabled`, Symphony
   stops dispatching *new* issues while the active provider's usage is at/above

@@ -26,12 +26,27 @@ defmodule SymphonyElixir.ProgressSignal do
   From the rolling streaks of those we derive a `t:status/0` and an independent
   `at_risk_no_commits` boolean:
 
-      :oscillating     last 4 hashes are A,B,A,B with A != B
+      :oscillating     the current tree hash reappears from earlier in a bounded
+                       window of recent hashes (revisit detection — see below)
       :repeated_error  error_sig != nil AND its streak >= K
       :stuck_state     identical hash for >= K turns AND the tree is empty
       :progressing     otherwise
 
       at_risk_no_commits = commits_since == 0 AND turn_count >= K
+
+  ## Revisit (cycle) detection (IDE-230)
+
+  A naive period-2 rule (`A,B,A,B`) misses longer cycles: `A→B→C→A→B→C` produces
+  consecutive *distinct* hashes and slips through as `:progressing`. Instead we
+  keep a bounded ring of the last `agent.progress_signal_revisit_window` content
+  hashes and flag the turn `:oscillating` when the current hash reappears from
+  **earlier in the window, excluding the immediately-previous turn** (an
+  identical immediately-previous hash is the `:stuck_state` domain, not a cycle).
+  This catches period-2/3/N and non-strict "returned to a prior state" churn. A
+  one-off legitimate revert is a single `:oscillating` turn; consumers filter it
+  via the consecutive-fail streak (it never escalates on its own) — it only
+  pulls an LLM consult forward on *sustained* cycling. The LLM remains the
+  authority.
 
   ## The empty-tree guard (why `:no_commits` is a flag, not a status)
 
@@ -100,8 +115,10 @@ defmodule SymphonyElixir.ProgressSignal do
           turn_count: non_neg_integer()
         }
 
-  # Oscillation needs the last four hashes to spot an A,B,A,B flip-flop.
-  @history_limit 4
+  # Fallback revisit-window size when settings don't carry one (e.g. the
+  # `default_assessment/0` path). Production reads
+  # `agent.progress_signal_revisit_window`.
+  @default_revisit_window 10
 
   @doc """
   The zero-state for a freshly dispatched issue (no turns observed yet).
@@ -137,7 +154,7 @@ defmodule SymphonyElixir.ProgressSignal do
   """
   @spec advance(state(), observation(), Schema.t()) :: state()
   def advance(state, observation, settings) do
-    {tree_streak, history} = roll_tree(state, observation.hash)
+    {tree_streak, history} = roll_tree(state, observation.hash, revisit_window(settings))
     {error_sig, error_streak} = roll_error(state, observation.error_sig)
 
     advanced = %{
@@ -207,24 +224,31 @@ defmodule SymphonyElixir.ProgressSignal do
   @spec classify(state(), pos_integer()) :: status()
   defp classify(state, k) do
     cond do
-      oscillating_history?(state.tree_history) -> :oscillating
+      cycling_history?(state.tree_history) -> :oscillating
       not is_nil(state.error_sig) and state.error_streak >= k -> :repeated_error
       state.tree_streak >= k and state.wt_empty -> :stuck_state
       true -> :progressing
     end
   end
 
-  # A,B,A,B with A != B over the last four boundaries (most-recent first).
-  @spec oscillating_history?([String.t()]) :: boolean()
-  defp oscillating_history?([a, b, a, b]) when a != b and is_binary(a) and is_binary(b), do: true
-  defp oscillating_history?(_history), do: false
+  # Revisit detection over the bounded window (most-recent first): the current
+  # hash reappears earlier in the window, excluding the immediately-previous
+  # turn. `current != prev` keeps a held/stuck tree (the `:stuck_state` domain)
+  # out of the cycle classification; `current in rest` catches period-2/3/N and
+  # non-strict revisits alike.
+  @spec cycling_history?([String.t()]) :: boolean()
+  defp cycling_history?([current, prev | rest])
+       when is_binary(current) and current != prev,
+       do: current in rest
 
-  # Streak counts consecutive identical hashes; history keeps the last
-  # `@history_limit` hashes (most-recent first) for oscillation detection.
-  @spec roll_tree(state(), String.t()) :: {non_neg_integer(), [String.t()]}
-  defp roll_tree(%{tree_hash: prev, tree_streak: streak, tree_history: history}, hash) do
+  defp cycling_history?(_history), do: false
+
+  # Streak counts consecutive identical hashes; history keeps the last `window`
+  # hashes (most-recent first) for revisit detection.
+  @spec roll_tree(state(), String.t(), pos_integer()) :: {non_neg_integer(), [String.t()]}
+  defp roll_tree(%{tree_hash: prev, tree_streak: streak, tree_history: history}, hash, window) do
     new_streak = if hash == prev, do: streak + 1, else: 1
-    {new_streak, Enum.take([hash | history], @history_limit)}
+    {new_streak, Enum.take([hash | history], window)}
   end
 
   # `nil` (no terminal error this turn) breaks any prior error streak — a clean
@@ -237,4 +261,8 @@ defmodule SymphonyElixir.ProgressSignal do
 
   @spec window_k(Schema.t()) :: pos_integer()
   defp window_k(settings), do: settings.agent.progress_signal_window_k
+
+  @spec revisit_window(Schema.t() | map()) :: pos_integer()
+  defp revisit_window(%{agent: %{progress_signal_revisit_window: w}}) when is_integer(w) and w >= 2, do: w
+  defp revisit_window(_settings), do: @default_revisit_window
 end

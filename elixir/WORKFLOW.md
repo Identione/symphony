@@ -118,20 +118,32 @@ agent:
   # progress_trigger_min_turns: turn floor for the at_risk_no_commits arm of the
   # Layer-2 trigger predicate.
   # progress_trigger_min_turns: 4
-  # AI overseer (IDE-212 / Layer 2). A gated, READ-ONLY Anthropic call made at
-  # most a couple of times late in the budget (never per turn). It semantically
-  # classifies the run (converging/thrashing/blocked) and recommends ONE action:
-  # nudge (steers the next turn + comments), recommend_extend_budget (comment +
-  # log only — NEVER changes max_turns), escalate, or abort (escalate unless
-  # allow_abort). Disabled by default; fails open on any error. See SPEC.md §13.6.
+  # progress_signal_revisit_window: bounded ring of recent tree hashes used for
+  # :oscillating revisit (cycle) detection (catches A,B,C,A,B,C, not just A,B,A,B).
+  # progress_signal_revisit_window: 10
+  # AI overseer / turn-budget controller (IDE-212 / IDE-230 / Layer 2). The
+  # overseer's engine call is READ-ONLY, but its verdict is now BINDING on the
+  # turn budget: a single session runs up to absolute_max_turns (default 500),
+  # and a cheap per-turn deterministic check (free) decides when to spend an LLM
+  # consult. The LLM is consulted when the consecutive-fail streak reaches
+  # streak_to_llm OR every mandatory_llm_every turns. APPROVE verdicts (continue /
+  # nudge / recommend_extend_budget / low-confidence) let the run proceed (and
+  # reset the streak); a give-up (escalate / abort) winds down one final turn then
+  # escalates to Human Review with NO retry. ENABLED BY DEFAULT but dormant
+  # without a resolvable api_key — when disabled/unkeyed/out-of-budget the run
+  # caps at agent.max_turns (the keyless fallback) and posts ONE "could not judge"
+  # comment. Fails open on any engine error. See SPEC.md §13.6.
   # overseer:
-  #   enabled: true                  # master switch (also needs a resolved api_key)
+  #   enabled: true                  # default true; also needs a resolved api_key to arm
   #   engine: api                    # only "api" (read-only Messages call) is implemented
   #   model: claude-sonnet-4-6
   #   api_key: $ANTHROPIC_API_KEY    # resolved like tracker.api_key/$LINEAR_API_KEY
-  #   budget_threshold_k: 4          # fire when turn >= max_turns - k
+  #   absolute_max_turns: 500        # hard ceiling on a single governed session
+  #   streak_to_llm: 5               # consult the LLM once the fail streak hits this
+  #   mandatory_llm_every: 40        # also consult on every Nth turn
+  #   winddown_timeout_ms: 120000    # turn timeout for the single graceful wind-down turn
   #   min_turns_between: 3           # cooldown between calls
-  #   max_calls_per_session: 2       # per-run call cap
+  #   max_calls_per_session: 25      # per-run call cap; exhausting it falls back to the keyless cap
   #   transcript_window: 40          # bounded transcript evidence window
   #   confidence_floor: 0.6          # below this, downgrade to comment-only continue
   #   allow_abort: false             # when false, an abort verdict is treated as escalate

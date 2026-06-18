@@ -340,9 +340,17 @@ defmodule SymphonyElixir.Orchestrator do
     # `:DOWN` arrives and the workspace persists for the 1s-cadence retry, so
     # snapshot the converging work to a durable WIP ref before the fresh session
     # (or a later operator) resumes on the same — still dirty — tree.
-    if extract_error_code(reason) == :max_turns_reached do
-      identifier = running_entry_identifier(running_entry, issue_id)
-      maybe_preserve_uncommitted_work(running_entry, issue_id, identifier, :max_turns)
+    # IDE-230: an overseer-escalated run is wound down worker-side (one bounded
+    # commit/workpad turn), but the final tree can still be dirty if that turn
+    # fails to commit — snapshot it on the same durable-WIP path as the
+    # max-turns cutoff so a human resuming in Human Review keeps the work.
+    case extract_error_code(reason) do
+      code when code in [:max_turns_reached, :overseer_escalation] ->
+        identifier = running_entry_identifier(running_entry, issue_id)
+        maybe_preserve_uncommitted_work(running_entry, issue_id, identifier, code)
+
+      _ ->
+        :ok
     end
 
     if input_required_blocker?(running_entry) do

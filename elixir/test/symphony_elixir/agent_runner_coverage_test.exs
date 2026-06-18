@@ -528,11 +528,15 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
     test "a nudge verdict steers the next turn's prompt and is consumed once" do
       ctx = setup_workspace!()
 
+      # The mandatory cadence fires the overseer at turn 2; the single call
+      # budget means the turn-4 cadence hit caps the run instead of re-firing.
       write_stub_workflow!(ctx,
         tracker_kind: "memory",
-        max_turns: 3,
         overseer_enabled: true,
         overseer_api_key: "test-key",
+        overseer_mandatory_llm_every: 2,
+        overseer_streak_to_llm: 99,
+        overseer_absolute_max_turns: 50,
         overseer_max_calls_per_session: 1
       )
 
@@ -548,31 +552,40 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
       catch_exit(AgentRunner.run(issue(), nil, adapter: StubAdapter, issue_state_fetcher: fetcher))
 
       assert_received :overseer_called
-      [_turn1, turn2, turn3] = drain_turn_prompts()
+      [_turn1, _turn2, turn3, turn4 | _] = drain_turn_prompts()
 
-      # The nudge rides turn 2 (the turn after the overseer fired at turn 1),
-      assert turn2 =~ "## Overseer steering (IMPORTANT)"
-      assert turn2 =~ "commit and push your work now"
-      # and is not re-applied on turn 3 (cooldown/cap stops a second call).
-      refute turn3 =~ "## Overseer steering (IMPORTANT)"
+      # The nudge fires at the turn-2 boundary, so it rides turn 3's prompt,
+      assert turn3 =~ "## Overseer steering (IMPORTANT)"
+      assert turn3 =~ "commit and push your work now"
+      # and is not re-applied on turn 4 (the call budget is spent).
+      refute turn4 =~ "## Overseer steering (IMPORTANT)"
     end
 
-    test "an escalate verdict exits the run via the deterministic-failure path" do
+    test "an escalate verdict winds down, posts findings, and exits via the deterministic-failure path" do
       ctx = setup_workspace!()
 
       write_stub_workflow!(ctx,
         tracker_kind: "memory",
-        max_turns: 3,
         overseer_enabled: true,
-        overseer_api_key: "test-key"
+        overseer_api_key: "test-key",
+        overseer_mandatory_llm_every: 1,
+        overseer_absolute_max_turns: 50
       )
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_recipient) end)
 
       start_overseer_stub!(%{
         "verdict" => "thrashing",
         "confidence" => 0.95,
         "recommended_action" => "escalate",
         "steering_message" => nil,
-        "rationale" => "same error repeated 5 turns"
+        "rationale" => "same error repeated 5 turns",
+        "findings" => %{
+          "summary" => "the build is wedged on a missing migration",
+          "blockers" => ["pending DB migration"],
+          "next_steps_for_human" => ["run the migration by hand"]
+        }
       })
 
       fetcher = fn ["issue-cov-1"] -> {:ok, [issue()]} end
@@ -581,6 +594,74 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
                catch_exit(AgentRunner.run(issue(), nil, adapter: StubAdapter, issue_state_fetcher: fetcher))
 
       assert rationale =~ "same error repeated"
+
+      # A bounded final wind-down turn is dispatched before teardown.
+      assert Enum.any?(drain_turn_prompts(), &(&1 =~ "Wind-down (FINAL turn)"))
+
+      # The escalation comment carries the human-triage findings.
+      assert_receive {:memory_tracker_comment, "issue-cov-1", body}, 2_000
+      assert body =~ "the build is wedged on a missing migration"
+      assert body =~ "pending DB migration"
+      assert body =~ "run the migration by hand"
+    end
+
+    test "a sustained Layer-1 fail streak pulls the overseer consult forward (no cadence hit)" do
+      ctx = setup_workspace!()
+
+      # Cadence effectively off (every 999); the stub agent never mutates the
+      # tree, so the deterministic Layer-1 streak climbs and trips the consult.
+      # The workspace must be a real git repo for the Layer-1 probe to read
+      # signals, so the after_create hook initializes one (clean tree, a HEAD).
+      readme = Path.join(ctx.template_repo, "README.md")
+
+      hook =
+        "cp #{readme} README.md && git init -q -b main && " <>
+          "git add -A && git -c user.email=t@e.com -c user.name=t commit -qm init"
+
+      write_stub_workflow!(ctx,
+        tracker_kind: "memory",
+        hook_after_create: hook,
+        overseer_enabled: true,
+        overseer_api_key: "test-key",
+        overseer_streak_to_llm: 3,
+        overseer_mandatory_llm_every: 999,
+        overseer_max_calls_per_session: 1,
+        overseer_absolute_max_turns: 50
+      )
+
+      start_overseer_stub!(%{
+        "verdict" => "converging",
+        "confidence" => 0.95,
+        "recommended_action" => "continue",
+        "steering_message" => nil,
+        "rationale" => "still making progress"
+      })
+
+      fetcher = fn ["issue-cov-1"] -> {:ok, [issue()]} end
+      catch_exit(AgentRunner.run(issue(), nil, adapter: StubAdapter, issue_state_fetcher: fetcher))
+
+      assert_received :overseer_called
+    end
+
+    test "the keyless fallback caps at agent.max_turns and posts one could-not-judge comment" do
+      ctx = setup_workspace!()
+
+      # Overseer disabled (no api_key) → the run must cap at agent.max_turns
+      # rather than auto-extending, and post exactly one explanatory comment.
+      write_stub_workflow!(ctx, tracker_kind: "memory", max_turns: 2)
+
+      Application.put_env(:symphony_elixir, :memory_tracker_recipient, self())
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :memory_tracker_recipient) end)
+
+      fetcher = fn ["issue-cov-1"] -> {:ok, [issue()]} end
+
+      assert {:agent_run_failed, :max_turns_reached, :max_turns_reached} =
+               catch_exit(AgentRunner.run(issue(), nil, adapter: StubAdapter, issue_state_fetcher: fetcher))
+
+      assert_receive {:memory_tracker_comment, "issue-cov-1", body}, 2_000
+      assert body =~ "Overseer (turn-budget cap)"
+      assert body =~ "disabled or unkeyed"
+      refute_received {:memory_tracker_comment, "issue-cov-1", _other}
     end
   end
 

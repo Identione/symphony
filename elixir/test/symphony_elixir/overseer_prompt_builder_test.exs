@@ -22,6 +22,13 @@ defmodule SymphonyElixir.Overseer.PromptBuilderTest do
     refute user =~ "## GIT DIFF"
     refute user =~ "## BUILD / TEST LOGS"
     refute user =~ "## RECENT TRANSCRIPT"
+    refute user =~ "## PLAN / WORKPAD"
+  end
+
+  test "renders the workpad section when supplied (IDE-230)" do
+    %{user: user} = PromptBuilder.build(%{workpad: "## Symphony Workpad\n- did X\n- next: Y"})
+    assert user =~ "## PLAN / WORKPAD"
+    assert user =~ "next: Y"
   end
 
   test "renders the budget/turn line and sorted signals" do

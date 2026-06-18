@@ -860,7 +860,10 @@ not require recognizing or validating extension fields unless that extension is 
 - `hooks.before_remove`: shell script or null
 - `hooks.timeout_ms`: integer, default `60000`
 - `agent.max_concurrent_agents`: integer, default `10`
-- `agent.max_turns`: integer, default `20`
+- `agent.max_turns`: integer, default `20` — **retired as the active cutoff** by IDE-230. It now
+  serves only as the keyless-fallback ceiling: when the Layer-2 overseer (§13.6) is disabled,
+  unkeyed, or cannot judge, the run caps here instead of auto-extending. When the overseer is armed,
+  the active budget is `agent.overseer.absolute_max_turns`.
 - `agent.max_retry_backoff_ms`: integer, default `300000` (5m)
 - `agent.max_concurrent_agents_by_state`: map of positive integers, default `{}`
 - `agent.budget_pressure_turns`: non-negative integer, default `2` — inject budget-pressure
@@ -876,14 +879,17 @@ not require recognizing or validating extension fields unless that extension is 
   progress signals (see §13.5)
 - `agent.progress_signal_window_k`: integer `>= 2`, default `4` — consecutive-turn window `K`
   before `:stuck_state`/`:repeated_error` fire and the turn floor for `at_risk_no_commits`
+- `agent.progress_signal_revisit_window`: integer `>= 2`, default `10` — bounded ring of recent
+  content hashes used for `:oscillating` revisit (cycle) detection (§13.5)
 - `agent.progress_signal_git_timeout_ms`: positive integer, default `2000` — timeout for the
   per-turn progress git probe; a slow/locked repo degrades to "unknown" (assessment unchanged)
 - `agent.progress_trigger_min_turns`: integer `>= 1`, default `4` — turn floor for the
   `at_risk_no_commits` arm of the Layer-2 trigger predicate
-- `agent.overseer`: object, OPTIONAL — the Layer-2 AI overseer (§13.6). Disabled by default; never
-  changes the turn budget; fails open. Fields:
-  - `agent.overseer.enabled`: boolean, default `false` — master switch. An absent/empty resolved
-    `api_key` also disables it regardless of this flag.
+- `agent.overseer`: object, OPTIONAL — the Layer-2 AI overseer / turn-budget controller (§13.6).
+  **Enabled by default** but dormant without a resolvable `api_key`; its verdict is binding on the
+  budget; fails open. Fields:
+  - `agent.overseer.enabled`: boolean, default `true` — master switch. An absent/empty resolved
+    `api_key` leaves it dormant (keyless-fallback cap) regardless of this flag.
   - `agent.overseer.engine`: enum (`api` | `sidecar`), default `api` — only `api` (read-only
     Anthropic Messages call) is implemented; `sidecar` is reserved and fails open.
   - `agent.overseer.model`: string, default `claude-sonnet-4-6`
@@ -891,10 +897,19 @@ not require recognizing or validating extension fields unless that extension is 
     the direct Messages API path today
   - `agent.overseer.api_key`: string, default `$ANTHROPIC_API_KEY` — resolved like
     `tracker.api_key`/`$LINEAR_API_KEY`
-  - `agent.overseer.budget_threshold_k`: non-negative integer, default `4` — fire when
-    `turn >= agent.max_turns - k`
+  - `agent.overseer.absolute_max_turns`: positive integer, default `500` — the hard ceiling on a
+    single governed session; the run winds down and exits `:max_turns_reached` here
+  - `agent.overseer.streak_to_llm`: positive integer, default `5` — consult the LLM once the
+    consecutive Layer-1 fail streak reaches this
+  - `agent.overseer.mandatory_llm_every`: positive integer, default `40` — also consult the LLM on
+    every turn where `rem(turn, this) == 0`
+  - `agent.overseer.winddown_timeout_ms`: positive integer, default `120000` — turn timeout for the
+    single graceful wind-down turn
+  - `agent.overseer.budget_threshold_k`: non-negative integer, default `4` — legacy
+    budget-proximity knob (retained; the active triggers are streak/cadence above)
   - `agent.overseer.min_turns_between`: non-negative integer, default `3` — cooldown between calls
-  - `agent.overseer.max_calls_per_session`: non-negative integer, default `2` — per-run call cap
+  - `agent.overseer.max_calls_per_session`: non-negative integer, default `25` — per-run call cap;
+    exhausting it falls back to the keyless cap (never silent)
   - `agent.overseer.transcript_window`: non-negative integer, default `40` — bounded transcript
     ring-buffer size fed as evidence
   - `agent.overseer.log_globs`: array of strings, default
@@ -2366,13 +2381,24 @@ From the rolling streaks the orchestrator derives a **status** (most→least sev
 **independent** boolean, where `K = agent.progress_signal_window_k`:
 
 ```
-:oscillating     last 4 hashes are A,B,A,B with A != B
+:oscillating     current tree hash reappears from earlier in a bounded window
+                 (revisit detection — see below), excluding the immediately
+                 previous turn
 :repeated_error  error_sig != nil AND its streak >= K
 :stuck_state     identical hash for >= K turns AND the tree is empty   ← empty-tree guard
 :progressing     otherwise
 
 at_risk_no_commits = commits_since == 0 AND turn_count >= K
 ```
+
+**Revisit (cycle) detection (IDE-230).** A naive period-2 rule (`A,B,A,B`) misses longer cycles:
+`A→B→C→A→B→C` produces consecutive *distinct* hashes and slips through as `:progressing`. Instead
+the orchestrator keeps a bounded ring of the last `agent.progress_signal_revisit_window` content
+hashes and flags the turn `:oscillating` when the current hash reappears from **earlier in the
+window, excluding the immediately-previous turn** (an identical immediately-previous hash is the
+`:stuck_state` domain, not a cycle). This catches period-2/3/N and non-strict "returned to a prior
+state" churn; a one-off legitimate revert is a single `:oscillating` turn that never escalates on
+its own — it only pulls a Layer-2 consult forward on *sustained* cycling.
 
 The **empty-tree guard** is load-bearing: an issue holding a *dirty* tree (real pending work) for
 many turns without committing is `:progressing` + `at_risk_no_commits`, **never** `:stuck`.
@@ -2390,14 +2416,24 @@ status in [:stuck_state, :oscillating, :repeated_error]
 OR (at_risk_no_commits AND turn_count >= agent.progress_trigger_min_turns)
 ```
 
-### 13.6 AI Overseer (IDE-212, Layer 2)
+### 13.6 AI Overseer — Turn-Budget Controller (IDE-212 / IDE-230, Layer 2)
 
 Layer 2 of the agent-run robustness defense (alongside the Layer-0 budget cutoff in §6/§9.4 and the
 Layer-1 progress signals in §13.5). Where Layer 1 only *reports* deterministic git signals, Layer 2
-is a gated, **read-only** AI overseer that *semantically* classifies a near-budget run and
-recommends one action. It is **disabled by default** (`agent.overseer.enabled`), runs at most a
-couple of times per run (never per turn), and **never changes the turn budget**. Every error path
-is **fail-open**: a transport / parse / timeout failure leaves the run exactly as Layer 1 left it.
+is a gated AI overseer that *semantically* classifies a run and decides whether it may continue.
+
+**IDE-230 turns it into a binding turn-budget controller.** A single agent session runs turns
+1…`agent.overseer.absolute_max_turns` (default 500). Each turn boundary is governed by a cheap,
+deterministic Layer-1 check (free, computed worker-side); the expensive LLM judgement is consulted
+only periodically or when the cheap signal sustains a failure. The overseer's verdict — not a fixed
+`max_turns` — is what extends or ends the run. The overseer's *engine* call is still read-only (it
+cannot touch the workspace); what changed is that its *verdict is now binding* on the budget.
+
+It is **enabled by default** (`agent.overseer.enabled`, default `true`) but **dormant without an
+`ANTHROPIC_API_KEY`**: with no resolvable key the controller cannot judge, so it falls back to the
+keyless cap below rather than auto-extending. Every engine error path is **fail-open**: a transport
+/ parse / timeout failure leaves the turn loop running (the streak is not reset, so a persistent
+failure keeps re-triggering and the absolute ceiling bounds the run).
 
 **Engine.** The implemented engine (`agent.overseer.engine: "api"`) is a single read-only call to
 the Anthropic Messages API. Read-only by construction: the only tool offered is `emit_verdict`,
@@ -2405,38 +2441,62 @@ whose `input_schema` *is* the verdict contract, and `tool_choice` forces the mod
 model cannot read files, run commands, or touch the workspace. (`"sidecar"` is reserved for
 forward-compat and currently fails open / treated as disabled.)
 
-**Trigger (gating).** Evaluated at a turn boundary in the worker. The budget-threshold arm fires
-when `turn >= agent.max_turns - agent.overseer.budget_threshold_k`, gated by a cooldown
-(`agent.overseer.min_turns_between`) and a per-run cap (`agent.overseer.max_calls_per_session`) so
-it does not re-fire every turn from K down to 0. (The Layer-1 signal arm in §13.5 is a planned
-second trigger; it needs an orchestrator→worker signal channel that does not exist yet, so only the
-budget-threshold arm is wired today.)
+**Per-turn deterministic check (free).** At each turn boundary the worker computes the Layer-1
+`ProgressSignal` assessment from the cheap git probe and maintains a consecutive-fail streak: a turn
+that trips `ProgressSignal.trigger?/2` (§13.5) increments the streak; a passing turn resets it to 0;
+a probe error leaves it unchanged (fail-open). No LLM call is made on this path.
 
-**Evidence (read-only).** A bounded bundle: issue title/description, the turn/budget counters, the
+**When the LLM is consulted.** A single Layer-2 call fires when either:
+
+- the consecutive-fail streak reaches `agent.overseer.streak_to_llm` (default 5), **or**
+- the turn is a mandatory checkpoint: `rem(turn, agent.overseer.mandatory_llm_every) == 0`
+  (default 40).
+
+The call is bounded by the per-run cap `agent.overseer.max_calls_per_session` (default 25).
+
+**Evidence (read-only).** A bounded bundle: issue title/description, the `## Symphony Workpad`
+comment body (the agent's live plan), the Layer-1 assessment, the turn/budget counters, the
 `git diff HEAD` summary (single non-mutating probe, byte-capped), tails of build/test logs matching
 `agent.overseer.log_globs`, and a bounded window (`agent.overseer.transcript_window`) of the
-**normalized** transcript envelopes (`%{event:, payload:}`) both adapters emit — the
-adapter-agnostic consumption point the parity contract relies on.
+**normalized** transcript envelopes (`%{event:, payload:}`) both adapters emit.
 
 **Verdict → action.** The structured verdict is `verdict` (converging / thrashing / blocked),
 `confidence` (0..1), `recommended_action`, `steering_message` (non-null **iff** the action is
-`nudge`), and `rationale`. The worker maps it to a concrete action, enforcing:
+`nudge`), `rationale`, and an optional structured `findings` object (`summary`, `blockers[]`,
+`next_steps_for_human[]`) carried on a give-up to brief the human. The worker maps it to either an
+**APPROVE** (run continues, fail-streak reset to 0) or a **hard give-up**:
 
-- `confidence < agent.overseer.confidence_floor` ⇒ downgrade to a comment-only `continue` (never
-  steers or escalates on a low-confidence verdict);
-- `continue` — no-op (healthy run proceeds untouched);
-- `nudge` — the `steering_message` rides the *next* turn's prompt as an explicit directive, plus one
-  Linear comment; if the steering is missing/empty it downgrades to `continue`;
-- `recommend_extend_budget` — one Linear comment + log only; **never** changes `agent.max_turns`;
-- `escalate` — routed through the existing deterministic-failure escalation pipeline (§13.x /
-  IDE-73) via the `:overseer_escalation` error code, moving the issue to
-  `agent.deterministic_failure_escalation_state`;
-- `abort` — treated as `escalate` unless `agent.overseer.allow_abort` is true (never autonomously
-  kills a borderline session by default).
+- `confidence < agent.overseer.confidence_floor` ⇒ APPROVE as a comment-only `continue`;
+- `continue` — APPROVE, no-op;
+- `nudge` — APPROVE; the `steering_message` rides the *next* turn's prompt as an explicit directive,
+  plus one Linear comment; missing/empty steering downgrades to `continue`;
+- `recommend_extend_budget` — APPROVE; one Linear comment + log only;
+- `escalate` — **hard give-up**: graceful wind-down (below), then routed through the
+  deterministic-failure pipeline (IDE-73) via the `:overseer_escalation` error code as a
+  **`:no_retry`** failure (no further session is spent), moving the issue to
+  `agent.deterministic_failure_escalation_state` (Human Review). The escalation comment carries the
+  `findings` triage brief;
+- `abort` — treated as `escalate` unless `agent.overseer.allow_abort` is true.
 
-Config lives under `agent.overseer.*` (§5.3.5); `agent.overseer.api_key` resolves from
-`$ANTHROPIC_API_KEY` (mirroring `tracker.api_key`/`$LINEAR_API_KEY`), and an absent key disables the
-overseer regardless of the `enabled` flag.
+**Hard ceiling.** Independent of the overseer, when `turn >= agent.overseer.absolute_max_turns` the
+run gracefully winds down and exits `:max_turns_reached`.
+
+**Keyless / no-judgement fallback (never silent).** If the overseer is disabled or unkeyed, or the
+engine cannot judge at the cap (per-session call budget exhausted), the controller does **not**
+auto-extend: it caps the run at `agent.max_turns` (the legacy soft cap, retained only as this
+keyless fallback ceiling) and posts **exactly one** "could not judge (reason)" Linear comment
+(post-once per run) so the cap is never silent.
+
+**Graceful wind-down.** On a worker-side give-up (`escalate`/`abort`) and on the absolute-ceiling
+path, the worker runs **one bounded final turn** (commit any work + update the `## Symphony Workpad`
+comment) before teardown. (The orchestrator-side 5×-consecutive-deterministic-failure path in
+IDE-73 does *not* wind down — it has already lost the session; this asymmetry is intentional.)
+
+`agent.max_turns` (default 20) is therefore **retired as the active cutoff**: it survives only as
+the keyless-fallback ceiling above. Config lives under `agent.overseer.*` (§5.3.5);
+`agent.overseer.api_key` resolves from `$ANTHROPIC_API_KEY` (mirroring `tracker.api_key`/
+`$LINEAR_API_KEY`), and an absent key leaves the controller dormant regardless of the `enabled`
+flag.
 
 ## 14. Failure Model and Recovery Strategy
 
