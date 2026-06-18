@@ -33,6 +33,11 @@ defmodule LinearSimWeb.GraphQL.Resolvers.IssueResolver do
   def children(issue, args, _resolution),
     do: {:ok, Connection.from_nodes(issue.children, args)}
 
+  @doc "Resolves an issue's parent (nil for top-level issues)."
+  @spec parent(map(), map(), Absinthe.Resolution.t()) :: {:ok, struct() | nil}
+  def parent(%{parent: %Ecto.Association.NotLoaded{}}, _args, _resolution), do: {:ok, nil}
+  def parent(%{parent: parent}, _args, _resolution), do: {:ok, parent}
+
   @doc "Resolves an issue's inverse relations (blocker check)."
   @spec inverse_relations(map(), map(), Absinthe.Resolution.t()) :: {:ok, map()}
   def inverse_relations(issue, args, _resolution),

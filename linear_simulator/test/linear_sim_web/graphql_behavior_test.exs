@@ -84,6 +84,71 @@ defmodule LinearSimWeb.GraphQLBehaviorTest do
     end
   end
 
+  describe "parent extraction" do
+    test "exposes an issue's parent (with state and sibling children) on the poll query", %{
+      conn: conn
+    } do
+      # Seed a parent ENG-100 and make ENG-1 its child.
+      Repo.insert!(%Issue{
+        id: "issue_eng_100",
+        organization_id: "org_default",
+        team_id: "team_eng",
+        state_id: "state_todo",
+        project_id: "project_roadmap",
+        identifier: "ENG-100",
+        number: 100,
+        title: "Parent epic",
+        branch_name: Common.branch_name("ENG-100"),
+        url: Common.issue_url("ENG-100")
+      })
+
+      Repo.get(Issue, "issue_eng_1")
+      |> Ecto.Changeset.change(parent_id: "issue_eng_100")
+      |> Repo.update!()
+
+      vars = %{
+        "projectSlug" => "roadmap",
+        "stateNames" => ["Todo"],
+        "first" => 50,
+        "relationFirst" => 10,
+        "after" => nil
+      }
+
+      body = gql(conn, @poll, vars)
+
+      assert body["errors"] in [nil, []],
+             "poll returned errors: #{inspect(body["errors"])}"
+
+      nodes = get_in(body, ["data", "issues", "nodes"])
+      eng1 = Enum.find(nodes, &(&1["identifier"] == "ENG-1"))
+
+      assert get_in(eng1, ["parent", "identifier"]) == "ENG-100"
+      assert get_in(eng1, ["parent", "state", "name"]) == "Todo"
+
+      sibling_ids =
+        eng1 |> get_in(["parent", "children", "nodes"]) |> Enum.map(& &1["identifier"])
+
+      assert "ENG-1" in sibling_ids
+    end
+
+    test "resolves parent as null for a top-level issue", %{conn: conn} do
+      vars = %{
+        "projectSlug" => "roadmap",
+        "stateNames" => ["Todo"],
+        "first" => 50,
+        "relationFirst" => 10,
+        "after" => nil
+      }
+
+      body = gql(conn, @poll, vars)
+      nodes = get_in(body, ["data", "issues", "nodes"])
+      eng1 = Enum.find(nodes, &(&1["identifier"] == "ENG-1"))
+
+      assert body["errors"] in [nil, []]
+      assert eng1["parent"] == nil
+    end
+  end
+
   describe "issueUpdate" do
     test "transitions the issue's workflow state", %{conn: conn} do
       mutation = """
