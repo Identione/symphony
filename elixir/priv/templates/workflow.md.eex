@@ -181,6 +181,20 @@ When a ticket has an attached PR, run this protocol before moving to `Human Revi
 5. Re-run validation after feedback-driven changes and push updates.
 6. Repeat this sweep until there are no outstanding actionable comments.
 
+## Waiting on CI or review (required)
+
+While a ticket sits in `Human Review` (or any active state) waiting on CI checks
+or a human/bot decision:
+
+- Do NOT poll with `ScheduleWakeup` or `sleep` loops. A sleeping turn keeps the
+  session alive, wastes budget, and can trip Symphony's poll-loop escalation.
+- After pushing and posting any required update, END YOUR TURN. Symphony
+  re-invokes this issue automatically on its next polling cycle with the latest
+  CI/review state — that re-invocation is how you "poll".
+- In `Merging` only: run the `land` skill (`.codex/skills/land/SKILL.md`), which
+  uses `land_watch.py` to watch CI, reviews, and the PR head concurrently and
+  exits with an actionable status. Do not hand-roll a wait loop.
+
 ## Blocked-access escape hatch (required behavior)
 
 Use this only when completion is blocked by missing required tools or missing auth/permissions that cannot be resolved in-session.
@@ -292,7 +306,10 @@ Use this only when completion is blocked by missing required tools or missing au
   an active state (`In Progress` preferred, `Todo` acceptable before work
   starts), not `Human Review`.
 - Do not move to `Human Review` unless the `Completion bar before Human Review` is satisfied.
-- In `Human Review`, do not make changes; wait and poll.
+- In `Human Review`, do not make changes; end the turn between checks (see "Waiting on CI or review").
+- Prefer `Edit` over `Write` when changing an existing file. Use `Write` only to create a new file or fully rewrite one you have `Read` in full this turn.
+- Each Bash call runs in a fresh shell: environment-variable `export`s do not persist across calls, and working-directory changes are not reliably carried over. Use absolute paths, or `cd /abs/path && <cmd>` within a single Bash call.
+- Do not use `sleep` to wait for external state (CI, merge). Bash kills commands at 2 minutes (10 minutes hard max), so it only wastes a turn — end the turn instead.
 - If state is terminal (`Done`), do nothing and shut down.
 - Keep issue text concise, specific, and reviewer-oriented.
 - If blocked and no workpad exists yet, add one blocker comment describing blocker, impact, and next unblock action.

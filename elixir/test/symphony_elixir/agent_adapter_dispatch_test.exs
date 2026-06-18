@@ -26,7 +26,7 @@ defmodule SymphonyElixir.AgentAdapterDispatchTest do
   end
 
   test "Config.adapter_module/0 returns Claude.AppServer when agent.kind == claude" do
-    write_workflow_with_agent_block!("agent:\n  kind: claude\n")
+    write_workflow_with_agent_block!("agent:\n  kind: claude\n  claude:\n    allowed_tools:\n      - Read\n")
     assert Config.adapter_module() == SymphonyElixir.Claude.AppServer
   end
 
@@ -78,19 +78,19 @@ defmodule SymphonyElixir.AgentAdapterDispatchTest do
     end
 
     test "validate!/0 fails when no credentials are present" do
-      write_workflow_with_agent_block!("agent:\n  kind: claude\n")
+      write_workflow_with_agent_block!("agent:\n  kind: claude\n  claude:\n    allowed_tools:\n      - Read\n")
       assert {:error, :missing_claude_credentials} = Config.validate!()
     end
 
     test "validate!/0 succeeds with ANTHROPIC_API_KEY" do
       System.put_env("ANTHROPIC_API_KEY", "sk-ant-test")
-      write_workflow_with_agent_block!("agent:\n  kind: claude\n")
+      write_workflow_with_agent_block!("agent:\n  kind: claude\n  claude:\n    allowed_tools:\n      - Read\n")
       assert :ok = Config.validate!()
     end
 
     test "validate!/0 succeeds with CLAUDE_CODE_OAUTH_TOKEN" do
       System.put_env("CLAUDE_CODE_OAUTH_TOKEN", "oauth-test")
-      write_workflow_with_agent_block!("agent:\n  kind: claude\n")
+      write_workflow_with_agent_block!("agent:\n  kind: claude\n  claude:\n    allowed_tools:\n      - Read\n")
       assert :ok = Config.validate!()
     end
 
@@ -103,7 +103,7 @@ defmodule SymphonyElixir.AgentAdapterDispatchTest do
         ~s({"claudeAiOauth": {"accessToken": "fake", "refreshToken": "fake"}})
       )
 
-      write_workflow_with_agent_block!("agent:\n  kind: claude\n")
+      write_workflow_with_agent_block!("agent:\n  kind: claude\n  claude:\n    allowed_tools:\n      - Read\n")
       assert :ok = Config.validate!()
     end
 
@@ -112,7 +112,7 @@ defmodule SymphonyElixir.AgentAdapterDispatchTest do
       File.mkdir_p!(claude_dir)
       File.write!(Path.join(claude_dir, ".credentials.json"), ~s({"unrelated": true}))
 
-      write_workflow_with_agent_block!("agent:\n  kind: claude\n")
+      write_workflow_with_agent_block!("agent:\n  kind: claude\n  claude:\n    allowed_tools:\n      - Read\n")
       assert {:error, :missing_claude_credentials} = Config.validate!()
     end
 
@@ -132,7 +132,7 @@ defmodule SymphonyElixir.AgentAdapterDispatchTest do
       System.put_env("CLAUDE_CONFIG_DIR", override)
       on_exit(fn -> restore_env("CLAUDE_CONFIG_DIR", previous) end)
 
-      write_workflow_with_agent_block!("agent:\n  kind: claude\n")
+      write_workflow_with_agent_block!("agent:\n  kind: claude\n  claude:\n    allowed_tools:\n      - Read\n")
       assert :ok = Config.validate!()
     end
 
@@ -156,6 +156,9 @@ defmodule SymphonyElixir.AgentAdapterDispatchTest do
           - "bob@host"
       agent:
         kind: claude
+        claude:
+          allowed_tools:
+            - Read
       """)
 
       assert {:error, {:claude_remote_worker_unsupported, ["alice@host", "bob@host"]}} =
@@ -192,6 +195,8 @@ defmodule SymphonyElixir.AgentAdapterDispatchTest do
       agent:
         kind: claude
         claude:
+          allowed_tools:
+            - Read
           config_dir: "#{override}"
       """)
 
@@ -209,6 +214,8 @@ defmodule SymphonyElixir.AgentAdapterDispatchTest do
       agent:
         kind: claude
         claude:
+          allowed_tools:
+            - Read
           config_dir: "#{override}"
       """)
 
@@ -238,7 +245,70 @@ defmodule SymphonyElixir.AgentAdapterDispatchTest do
       agent:
         kind: claude
         claude:
+          allowed_tools:
+            - Read
           config_dir: "~/#{tilde_subdir}"
+      """)
+
+      assert :ok = Config.validate!()
+    end
+
+    test "validate!/0 rejects agent.kind == claude with dontAsk and no allowed_tools" do
+      # Deny-all footgun: dontAsk auto-denies any tool not pre-approved, so an
+      # absent allowed_tools whitelist leaves the agent with zero tools.
+      System.put_env("ANTHROPIC_API_KEY", "sk-ant-test")
+
+      write_workflow_with_agent_block!("""
+      agent:
+        kind: claude
+        claude:
+          permission_mode: dontAsk
+      """)
+
+      assert {:error, :claude_dontask_denies_all_tools} = Config.validate!()
+    end
+
+    test "validate!/0 rejects agent.kind == claude with dontAsk and an explicit empty allowed_tools" do
+      System.put_env("ANTHROPIC_API_KEY", "sk-ant-test")
+
+      write_workflow_with_agent_block!("""
+      agent:
+        kind: claude
+        claude:
+          permission_mode: dontAsk
+          allowed_tools: []
+      """)
+
+      assert {:error, :claude_dontask_denies_all_tools} = Config.validate!()
+    end
+
+    test "validate!/0 accepts agent.kind == claude with bypassPermissions and no allowed_tools" do
+      # Allow-all: bypassPermissions ignores the whitelist; the jai sandbox +
+      # workspace-cwd boundary are the security boundary.
+      System.put_env("ANTHROPIC_API_KEY", "sk-ant-test")
+
+      write_workflow_with_agent_block!("""
+      agent:
+        kind: claude
+        claude:
+          permission_mode: bypassPermissions
+      """)
+
+      assert :ok = Config.validate!()
+    end
+
+    test "validate!/0 accepts agent.kind == claude with dontAsk and a non-empty allowed_tools" do
+      System.put_env("ANTHROPIC_API_KEY", "sk-ant-test")
+
+      write_workflow_with_agent_block!("""
+      agent:
+        kind: claude
+        claude:
+          permission_mode: dontAsk
+          allowed_tools:
+            - Read
+            - Edit
+            - Bash
       """)
 
       assert :ok = Config.validate!()

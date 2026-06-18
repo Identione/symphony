@@ -753,6 +753,14 @@ defmodule SymphonyElixir.Orchestrator do
 
         state
 
+      {:error, :claude_dontask_denies_all_tools} ->
+        Logger.error(
+          "agent.claude permission_mode: dontAsk with no allowed_tools denies every tool; " <>
+            "list allowed_tools (whitelist) or set permission_mode: bypassPermissions (allow-all)."
+        )
+
+        state
+
       {:error, {:missing_workflow_file, path, reason}} ->
         Logger.error("Missing WORKFLOW.md at #{path}: #{inspect(reason)}")
         state
