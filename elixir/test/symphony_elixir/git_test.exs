@@ -176,4 +176,38 @@ defmodule SymphonyElixir.GitTest do
       assert {:error, :not_a_git_repo} = Git.working_tree_signals(dir, nil)
     end
   end
+
+  describe "diff_summary/4 (IDE-212 overseer evidence)" do
+    test "renders the stat + diff of tracked edits against HEAD", %{dir: dir} do
+      init_repo_with_commit!(dir)
+      File.write!(Path.join(dir, "tracked.txt"), "v2\n")
+
+      assert {:ok, diff} = Git.diff_summary(dir)
+      assert diff =~ "tracked.txt"
+      assert diff =~ "v2"
+    end
+
+    test "returns an empty string for a clean tree", %{dir: dir} do
+      init_repo_with_commit!(dir)
+      assert {:ok, ""} = Git.diff_summary(dir)
+    end
+
+    test "truncates to the byte limit", %{dir: dir} do
+      init_repo_with_commit!(dir)
+      File.write!(Path.join(dir, "tracked.txt"), String.duplicate("x", 5_000) <> "\n")
+
+      assert {:ok, diff} = Git.diff_summary(dir, nil, 256)
+      assert diff =~ "[truncated]"
+      assert byte_size(diff) < 5_000
+      assert String.valid?(diff)
+    end
+
+    test "is benign on a HEAD-less repo (no commits yet)", %{dir: dir} do
+      git!(dir, ["init", "-q"])
+      git!(dir, ["config", "user.email", "test@example.com"])
+      git!(dir, ["config", "user.name", "Test"])
+
+      assert {:ok, _diff} = Git.diff_summary(dir)
+    end
+  end
 end

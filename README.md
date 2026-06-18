@@ -16,6 +16,8 @@ Either adapter can opt into account-quota-aware dispatch pausing (`agent.<provid
 
 When a run approaches its continuation cap (`agent.max_turns`), Symphony steers the agent to commit its in-progress work, and — as a safety net independent of whether the agent obeys — non-destructively snapshots any uncommitted work (modified, staged, and untracked files) to a `refs/symphony/wip/<id>` commit before stopping the session, so converging work is never silently discarded. See SPEC.md §6 and §9.4.1.
 
+An optional, **read-only** AI overseer (`agent.overseer`, off by default) can be enabled to assess a near-budget run semantically — at most a couple of times per run, never per turn — and recommend a single action: a precise nudge into the next turn, a (non-binding) budget-extension recommendation, or escalation to a human. It never changes the turn budget and fails open on any error. See SPEC.md §13.6.
+
 > [!WARNING]
 > Symphony is a low-key engineering preview for testing in trusted environments.
 

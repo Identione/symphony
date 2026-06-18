@@ -871,6 +871,33 @@ not require recognizing or validating extension fields unless that extension is 
   per-turn progress git probe; a slow/locked repo degrades to "unknown" (assessment unchanged)
 - `agent.progress_trigger_min_turns`: integer `>= 1`, default `4` — turn floor for the
   `at_risk_no_commits` arm of the Layer-2 trigger predicate
+- `agent.overseer`: object, OPTIONAL — the Layer-2 AI overseer (§13.6). Disabled by default; never
+  changes the turn budget; fails open. Fields:
+  - `agent.overseer.enabled`: boolean, default `false` — master switch. An absent/empty resolved
+    `api_key` also disables it regardless of this flag.
+  - `agent.overseer.engine`: enum (`api` | `sidecar`), default `api` — only `api` (read-only
+    Anthropic Messages call) is implemented; `sidecar` is reserved and fails open.
+  - `agent.overseer.model`: string, default `claude-sonnet-4-6`
+  - `agent.overseer.effort`: string, default `low` — carried for adapter parity; not forwarded on
+    the direct Messages API path today
+  - `agent.overseer.api_key`: string, default `$ANTHROPIC_API_KEY` — resolved like
+    `tracker.api_key`/`$LINEAR_API_KEY`
+  - `agent.overseer.budget_threshold_k`: non-negative integer, default `4` — fire when
+    `turn >= agent.max_turns - k`
+  - `agent.overseer.min_turns_between`: non-negative integer, default `3` — cooldown between calls
+  - `agent.overseer.max_calls_per_session`: non-negative integer, default `2` — per-run call cap
+  - `agent.overseer.transcript_window`: non-negative integer, default `40` — bounded transcript
+    ring-buffer size fed as evidence
+  - `agent.overseer.log_globs`: array of strings, default
+    `["tmp/*build*.log", "tmp/*test*.log", "tmp/*validate*.log"]` — workspace-relative globs whose
+    tails are read as build/test evidence
+  - `agent.overseer.input_byte_limit`: non-negative integer, default `16384` — per-evidence-section
+    byte cap
+  - `agent.overseer.confidence_floor`: float `0.0..1.0`, default `0.6` — below this the verdict is
+    downgraded to a comment-only `continue`
+  - `agent.overseer.allow_abort`: boolean, default `false` — when false an `abort` verdict is
+    treated as `escalate`
+  - `agent.overseer.timeout_ms`: positive integer, default `30000` — overseer request timeout
 - `agent.kind`: enum (`codex` | `claude`), default `codex`
 - `agent.codex.command`: shell command string, default `codex app-server`
 - `agent.codex.approval_policy`: Codex `AskForApproval` value, default implementation-defined
@@ -2314,6 +2341,54 @@ The trigger predicate Layer 2 consumes is:
 status in [:stuck_state, :oscillating, :repeated_error]
 OR (at_risk_no_commits AND turn_count >= agent.progress_trigger_min_turns)
 ```
+
+### 13.6 AI Overseer (IDE-212, Layer 2)
+
+Layer 2 of the agent-run robustness defense (alongside the Layer-0 budget cutoff in §6/§9.4 and the
+Layer-1 progress signals in §13.5). Where Layer 1 only *reports* deterministic git signals, Layer 2
+is a gated, **read-only** AI overseer that *semantically* classifies a near-budget run and
+recommends one action. It is **disabled by default** (`agent.overseer.enabled`), runs at most a
+couple of times per run (never per turn), and **never changes the turn budget**. Every error path
+is **fail-open**: a transport / parse / timeout failure leaves the run exactly as Layer 1 left it.
+
+**Engine.** The implemented engine (`agent.overseer.engine: "api"`) is a single read-only call to
+the Anthropic Messages API. Read-only by construction: the only tool offered is `emit_verdict`,
+whose `input_schema` *is* the verdict contract, and `tool_choice` forces the model to call it — the
+model cannot read files, run commands, or touch the workspace. (`"sidecar"` is reserved for
+forward-compat and currently fails open / treated as disabled.)
+
+**Trigger (gating).** Evaluated at a turn boundary in the worker. The budget-threshold arm fires
+when `turn >= agent.max_turns - agent.overseer.budget_threshold_k`, gated by a cooldown
+(`agent.overseer.min_turns_between`) and a per-run cap (`agent.overseer.max_calls_per_session`) so
+it does not re-fire every turn from K down to 0. (The Layer-1 signal arm in §13.5 is a planned
+second trigger; it needs an orchestrator→worker signal channel that does not exist yet, so only the
+budget-threshold arm is wired today.)
+
+**Evidence (read-only).** A bounded bundle: issue title/description, the turn/budget counters, the
+`git diff HEAD` summary (single non-mutating probe, byte-capped), tails of build/test logs matching
+`agent.overseer.log_globs`, and a bounded window (`agent.overseer.transcript_window`) of the
+**normalized** transcript envelopes (`%{event:, payload:}`) both adapters emit — the
+adapter-agnostic consumption point the parity contract relies on.
+
+**Verdict → action.** The structured verdict is `verdict` (converging / thrashing / blocked),
+`confidence` (0..1), `recommended_action`, `steering_message` (non-null **iff** the action is
+`nudge`), and `rationale`. The worker maps it to a concrete action, enforcing:
+
+- `confidence < agent.overseer.confidence_floor` ⇒ downgrade to a comment-only `continue` (never
+  steers or escalates on a low-confidence verdict);
+- `continue` — no-op (healthy run proceeds untouched);
+- `nudge` — the `steering_message` rides the *next* turn's prompt as an explicit directive, plus one
+  Linear comment; if the steering is missing/empty it downgrades to `continue`;
+- `recommend_extend_budget` — one Linear comment + log only; **never** changes `agent.max_turns`;
+- `escalate` — routed through the existing deterministic-failure escalation pipeline (§13.x /
+  IDE-73) via the `:overseer_escalation` error code, moving the issue to
+  `agent.deterministic_failure_escalation_state`;
+- `abort` — treated as `escalate` unless `agent.overseer.allow_abort` is true (never autonomously
+  kills a borderline session by default).
+
+Config lives under `agent.overseer.*` (§5.3.5); `agent.overseer.api_key` resolves from
+`$ANTHROPIC_API_KEY` (mirroring `tracker.api_key`/`$LINEAR_API_KEY`), and an absent key disables the
+overseer regardless of the `enabled` flag.
 
 ## 14. Failure Model and Recovery Strategy
 

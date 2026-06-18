@@ -177,6 +177,73 @@ defmodule SymphonyElixir.Git do
     end
   end
 
+  @doc """
+  Read-only diff evidence for the Layer 2 overseer (IDE-212): `git diff HEAD
+  --stat` followed by the full `git diff HEAD` patch, both captured in one
+  non-mutating `sh` invocation. The combined output is truncated to
+  `byte_limit` bytes (head-biased — the `--stat` summary plus the start of the
+  patch survive). Returns `{:ok, ""}` on a clean tree.
+
+  Touches nothing: no index copy, no `add`, no HEAD/branch/working-tree changes.
+  Best-effort and timeout-bounded like the sibling probes, so a slow/locked repo
+  degrades to `{:error, _}` rather than wedging the caller.
+  """
+  @spec diff_summary(Path.t(), worker_host(), non_neg_integer(), pos_integer()) ::
+          {:ok, String.t()} | {:error, term()}
+  def diff_summary(workspace, worker_host \\ nil, byte_limit \\ 16_384, timeout_ms \\ @default_timeout_ms)
+      when is_binary(workspace) and is_integer(byte_limit) and byte_limit >= 0 do
+    script = build_diff_script()
+
+    case run_script(workspace, script, worker_host, timeout_ms) do
+      {:ok, {output, 0}} -> {:ok, truncate_head(output, byte_limit)}
+      {:ok, {output, status}} -> {:error, {:git_failed, status, String.trim(output)}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # `git diff HEAD` covers tracked edits (staged + unstaged) against the last
+  # commit. Untracked files are not in the diff, but the porcelain/`--stat`
+  # surface and the overseer's other evidence (logs, transcript) cover the new
+  # work; keeping this to a single read-only `diff` keeps the probe trivially safe.
+  @spec build_diff_script() :: String.t()
+  defp build_diff_script do
+    """
+    if [ ! -d .git ] && ! git rev-parse --git-dir >/dev/null 2>&1; then
+      echo __SYMPHONY_NOT_GIT__
+      exit 0
+    fi
+    if ! git rev-parse --verify -q HEAD >/dev/null 2>&1; then
+      git diff --stat 2>/dev/null || true
+      git diff 2>/dev/null || true
+      exit 0
+    fi
+    git diff HEAD --stat
+    git diff HEAD
+    """
+  end
+
+  @spec truncate_head(String.t(), non_neg_integer()) :: String.t()
+  defp truncate_head(output, byte_limit) do
+    trimmed = String.trim(output)
+
+    cond do
+      String.contains?(trimmed, "__SYMPHONY_NOT_GIT__") -> ""
+      byte_size(trimmed) <= byte_limit -> trimmed
+      true -> trim_invalid_tail(binary_part(trimmed, 0, byte_limit)) <> "\n…[truncated]"
+    end
+  end
+
+  # `binary_part/3` can split a multibyte UTF-8 codepoint; drop the dangling
+  # bytes so the result is always a valid string.
+  @spec trim_invalid_tail(binary()) :: String.t()
+  defp trim_invalid_tail(bin) do
+    cond do
+      String.valid?(bin) -> bin
+      byte_size(bin) == 0 -> ""
+      true -> trim_invalid_tail(binary_part(bin, 0, byte_size(bin) - 1))
+    end
+  end
+
   # Distinct from `Workspace.safe_identifier/1` (which preserves case and forbids
   # `/`): a ref path component is lowercased and keeps `/` as a path separator.
   @spec safe_ref_component(String.t()) :: String.t()

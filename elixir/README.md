@@ -208,6 +208,17 @@ repo:
   window; `agent.progress_signal_git_timeout_ms` (default `2000`) bounds the
   probe; `agent.progress_trigger_min_turns` (default `4`) is the turn floor for
   the overseer trigger. See `docs/progress_signals.md`.
+- `agent.overseer` (OPTIONAL, disabled by default) is the Layer-2 AI overseer
+  (IDE-212): a gated, **read-only** Anthropic call made at most a couple of times
+  late in the budget (never per turn) that semantically classifies the run
+  (converging/thrashing/blocked) and recommends one action — `nudge` (steers the
+  next turn's prompt + a Linear comment), `recommend_extend_budget` (comment +
+  log only, **never** changes `max_turns`), `escalate` (routed through the
+  deterministic-failure pipeline), or `abort` (treated as `escalate` unless
+  `allow_abort`). A verdict below `confidence_floor` (default `0.6`) is downgraded
+  to a comment-only continue. Enable with `agent.overseer.enabled: true` and a
+  resolvable `agent.overseer.api_key` (defaults to `$ANTHROPIC_API_KEY`); every
+  error path fails open, leaving the run untouched. See SPEC.md §13.6.
 - `agent.codex.quota` / `agent.claude.quota` (both OPTIONAL, disabled by
   default) add account-quota-aware dispatch pausing: when `enabled`, Symphony
   stops dispatching *new* issues while the active provider's usage is at/above
