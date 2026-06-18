@@ -1,23 +1,27 @@
 defmodule SymphonyElixir.Overseer do
   @moduledoc """
-  Layer 2 of the IDE-189 agent-run robustness defense (IDE-212): a gated,
-  read-only AI overseer that semantically classifies a near-budget run and
-  recommends an action. It is invoked at most a couple of times per run (never
-  per turn), makes a single read-only Anthropic call, and **never** changes the
-  turn budget. Every error path is fail-open: a transport/parse/timeout failure
-  leaves the run untouched.
+  Layer 2 of the IDE-189 agent-run robustness defense (IDE-212, extended by
+  IDE-230): a gated AI overseer that semantically classifies an extending run and
+  either **approves** continued extension or **gives up** (escalates to human
+  review with findings). It makes a single read-only Anthropic call per
+  consultation. Every error path is fail-open: a transport/parse/timeout failure
+  yields no judgement, and the worker does not auto-extend past the base budget
+  without one (see `SymphonyElixir.AgentRunner`).
 
   Pure decision surface:
 
-    * `should_run?/2` — the budget-threshold trigger plus cooldown / per-session
-      cap (the Layer-1 `ProgressSignal.trigger?/2` signal arm is a planned second
-      trigger; it needs an orchestrator→worker signal channel that does not exist
-      yet, so only the budget-threshold arm is wired today).
+    * `triggered?/3` — the IDE-230 trigger: the consecutive deterministic
+      fail-streak reached `streak_to_llm`, or the turn is a multiple of
+      `mandatory_llm_every` (a periodic semantic review).
+    * `should_run?/2` — `triggered?/3` plus the cooldown / per-session cap /
+      engine gates. Enable/key gating is the caller's job
+      (`Config.overseer_enabled?/0`).
     * `run/3` — assemble evidence → call the engine → parse + validate the
       structured verdict.
     * `decide_action/2` — map a verdict to a concrete action, enforcing the
       confidence floor, the `steering_message`-iff-`nudge` invariant, and the
-      `allow_abort` gate.
+      `allow_abort` gate. Approve actions keep the run extending; `escalate` /
+      `abort` carry the give-up rationale + structured findings.
   """
 
   require Logger
@@ -34,15 +38,16 @@ defmodule SymphonyElixir.Overseer do
           confidence: float(),
           recommended_action: atom(),
           steering_message: String.t() | nil,
+          findings: map() | nil,
           rationale: String.t()
         }
 
-  @typedoc "Trigger context supplied by the worker at a turn boundary."
+  @typedoc "Trigger context supplied by the worker at a turn boundary (IDE-230)."
   @type trigger_ctx :: %{
           turn: non_neg_integer(),
-          max_turns: non_neg_integer(),
           calls: non_neg_integer(),
-          last_call_turn: non_neg_integer() | nil
+          last_call_turn: non_neg_integer() | nil,
+          fail_streak: non_neg_integer()
         }
 
   @typedoc "Action the worker applies after a verdict (or a downgrade thereof)."
@@ -50,25 +55,41 @@ defmodule SymphonyElixir.Overseer do
           {:continue, atom()}
           | {:nudge, String.t()}
           | {:recommend_extend_budget, String.t()}
-          | {:escalate, String.t()}
-          | {:abort, String.t()}
+          | {:escalate, String.t(), map() | nil}
+          | {:abort, String.t(), map() | nil}
 
   @doc """
-  The budget-threshold trigger, gated by the cooldown (`min_turns_between`) and
-  the per-run cap (`max_calls_per_session`). Returns `false` when the engine is
-  not the implemented `"api"` path. Enable/key gating is the caller's job
-  (`Config.overseer_enabled?/0`).
+  The IDE-230 trigger predicate: `true` when the consecutive deterministic
+  fail-streak has reached `streak_to_llm`, or `turn` is a multiple of
+  `mandatory_llm_every` (the periodic mandatory review; `0` disables that arm).
+  """
+  @spec triggered?(non_neg_integer(), non_neg_integer(), OverseerConfig.t()) :: boolean()
+  def triggered?(turn, fail_streak, %OverseerConfig{} = config) do
+    streak_trigger?(fail_streak, config.streak_to_llm) or
+      cadence_trigger?(turn, config.mandatory_llm_every)
+  end
+
+  @doc """
+  `triggered?/3` gated by the engine (`"api"`), the per-run call cap
+  (`max_calls_per_session`), and the cooldown (`min_turns_between`).
   """
   @spec should_run?(trigger_ctx(), OverseerConfig.t()) :: boolean()
-  def should_run?(%{turn: turn, max_turns: max, calls: calls, last_call_turn: last}, %OverseerConfig{} = config) do
+  def should_run?(%{turn: turn, calls: calls, last_call_turn: last, fail_streak: streak}, %OverseerConfig{} = config) do
     config.engine == "api" and
-      budget_threshold_met?(turn, max, config.budget_threshold_k) and
+      triggered?(turn, streak, config) and
       calls < config.max_calls_per_session and
       cooldown_ok?(turn, last, config.min_turns_between)
   end
 
-  @spec budget_threshold_met?(non_neg_integer(), non_neg_integer(), non_neg_integer()) :: boolean()
-  defp budget_threshold_met?(turn, max, k), do: turn >= max - k
+  @spec streak_trigger?(non_neg_integer(), non_neg_integer()) :: boolean()
+  defp streak_trigger?(streak, threshold) when is_integer(threshold) and threshold > 0,
+    do: streak >= threshold
+
+  defp streak_trigger?(_streak, _threshold), do: false
+
+  @spec cadence_trigger?(non_neg_integer(), non_neg_integer()) :: boolean()
+  defp cadence_trigger?(turn, every) when is_integer(every) and every > 0, do: rem(turn, every) == 0
+  defp cadence_trigger?(_turn, _every), do: false
 
   @spec cooldown_ok?(non_neg_integer(), non_neg_integer() | nil, non_neg_integer()) :: boolean()
   defp cooldown_ok?(_turn, nil, _min), do: true
@@ -107,6 +128,7 @@ defmodule SymphonyElixir.Overseer do
          {:ok, action} <- enum(raw, "recommended_action", @actions),
          {:ok, confidence} <- number(raw, "confidence"),
          {:ok, steering} <- steering(raw),
+         {:ok, findings} <- findings(raw),
          {:ok, rationale} <- string(raw, "rationale") do
       {:ok,
        %{
@@ -114,6 +136,7 @@ defmodule SymphonyElixir.Overseer do
          confidence: confidence,
          recommended_action: action_atom(action),
          steering_message: steering,
+         findings: findings,
          rationale: rationale
        }}
     end
@@ -141,6 +164,10 @@ defmodule SymphonyElixir.Overseer do
     * confidence below `confidence_floor` ⇒ downgrade to `{:continue, :low_confidence}`;
     * `nudge` requires a non-empty `steering_message`, else downgrade to continue;
     * `abort` is treated as `escalate` unless `allow_abort` is true.
+
+  Approve actions (`continue` / `nudge` / `recommend_extend_budget`, and any
+  confidence-floor downgrade) keep the run extending; `escalate` / `abort` carry
+  the give-up `rationale` and the structured `findings` for the human hand-off.
   """
   @spec decide_action(verdict(), OverseerConfig.t()) :: action()
   def decide_action(%{confidence: confidence}, %OverseerConfig{confidence_floor: floor})
@@ -161,13 +188,15 @@ defmodule SymphonyElixir.Overseer do
     {:recommend_extend_budget, r}
   end
 
-  def decide_action(%{recommended_action: :escalate, rationale: r}, _config), do: {:escalate, r}
+  def decide_action(%{recommended_action: :escalate, rationale: r, findings: f}, _config),
+    do: {:escalate, r, f}
 
-  def decide_action(%{recommended_action: :abort, rationale: r}, %OverseerConfig{allow_abort: true}) do
-    {:abort, r}
+  def decide_action(%{recommended_action: :abort, rationale: r, findings: f}, %OverseerConfig{allow_abort: true}) do
+    {:abort, r, f}
   end
 
-  def decide_action(%{recommended_action: :abort, rationale: r}, _config), do: {:escalate, r}
+  def decide_action(%{recommended_action: :abort, rationale: r, findings: f}, _config),
+    do: {:escalate, r, f}
 
   # ── parse helpers ───────────────────────────────────────────────────────────
 
@@ -206,6 +235,19 @@ defmodule SymphonyElixir.Overseer do
       nil -> {:ok, nil}
       value when is_binary(value) -> {:ok, value}
       _ -> {:error, {:overseer_bad_field, "steering_message"}}
+    end
+  end
+
+  # findings (IDE-230) is an optional structured object: a map (background
+  # evidence on give-up) or JSON null / absent (approve path). A non-map,
+  # non-null value is rejected.
+  @spec findings(map()) :: {:ok, map() | nil} | {:error, term()}
+  defp findings(raw) do
+    case Map.get(raw, "findings", :__absent__) do
+      :__absent__ -> {:ok, nil}
+      nil -> {:ok, nil}
+      value when is_map(value) -> {:ok, value}
+      _ -> {:error, {:overseer_bad_field, "findings"}}
     end
   end
 end

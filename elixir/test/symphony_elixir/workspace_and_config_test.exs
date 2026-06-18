@@ -1418,13 +1418,23 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.command == "#{codex_bin} app-server"
   end
 
-  test "overseer config defaults to disabled with no overseer block (IDE-212)" do
+  test "overseer config defaults to on-but-dormant-without-a-key (IDE-212 / IDE-230)" do
+    # Clear the ambient `$ANTHROPIC_API_KEY` so the default-on overseer stays
+    # dormant (no resolved key) for a deterministic assertion.
+    previous_anthropic = System.get_env("ANTHROPIC_API_KEY")
+    System.delete_env("ANTHROPIC_API_KEY")
+    on_exit(fn -> restore_env("ANTHROPIC_API_KEY", previous_anthropic) end)
+
     write_workflow_file!(Workflow.workflow_file_path(), [])
 
     overseer = Config.overseer()
-    assert overseer.enabled == false
+    # IDE-230: on by default, but dormant until a key resolves.
+    assert overseer.enabled == true
     assert overseer.engine == "api"
-    assert overseer.budget_threshold_k == 4
+    assert overseer.streak_to_llm == 5
+    assert overseer.mandatory_llm_every == 40
+    assert overseer.absolute_max_turns == 500
+    assert overseer.max_calls_per_session == 25
     refute Config.overseer_enabled?()
   end
 

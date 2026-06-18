@@ -26,13 +26,28 @@ Derived status (most→least severe) and an independent flag, with
 `K = agent.progress_signal_window_k`:
 
 ```
-:oscillating     last 4 hashes are A,B,A,B with A != B
+:oscillating     the tree CHANGED from last turn but revisited an earlier state
+                 (current hash reappears within the recent-hash window) — a cycle
 :repeated_error  error_sig != nil AND its streak >= K
 :stuck_state     identical hash for >= K turns AND the tree is empty
 :progressing     otherwise
 
 at_risk_no_commits = commits_since == 0 AND turn_count >= K
 ```
+
+> **IDE-230 — revisit detection.** `:oscillating` was generalized from the old
+> hard-coded A,B,A,B (period-2) match to **revisit detection** over a wider
+> hash window: any state the tree returns to after changing (A,B,C,A,B,C, … and
+> non-strict "wandered back" churn) classifies as `:oscillating`. The
+> `current != prev` guard keeps an unchanged tree as `:stuck_state`, not a cycle.
+
+> **IDE-230 — worker-side use.** In addition to the orchestrator's report-only
+> path, the Layer-2 overseer now also runs this same `ProgressSignal` core
+> **worker-side** in `AgentRunner` (rolling state held on the run-scoped
+> `Overseer.Session`) to drive its consult trigger. Worker-side, `error_sig` is
+> always `nil` (terminal errors abort before the turn boundary), so
+> `:repeated_error` does not fire there — `:stuck_state` / `:oscillating` /
+> `at_risk_no_commits` carry the signal.
 
 ## The empty-tree guard (the IDE-189 lesson)
 

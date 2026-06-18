@@ -112,6 +112,10 @@ defmodule SymphonyElixir.TestSupport do
           overseer_api_key: nil,
           overseer_model: nil,
           overseer_budget_threshold_k: nil,
+          overseer_streak_to_llm: nil,
+          overseer_mandatory_llm_every: nil,
+          overseer_absolute_max_turns: nil,
+          overseer_winddown_timeout_ms: nil,
           overseer_min_turns_between: nil,
           overseer_max_calls_per_session: nil,
           overseer_confidence_floor: nil,
@@ -162,14 +166,6 @@ defmodule SymphonyElixir.TestSupport do
     agent_kind = Keyword.get(config, :agent_kind)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
-    overseer_enabled = Keyword.get(config, :overseer_enabled)
-    overseer_api_key = Keyword.get(config, :overseer_api_key)
-    overseer_model = Keyword.get(config, :overseer_model)
-    overseer_budget_threshold_k = Keyword.get(config, :overseer_budget_threshold_k)
-    overseer_min_turns_between = Keyword.get(config, :overseer_min_turns_between)
-    overseer_max_calls_per_session = Keyword.get(config, :overseer_max_calls_per_session)
-    overseer_confidence_floor = Keyword.get(config, :overseer_confidence_floor)
-    overseer_allow_abort = Keyword.get(config, :overseer_allow_abort)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     max_concurrent_agents_by_state = Keyword.get(config, :max_concurrent_agents_by_state)
     retry_policy = Keyword.get(config, :retry_policy)
@@ -222,16 +218,7 @@ defmodule SymphonyElixir.TestSupport do
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
         retry_policy && "  retry_policy: #{yaml_value(retry_policy)}",
-        overseer_yaml(
-          overseer_enabled,
-          overseer_api_key,
-          overseer_model,
-          overseer_budget_threshold_k,
-          overseer_min_turns_between,
-          overseer_max_calls_per_session,
-          overseer_confidence_floor,
-          overseer_allow_abort
-        ),
+        overseer_yaml(config),
         claude_quota && "  claude:",
         claude_quota && "    quota: #{yaml_value(claude_quota)}",
         "codex:",
@@ -308,24 +295,32 @@ defmodule SymphonyElixir.TestSupport do
     |> Enum.join("\n")
   end
 
-  defp overseer_yaml(enabled, _key, _model, _k, _min, _cap, _floor, _abort) when enabled in [nil, false],
-    do: nil
+  defp overseer_yaml(config) do
+    if Keyword.get(config, :overseer_enabled) do
+      abort = Keyword.get(config, :overseer_allow_abort)
 
-  defp overseer_yaml(true, key, model, k, min, cap, floor, abort) do
-    [
-      "  overseer:",
-      "    enabled: true",
-      key && "    api_key: #{yaml_value(key)}",
-      model && "    model: #{yaml_value(model)}",
-      k && "    budget_threshold_k: #{yaml_value(k)}",
-      min && "    min_turns_between: #{yaml_value(min)}",
-      cap && "    max_calls_per_session: #{yaml_value(cap)}",
-      floor && "    confidence_floor: #{yaml_value(floor)}",
-      !is_nil(abort) && "    allow_abort: #{yaml_value(abort)}"
-    ]
-    |> Enum.reject(&(&1 in [nil, false]))
-    |> Enum.join("\n")
+      [
+        "  overseer:",
+        "    enabled: true",
+        overseer_line("api_key", Keyword.get(config, :overseer_api_key)),
+        overseer_line("model", Keyword.get(config, :overseer_model)),
+        overseer_line("budget_threshold_k", Keyword.get(config, :overseer_budget_threshold_k)),
+        overseer_line("streak_to_llm", Keyword.get(config, :overseer_streak_to_llm)),
+        overseer_line("mandatory_llm_every", Keyword.get(config, :overseer_mandatory_llm_every)),
+        overseer_line("absolute_max_turns", Keyword.get(config, :overseer_absolute_max_turns)),
+        overseer_line("winddown_timeout_ms", Keyword.get(config, :overseer_winddown_timeout_ms)),
+        overseer_line("min_turns_between", Keyword.get(config, :overseer_min_turns_between)),
+        overseer_line("max_calls_per_session", Keyword.get(config, :overseer_max_calls_per_session)),
+        overseer_line("confidence_floor", Keyword.get(config, :overseer_confidence_floor)),
+        !is_nil(abort) && "    allow_abort: #{yaml_value(abort)}"
+      ]
+      |> Enum.reject(&(&1 in [nil, false]))
+      |> Enum.join("\n")
+    end
   end
+
+  defp overseer_line(_key, nil), do: nil
+  defp overseer_line(key, value), do: "    #{key}: #{yaml_value(value)}"
 
   defp observability_yaml(enabled, refresh_ms, render_interval_ms) do
     [

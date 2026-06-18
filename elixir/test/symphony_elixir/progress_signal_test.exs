@@ -74,6 +74,32 @@ defmodule SymphonyElixir.ProgressSignalTest do
       assert state.assessment.status == :oscillating
     end
 
+    test ":oscillating on a longer A,B,C,A,B,C cycle (IDE-230 revisit detection)" do
+      seq = [
+        {"a", false, 0, nil},
+        {"b", false, 0, nil},
+        {"c", false, 0, nil},
+        {"a", false, 0, nil},
+        {"b", false, 0, nil},
+        {"c", false, 0, nil}
+      ]
+
+      assert run(seq, settings()).assessment.status == :oscillating
+    end
+
+    test "a strictly forward sequence of fresh trees stays :progressing" do
+      seq = for t <- 1..8, do: {"h#{t}", false, t, nil}
+      assert run(seq, settings()).assessment.status == :progressing
+    end
+
+    test "a one-off revisit trips for that turn but clears on the next fresh tree" do
+      revisited = run([{"a", false, 0, nil}, {"b", false, 0, nil}, {"a", false, 0, nil}], settings())
+      assert revisited.assessment.status == :oscillating
+
+      recovered = run([{"a", false, 1, nil}, {"b", false, 1, nil}, {"a", false, 1, nil}, {"d", false, 2, nil}], settings())
+      assert recovered.assessment.status == :progressing
+    end
+
     test ":repeated_error once the same signature streaks to K" do
       seq = List.duplicate({"h", false, 1, {:claude, :invalid_request}}, 4)
       state = run(seq, settings())

@@ -1,9 +1,10 @@
 defmodule SymphonyElixir.OverseerTest do
   @moduledoc """
-  Pure-decision coverage for the Layer 2 overseer (IDE-212): the budget-threshold
-  trigger (with cooldown + per-session cap), verdict parsing/validation, the
-  verdict→action map (confidence floor, nudge-iff-steering invariant, abort gate),
-  and the `run/3` engine seam (fail-open on a malformed/error engine response).
+  Pure-decision coverage for the Layer 2 overseer (IDE-212 / IDE-230): the
+  streak/cadence trigger (with cooldown + per-session cap), verdict
+  parsing/validation, the verdict→action map (confidence floor,
+  nudge-iff-steering invariant, abort gate, give-up findings), and the `run/3`
+  engine seam (fail-open on a malformed/error engine response).
   """
   use ExUnit.Case, async: true
 
@@ -14,8 +15,8 @@ defmodule SymphonyElixir.OverseerTest do
     struct(%OverseerConfig{}, overrides)
   end
 
-  defp ctx(overrides \\ %{}) do
-    Map.merge(%{turn: 16, max_turns: 20, calls: 0, last_call_turn: nil}, overrides)
+  defp ctx(overrides) do
+    Map.merge(%{turn: 7, calls: 0, last_call_turn: nil, fail_streak: 0}, overrides)
   end
 
   defp verdict(overrides \\ %{}) do
@@ -24,39 +25,60 @@ defmodule SymphonyElixir.OverseerTest do
       confidence: 0.9,
       recommended_action: :continue,
       steering_message: nil,
+      findings: nil,
       rationale: "looks fine"
     }
 
     Map.merge(base, overrides)
   end
 
-  describe "should_run?/2" do
-    test "fires at the budget threshold within the cooldown/cap window" do
-      assert Overseer.should_run?(ctx(%{turn: 16}), config(%{budget_threshold_k: 4}))
+  describe "triggered?/3" do
+    test "fires when the fail-streak reaches streak_to_llm" do
+      assert Overseer.triggered?(7, 5, config(%{streak_to_llm: 5}))
+      refute Overseer.triggered?(7, 4, config(%{streak_to_llm: 5}))
     end
 
-    test "does not fire before the threshold" do
-      refute Overseer.should_run?(ctx(%{turn: 15}), config(%{budget_threshold_k: 4}))
+    test "fires on the mandatory cadence regardless of streak" do
+      assert Overseer.triggered?(40, 0, config(%{mandatory_llm_every: 40}))
+      refute Overseer.triggered?(41, 0, config(%{mandatory_llm_every: 40}))
+    end
+
+    test "mandatory_llm_every: 0 disables the periodic arm" do
+      refute Overseer.triggered?(0, 0, config(%{mandatory_llm_every: 0, streak_to_llm: 5}))
+    end
+  end
+
+  describe "should_run?/2" do
+    test "fires via the fail-streak within the cooldown/cap window" do
+      assert Overseer.should_run?(ctx(%{turn: 7, fail_streak: 5}), config(%{streak_to_llm: 5}))
+    end
+
+    test "fires via the mandatory cadence" do
+      assert Overseer.should_run?(ctx(%{turn: 40, fail_streak: 0}), config(%{mandatory_llm_every: 40}))
+    end
+
+    test "does not fire when neither trigger is met" do
+      refute Overseer.should_run?(ctx(%{turn: 7, fail_streak: 2}), config(%{streak_to_llm: 5, mandatory_llm_every: 40}))
     end
 
     test "does not fire once the per-session cap is reached" do
-      refute Overseer.should_run?(ctx(%{calls: 2}), config(%{max_calls_per_session: 2}))
+      refute Overseer.should_run?(ctx(%{turn: 7, fail_streak: 5, calls: 2}), config(%{max_calls_per_session: 2}))
     end
 
     test "respects the cooldown (min_turns_between)" do
       refute Overseer.should_run?(
-               ctx(%{turn: 17, last_call_turn: 16}),
+               ctx(%{turn: 17, fail_streak: 5, last_call_turn: 16}),
                config(%{min_turns_between: 3})
              )
 
       assert Overseer.should_run?(
-               ctx(%{turn: 19, last_call_turn: 16}),
+               ctx(%{turn: 19, fail_streak: 5, last_call_turn: 16}),
                config(%{min_turns_between: 3})
              )
     end
 
     test "never fires for an unsupported engine" do
-      refute Overseer.should_run?(ctx(), config(%{engine: "sidecar"}))
+      refute Overseer.should_run?(ctx(%{turn: 40}), config(%{engine: "sidecar"}))
     end
   end
 
@@ -109,7 +131,28 @@ defmodule SymphonyElixir.OverseerTest do
         "rationale" => "work is done but uncommitted"
       }
 
-      assert {:ok, %{steering_message: "commit and push"}} = Overseer.parse(raw)
+      assert {:ok, %{steering_message: "commit and push", findings: nil}} = Overseer.parse(raw)
+    end
+
+    test "parses structured findings (and tolerates absent/null)" do
+      findings = %{"summary" => "stuck", "blockers" => ["x"], "next_steps_for_human" => ["y"]}
+
+      with_findings = %{
+        "verdict" => "thrashing",
+        "confidence" => 0.8,
+        "recommended_action" => "escalate",
+        "steering_message" => nil,
+        "findings" => findings,
+        "rationale" => "no progress"
+      }
+
+      assert {:ok, %{findings: ^findings}} = Overseer.parse(with_findings)
+
+      assert {:ok, %{findings: nil}} =
+               Overseer.parse(%{with_findings | "findings" => nil})
+
+      assert {:error, {:overseer_bad_field, "findings"}} =
+               Overseer.parse(%{with_findings | "findings" => "not-an-object"})
     end
 
     test "rejects a non-map" do
@@ -144,25 +187,30 @@ defmodule SymphonyElixir.OverseerTest do
                )
     end
 
-    test "budget extension and escalate carry the rationale" do
+    test "budget extension carries the rationale" do
       assert {:recommend_extend_budget, "needs more turns"} =
                Overseer.decide_action(
                  verdict(%{recommended_action: :recommend_extend_budget, rationale: "needs more turns"}),
                  config()
                )
+    end
 
-      assert {:escalate, "human please"} =
+    test "escalate carries the rationale and findings" do
+      findings = %{"summary" => "stuck", "blockers" => ["missing secret"]}
+
+      assert {:escalate, "human please", ^findings} =
                Overseer.decide_action(
-                 verdict(%{recommended_action: :escalate, rationale: "human please"}),
+                 verdict(%{recommended_action: :escalate, rationale: "human please", findings: findings}),
                  config()
                )
     end
 
-    test "abort downgrades to escalate unless allow_abort" do
-      v = verdict(%{recommended_action: :abort, rationale: "wasted spend"})
+    test "abort downgrades to escalate unless allow_abort (carrying findings)" do
+      findings = %{"summary" => "wasted"}
+      v = verdict(%{recommended_action: :abort, rationale: "wasted spend", findings: findings})
 
-      assert {:escalate, "wasted spend"} = Overseer.decide_action(v, config(%{allow_abort: false}))
-      assert {:abort, "wasted spend"} = Overseer.decide_action(v, config(%{allow_abort: true}))
+      assert {:escalate, "wasted spend", ^findings} = Overseer.decide_action(v, config(%{allow_abort: false}))
+      assert {:abort, "wasted spend", ^findings} = Overseer.decide_action(v, config(%{allow_abort: true}))
     end
   end
 
