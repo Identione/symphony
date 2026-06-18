@@ -1318,6 +1318,130 @@ defmodule SymphonyElixir.OrchestratorCoverageTest do
     assert Enum.any?(sibling_node.requirements, &(&1 =~ "active state"))
   end
 
+  test "dependency_graph omits an active parent assigned elsewhere with no managed children" do
+    use_memory_tracker()
+    pid = start_orchestrator(:DependencyGraphActiveParentAbsent)
+
+    # The child is handled by another worker, so it is not a managed leaf and
+    # cannot anchor the parent container.
+    child = %Issue{
+      id: "iss-elsewhere-child",
+      identifier: "ELS-2",
+      title: "Child handled elsewhere",
+      state: "In Progress",
+      state_type: "started",
+      labels: [],
+      parent_id: "parent-elsewhere",
+      assigned_to_worker: false
+    }
+
+    # An active umbrella issue Linear's poll returns. It is a tracker, not a work
+    # unit, and is assigned elsewhere; it must not anchor a container on its own.
+    parent = %Issue{
+      id: "parent-elsewhere",
+      identifier: "ELS-1",
+      title: "Active umbrella owned elsewhere",
+      state: "In Progress",
+      state_type: "started",
+      has_children: true,
+      children: [child],
+      assigned_to_worker: false
+    }
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_candidate_issues_response,
+      {:ok, [parent]}
+    )
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_issue_states_by_ids_response,
+      {:ok, []}
+    )
+
+    send(pid, :run_poll_cycle)
+    state = wait_for_state(pid, fn s -> s.poll_check_in_progress == false end, 2_000)
+
+    refute Map.has_key?(state.dependency_graph, "parent-elsewhere")
+    refute Map.has_key?(state.dependency_graph, "iss-elsewhere-child")
+  end
+
+  test "dependency_graph omits an active leaf that fails the assignee filter" do
+    use_memory_tracker()
+    pid = start_orchestrator(:DependencyGraphAssigneeAbsent)
+
+    leaf = issue("iss-other-worker", "OTH-1", state: "In Progress", assigned_to_worker: false)
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_candidate_issues_response,
+      {:ok, [leaf]}
+    )
+
+    send(pid, :run_poll_cycle)
+    state = wait_for_state(pid, fn s -> s.poll_check_in_progress == false end, 2_000)
+
+    refute Map.has_key?(state.dependency_graph, "iss-other-worker")
+  end
+
+  test "dependency_graph omits an active leaf that fails the required-label filter" do
+    use_memory_tracker(tracker_required_labels: ["agent"])
+    pid = start_orchestrator(:DependencyGraphLabelAbsent)
+
+    leaf = issue("iss-unlabeled", "LBL-1", state: "In Progress", labels: ["other"])
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_candidate_issues_response,
+      {:ok, [leaf]}
+    )
+
+    send(pid, :run_poll_cycle)
+    state = wait_for_state(pid, fn s -> s.poll_check_in_progress == false end, 2_000)
+
+    refute Map.has_key?(state.dependency_graph, "iss-unlabeled")
+  end
+
+  test "dependency_graph keeps an unmanaged blocker of a managed candidate visible" do
+    use_memory_tracker()
+    pid = start_orchestrator(:DependencyGraphUnmanagedBlocker)
+
+    blocker_ref = %{id: "iss-unmanaged-blk", identifier: "UNM-1", state: "In Progress"}
+    candidate = issue("iss-managed-cand", "MAN-1", state: "In Progress", blocked_by: [blocker_ref])
+
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_candidate_issues_response,
+      {:ok, [candidate]}
+    )
+
+    # The blocker is not managed by this instance; expansion cannot fetch it, so
+    # it must still surface as a placeholder anchored by the managed candidate.
+    Application.put_env(
+      :symphony_elixir,
+      :memory_tracker_fetch_issue_states_by_ids_response,
+      {:error, :rate_limited}
+    )
+
+    send(pid, :run_poll_cycle)
+
+    state =
+      wait_for_state(
+        pid,
+        fn s -> Map.has_key?(s.dependency_graph, "iss-unmanaged-blk") end,
+        2_000
+      )
+
+    blocker_node = state.dependency_graph["iss-unmanaged-blk"]
+    assert blocker_node.placeholder == true
+    assert blocker_node.identifier == "UNM-1"
+    assert blocker_node.state == "In Progress"
+
+    assert Map.has_key?(state.dependency_graph, "iss-managed-cand")
+    assert Map.has_key?(state.dependency_blocked, "iss-managed-cand")
+  end
+
   test "dependency_blocked self-heals when an upstream blocker flips terminal between polls" do
     use_memory_tracker()
     pid = start_orchestrator(:DependencySelfHeal)

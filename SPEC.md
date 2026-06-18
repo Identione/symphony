@@ -315,17 +315,20 @@ Fields:
   is set when the running issue is paused and cleared when it is dispatched. In-memory only; cleared
   on restart.)
 - `dependency_graph` (map `issue_id -> graph node projection`; observability-only node set for the
-  dashboard dependency graph — active candidates plus their transitive blockers (`blockers of
-  blockers`). Rebuilt per successful candidate fetch with last-known-good retained on failure.
-  Expansion is bounded by a per-refresh round cap and a hard node cap so a deep blocker chain
-  cannot drive unbounded Linear API usage; truncated ids surface as placeholder nodes. Never
-  consulted by dispatch. Sub-issue containers are overlaid on this set: a node carries `kind`
-  (`:container` for a parent/umbrella node, `:issue` otherwise), `parent` (the container id a
-  sub-issue belongs to, or null), and — for sub-issues — `managed` (false when this instance would
-  not pick the issue up) with `requirements` (the inverse of the dispatch rules: what must change to
-  manage it). Container nodes also carry `child_total`/`child_done`. Containers are anchored on
-  managed work: a container is built only for the parent of an issue the poll already returned, then
-  *every* sub-issue of that parent is surfaced — managed or not — so the operator sees the full
+  dashboard dependency graph — managed candidates plus their transitive blockers (`blockers of
+  blockers`). Roots are the issues this instance would actually dispatch (the candidate predicate),
+  not every issue the active-state poll returns, so an active parent or a leaf failing the
+  assignee/label filters does not appear merely because Linear returned it. Rebuilt per successful
+  candidate fetch with last-known-good retained on failure. Expansion is bounded by a per-refresh
+  round cap and a hard node cap so a deep blocker chain cannot drive unbounded Linear API usage;
+  truncated ids surface as placeholder nodes. Never consulted by dispatch. Sub-issue containers are
+  overlaid on this set: a node carries `kind` (`:container` for a parent/umbrella node, `:issue`
+  otherwise), `parent` (the container id a sub-issue belongs to, or null), and — for sub-issues —
+  `managed` (false when this instance would not pick the issue up) with `requirements` (the inverse
+  of the dispatch rules: what must change to manage it). Container nodes also carry
+  `child_total`/`child_done`. Containers are anchored on managed work: a container is built only for
+  the parent of a managed (candidate) issue the poll returned — never for an arbitrary polled parent
+  — then *every* sub-issue of that parent is surfaced (managed or not) so the operator sees the full
   family. Container expansion is subject to the same node cap.)
 - `completed` (set of issue IDs; bookkeeping only, not dispatch gating)
 - `agent_totals` (aggregate tokens + runtime seconds; tracked per active adapter — codex totals
