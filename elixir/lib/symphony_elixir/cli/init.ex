@@ -567,33 +567,48 @@ defmodule SymphonyElixir.CLI.Init do
     """
       claude:
         # See #{@setup_url} for the full operator setup. `$SYMPHONY_CLAUDE_PRIV_DIR`
-        # is injected by `Claude.AppServer` at sidecar launch time. The Claude
-        # Agent SDK's `permission_mode: dontAsk` + `allowed_tools` whitelist below
-        # is the inner sandbox boundary. Pick ONE `command:` below.
+        # is injected by `Claude.AppServer` at sidecar launch time. The default
+        # `permission_mode: bypassPermissions` is allow-all; the boundary is the
+        # jai outer sandbox (A) plus the workspace-cwd invariant. Pick ONE
+        # `command:` below.
         # (A) jai outer sandbox: COW $HOME overlay protects ~/.ssh, ~/.gnupg, etc.
         # Linux with kernel >= 6.13 only.
         #command: jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
         # (B) no outer sandbox (Claude SDK is the only boundary). Portable default.
         command: uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
-        permission_mode: dontAsk
-        allowed_tools:
-          - Read
-          - Glob
-          - Grep
-          - Edit
-          - Write
-          - MultiEdit
-          - Bash
-          - BashOutput
-          - KillBash
-          - TodoWrite
-          - NotebookEdit
-          - mcp__symphony__linear_graphql
-          # If the target repo ships a project `.mcp.json` server (e.g. `lsp`),
-          # its tools must be allowlisted to be callable under `dontAsk`: add
-          # `mcp__<server>` here (e.g. `mcp__lsp`) or rely on the repo's own
-          # `.claude/settings.json` `permissions.allow`.
-          #- mcp__lsp
+        # Tool access is the `permission_mode` switch:
+        #   bypassPermissions — allow-all (active default). `allowed_tools` is
+        #                       ignored and every tool runs (incl.
+        #                       WebFetch/WebSearch/Agent). The only boundary left
+        #                       is the jai sandbox (A) + the workspace-cwd
+        #                       invariant — the Codex `approval_policy: never`
+        #                       equivalent.
+        #   dontAsk           — whitelist mode. Only `allowed_tools` run;
+        #                       everything else is auto-denied. An empty/absent
+        #                       allowed_tools under dontAsk is rejected at boot
+        #                       (it would deny ALL tools — see Config.validate!).
+        #                       To use it, set `permission_mode: dontAsk` and
+        #                       uncomment the `allowed_tools` list below.
+        permission_mode: bypassPermissions
+        # allowed_tools (ignored under bypassPermissions; the dontAsk whitelist):
+        #allowed_tools:
+        #  - Read
+        #  - Glob
+        #  - Grep
+        #  - Edit
+        #  - Write
+        #  - MultiEdit
+        #  - Bash
+        #  - BashOutput
+        #  - KillBash
+        #  - TodoWrite
+        #  - NotebookEdit
+        #  - mcp__symphony__linear_graphql
+        #  # If the target repo ships a project `.mcp.json` server (e.g. `lsp`),
+        #  # its tools must be allowlisted to be callable under `dontAsk`: add
+        #  # `mcp__<server>` here (e.g. `mcp__lsp`) or rely on the repo's own
+        #  # `.claude/settings.json` `permissions.allow`.
+        #  #- mcp__lsp
         # `setting_sources` is intentionally unset: like an interactive `claude`
         # run, the agent loads the target repo's `.claude/settings.json`
         # (incl. `enableAllProjectMcpServers`), project `.mcp.json` servers, and

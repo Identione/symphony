@@ -573,11 +573,17 @@ protocol to Symphony shaped like the Codex app-server client.
   - Allowed values mirror the Claude Agent SDK's `permission_mode`: `default`, `acceptEdits`,
     `plan`, `dontAsk`, `bypassPermissions`. (The TypeScript-only `auto` value is intentionally
     not listed here; Symphony targets the Python SDK.)
-  - Default: `dontAsk` (recommended for unattended operation — see §10.8 sandbox mapping).
-  - **NOTE**: `bypassPermissions` causes the SDK to skip the `can_use_tool` callback entirely,
-    so it MUST NOT be combined with `can_use_tool` policy enforcement. For a sandboxed unattended
-    deployment, prefer `dontAsk` with an explicit `allowed_tools` whitelist (see
-    `agent.claude.allowed_tools` below) plus `PreToolUse` hooks.
+  - Schema default (when omitted): `dontAsk`. Note this differs from what generated instances
+    *ship*: `make init` and the maintainer `WORKFLOW.md` write an explicit
+    `permission_mode: bypassPermissions` because they run under the `jai` outer sandbox. See the
+    two postures in §10.8 sandbox mapping.
+  - **NOTE**: `bypassPermissions` causes the SDK to skip the `can_use_tool` callback entirely, so
+    it MUST NOT be combined with `can_use_tool` policy enforcement, and the deployment MUST supply
+    external isolation (the `jai` sandbox, a container, or a VM) as the containment boundary
+    (Posture A in §10.8). For an unattended deployment *without* an outer sandbox, use `dontAsk`
+    with an explicit `allowed_tools` whitelist (see `agent.claude.allowed_tools` below) plus
+    `PreToolUse` hooks (Posture B). An empty/absent `allowed_tools` under `dontAsk` denies every
+    tool and is rejected at boot.
 - `allowed_tools` (list of strings)
   - Default: `[]` (empty list — no tools permitted; conservative).
   - Whitelist of SDK tool names the agent may invoke when `permission_mode == "dontAsk"`.
@@ -1701,9 +1707,26 @@ Turn processing:
 
 Approval / sandbox mapping:
 
-- The Claude Agent SDK has no native filesystem/network sandbox primitive. The recommended
-  unattended-sandboxed posture is:
-  1. `permission_mode = dontAsk` — anything not pre-approved is denied (no human prompts).
+- The Claude Agent SDK has no native filesystem/network sandbox primitive. Two unattended postures
+  are supported; the containment boundary differs, but the Elixir-side workspace-cwd invariant from
+  §15.2 MUST hold under both.
+
+  Posture A — **allow-all behind an outer sandbox** (the shipped default for generated instances and
+  the maintainer `WORKFLOW.md`, because they run under the `jai` launcher):
+  1. `permission_mode = bypassPermissions` — every tool runs without prompts; `allowed_tools` is
+     ignored.
+  2. Containment is delegated entirely to external isolation: the `jai` COW-overlay sandbox
+     (or an equivalent container/VM) plus the workspace-cwd invariant. There is no in-SDK tool
+     gate in this mode, so the outer sandbox is load-bearing and MUST be present.
+  3. `bypassPermissions` MUST NOT be selected together with a `can_use_tool` policy callback — the
+     SDK skips `can_use_tool` in that mode, silently disabling enforcement.
+
+  Posture B — **in-SDK whitelist, no outer sandbox required** (the schema default when
+  `permission_mode` is omitted, and the recommended posture for deployments without an outer
+  sandbox):
+  1. `permission_mode = dontAsk` — anything not pre-approved is denied (no human prompts). An
+     empty/absent `allowed_tools` under `dontAsk` denies every tool and is rejected at boot
+     (`Config.validate!`).
   2. A tightly scoped `allowed_tools` whitelist that contains only the tools the workflow needs
      (e.g. `Read`, `Glob`, `Edit`, `Write`, plus any explicitly registered
      `mcp__<server>__<tool>` entries). Avoid blanket-allowing `Bash` unless the workflow
@@ -1712,10 +1735,6 @@ Approval / sandbox mapping:
   4. A `PreToolUse` hook that validates tool input paths against the workspace `cwd` via
      realpath comparison (the SDK's built-in `cwd` check is helpful but a defence-in-depth
      hook MUST be present).
-  5. The Elixir-side workspace-cwd invariant from §15.2 MUST also hold.
-- `bypassPermissions` MUST NOT be selected together with a `can_use_tool` policy callback — the
-  SDK skips `can_use_tool` in that mode, silently disabling enforcement. If a deployment chooses
-  `bypassPermissions` it MUST rely entirely on external isolation (container/VM/network).
 - The deployment-time hardening guidance in §15.5 applies in addition to the in-SDK controls
   above.
 
@@ -2540,7 +2559,10 @@ Possible hardening measures include:
   `agent.codex.approval_policy` / `agent.codex.thread_sandbox`, or Claude
   `agent.claude.permission_mode = dontAsk` paired with a tight `agent.claude.allowed_tools`
   whitelist and a `PreToolUse` workspace-boundary hook — see §10.8 for why
-  `bypassPermissions` cannot be combined with a policy callback).
+  `bypassPermissions` cannot be combined with a policy callback). Where the agent runs behind a
+  strong external sandbox (e.g. the `jai` launcher), `bypassPermissions` with that sandbox as the
+  boundary is an acceptable alternative — see Posture A in §10.8 — but the sandbox is then
+  load-bearing and MUST be present.
 - Adding external isolation layers such as OS/container/VM sandboxing, network restrictions, or
   separate credentials beyond the adapter's built-in policy controls.
 - Filtering which Linear issues, projects, teams, labels, or other tracker sources are eligible for

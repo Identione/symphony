@@ -226,8 +226,11 @@ defmodule SymphonyElixir.CLI.InitTest do
 
     assert contents =~ "kind: claude"
     assert contents =~ "uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent"
-    assert contents =~ "permission_mode: dontAsk"
-    assert contents =~ "mcp__symphony__linear_graphql"
+    # Default ships allow-all: bypassPermissions active, the dontAsk whitelist
+    # (incl. the linear_graphql MCP tool) commented out as a swap-ready opt-in.
+    assert contents =~ "permission_mode: bypassPermissions"
+    refute contents =~ ~r/^\s*permission_mode: dontAsk/m
+    assert contents =~ "#  - mcp__symphony__linear_graphql"
     # `setting_sources` ships commented-out: the default (unset) loads the
     # repo's Claude settings/.mcp.json/CLAUDE.md like an interactive run, and
     # the line is offered as a swap-ready isolation opt-out.

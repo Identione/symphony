@@ -176,32 +176,43 @@ agent:
     # isn't re-paid as cache_read on every later turn; the model is told it can
     # re-read a narrower slice. Default 16384 (16 KiB); set 0 to disable.
     # tool_output_limit: 16384
-    # `dontAsk` denies anything not in `allowed_tools` without prompting,
-    # which is what we want for unattended runs. The whitelist below mirrors
-    # what Codex's `approval_policy: never` + workspace-write sandbox grants:
-    # full filesystem access plus shell, but no WebFetch/WebSearch and no
-    # unsupervised sub-agents.
-    permission_mode: dontAsk
-    allowed_tools:
-      - Read
-      - Glob
-      - Grep
-      - Edit
-      - Write
-      - MultiEdit
-      - Bash
-      - BashOutput
-      - KillBash
-      - TodoWrite
-      - NotebookEdit
-      # In-process MCP tool the sidecar exposes; round-trips back to Symphony
-      # so Linear auth never leaves the orchestrator.
-      - mcp__symphony__linear_graphql
-      # Project `.mcp.json` server tools (e.g. an `lsp` code-intelligence
-      # server) must be allowlisted to be callable under `dontAsk`: add
-      # `mcp__<server>` here (e.g. `mcp__lsp`) or rely on the repo's loaded
-      # `.claude/settings.json` `permissions.allow`.
-      #- mcp__lsp
+    # Tool access is the `permission_mode` switch:
+    #   bypassPermissions — allow-all (active default). `allowed_tools` is ignored
+    #                       and every tool runs (incl. WebFetch/WebSearch/Agent).
+    #                       Only the jai command + workspace-cwd invariant remain
+    #                       as the boundary. This is the Codex danger-full-access
+    #                       equivalent — appropriate because we run under jai.
+    #   dontAsk           — whitelist mode. Denies anything not in `allowed_tools`
+    #                       without prompting. The commented whitelist below mirrors
+    #                       what Codex's `approval_policy: never` + workspace-write
+    #                       grants: full filesystem + shell, but no
+    #                       WebFetch/WebSearch and no unsupervised sub-agents.
+    #                       An empty/absent allowed_tools under dontAsk denies
+    #                       ALL tools and is rejected at boot (Config.validate!).
+    #                       To use it, set `permission_mode: dontAsk` and uncomment
+    #                       the `allowed_tools` list.
+    permission_mode: bypassPermissions
+    # allowed_tools (ignored under bypassPermissions; the dontAsk whitelist):
+    #allowed_tools:
+    #  - Read
+    #  - Glob
+    #  - Grep
+    #  - Edit
+    #  - Write
+    #  - MultiEdit
+    #  - Bash
+    #  - BashOutput
+    #  - KillBash
+    #  - TodoWrite
+    #  - NotebookEdit
+    #  # In-process MCP tool the sidecar exposes; round-trips back to Symphony
+    #  # so Linear auth never leaves the orchestrator.
+    #  - mcp__symphony__linear_graphql
+    #  # Project `.mcp.json` server tools (e.g. an `lsp` code-intelligence
+    #  # server) must be allowlisted to be callable under `dontAsk`: add
+    #  # `mcp__<server>` here (e.g. `mcp__lsp`) or rely on the repo's loaded
+    #  # `.claude/settings.json` `permissions.allow`.
+    #  #- mcp__lsp
     # `setting_sources` is intentionally unset: like an interactive `claude`
     # run, the agent loads the target repo's `.claude/settings.json`
     # (incl. `enableAllProjectMcpServers`), project `.mcp.json` servers, and
@@ -412,6 +423,20 @@ When a ticket has an attached PR, run this protocol before moving to `Human Revi
 5. Re-run validation after feedback-driven changes and push updates.
 6. Repeat this sweep until there are no outstanding actionable comments.
 
+## Waiting on CI or review (required)
+
+While a ticket sits in `Human Review` (or any active state) waiting on CI checks
+or a human/bot decision:
+
+- Do NOT poll with `ScheduleWakeup` or `sleep` loops. A sleeping turn keeps the
+  session alive, wastes budget, and can trip Symphony's poll-loop escalation.
+- After pushing and posting any required update, END YOUR TURN. Symphony
+  re-invokes this issue automatically on its next polling cycle with the latest
+  CI/review state — that re-invocation is how you "poll".
+- In `Merging` only: run the `land` skill (`.codex/skills/land/SKILL.md`), which
+  uses `land_watch.py` to watch CI, reviews, and the PR head concurrently and
+  exits with an actionable status. Do not hand-roll a wait loop.
+
 ## Blocked-access escape hatch (required behavior)
 
 Use this only when completion is blocked by missing required tools or missing auth/permissions that cannot be resolved in-session.
@@ -523,7 +548,10 @@ Use this only when completion is blocked by missing required tools or missing au
   an active state (`In Progress` preferred, `Todo` acceptable before work
   starts), not `Human Review`.
 - Do not move to `Human Review` unless the `Completion bar before Human Review` is satisfied.
-- In `Human Review`, do not make changes; wait and poll.
+- In `Human Review`, do not make changes; end the turn between checks (see "Waiting on CI or review").
+- Prefer `Edit` over `Write` when changing an existing file. Use `Write` only to create a new file or fully rewrite one you have `Read` in full this turn.
+- Each Bash call runs in a fresh shell: environment-variable `export`s do not persist across calls, and working-directory changes are not reliably carried over. Use absolute paths, or `cd /abs/path && <cmd>` within a single Bash call.
+- Do not use `sleep` to wait for external state (CI, merge). Bash kills commands at 2 minutes (10 minutes hard max), so it only wastes a turn — end the turn instead.
 - If state is terminal (`Done`), do nothing and shut down.
 - Keep issue text concise, specific, and reviewer-oriented.
 - If blocked and no workpad exists yet, add one blocker comment describing blocker, impact, and next unblock action.

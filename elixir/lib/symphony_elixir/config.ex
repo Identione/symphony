@@ -244,14 +244,30 @@ defmodule SymphonyElixir.Config do
   end
 
   defp validate_agent(%{kind: "claude"} = agent) do
-    if claude_credentials_present?(agent) do
-      :ok
-    else
-      {:error, :missing_claude_credentials}
+    with :ok <- validate_claude_tool_access(agent) do
+      if claude_credentials_present?(agent) do
+        :ok
+      else
+        {:error, :missing_claude_credentials}
+      end
     end
   end
 
   defp validate_agent(_agent), do: :ok
+
+  # Deny-all footgun: under `permission_mode: dontAsk` the claude CLI auto-denies
+  # any tool not pre-approved, so an empty/absent `allowed_tools` whitelist leaves
+  # the agent with no tools at all — every turn would no-op. Refuse the misconfig
+  # at boot. The operator either lists `allowed_tools` (whitelist) or sets
+  # `permission_mode: bypassPermissions` (allow-all, gated by the jai sandbox +
+  # workspace-cwd boundary). Mirrors `validate_worker_adapter_compat/1`: a
+  # claude-specific invalid combination caught here, not in the structural schema.
+  defp validate_claude_tool_access(%{claude: %{permission_mode: "dontAsk", allowed_tools: tools}})
+       when tools in [nil, []] do
+    {:error, :claude_dontask_denies_all_tools}
+  end
+
+  defp validate_claude_tool_access(_agent), do: :ok
 
   # Mirrors Claude Code's own auth precedence so a Max/Pro subscriber who is
   # already logged into the `claude` CLI does not need to provision a separate
