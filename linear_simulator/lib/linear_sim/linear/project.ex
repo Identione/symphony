@@ -14,6 +14,7 @@ defmodule LinearSim.Linear.Project do
     field :slug_id, :string
 
     belongs_to :organization, LinearSim.Linear.Organization
+    has_many :issues, LinearSim.Linear.Issue
 
     timestamps()
   end

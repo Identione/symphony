@@ -72,6 +72,7 @@ defmodule LinearSimWeb.GraphQL.Types.IssueTypes do
     end
 
     field :parent, :issue, resolve: &IssueResolver.parent/3
+    field :project, :project, resolve: &IssueResolver.project/3
 
     field :relations, :issue_relation_connection do
       arg(:first, :integer)

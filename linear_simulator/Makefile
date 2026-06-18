@@ -28,7 +28,7 @@ endif
 
 .DEFAULT_GOAL := help
 .PHONY: help setup start foreground stop restart status logs health clean \
-        test compat ensure-trust ensure-deps
+        rebuild test compat ensure-trust ensure-deps
 
 help: ## Show this help.
 	@printf '$(BOLD)Linear API Simulator$(RESET)  $(DIM)— linear_sim$(RESET)\n'
@@ -152,6 +152,10 @@ compat: ensure-trust ensure-deps ## Validate + replay curated ops; write the com
 ##@ Clean
 clean: ## Remove run/ (PID + stdout capture).
 	@rm -rf $(RUN_DIR)
+
+rebuild: ensure-trust ensure-deps ## Force a clean recompile (mix clean && mix compile) to clear stale build artifacts.
+	@cd $(ROOT) && mise exec -- mix clean
+	@cd $(ROOT) && mise exec -- mix compile
 
 # --- Internal preflight ----------------------------------------------------
 # mise refuses to load an untrusted config, which silently breaks every

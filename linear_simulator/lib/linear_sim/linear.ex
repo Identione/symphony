@@ -153,6 +153,7 @@ defmodule LinearSim.Linear do
     :state,
     :assignee,
     :team,
+    :project,
     :labels,
     {:children, @child_preloads},
     {:parent, [:state, :assignee, :labels, {:children, @child_preloads}]},
@@ -205,6 +206,35 @@ defmodule LinearSim.Linear do
     |> where([p], p.organization_id == ^org.id)
     |> maybe_filter_slug(slug_eq)
     |> order_by([p], asc: p.inserted_at, asc: p.id)
+    |> Repo.all()
+  end
+
+  @doc """
+  Fetches a single project by internal id or slug, scoped to the organization.
+  Mirrors Linear's `project(id:)`; lenient on slug for the simulator's stable
+  string ids. Returns nil when not found.
+  """
+  @spec get_project_by_id_or_slug(Organization.t() | nil, String.t()) :: Project.t() | nil
+  def get_project_by_id_or_slug(nil, _id), do: nil
+
+  def get_project_by_id_or_slug(%Organization{} = org, id) do
+    Project
+    |> where([p], p.organization_id == ^org.id)
+    |> where([p], p.id == ^id or p.slug_id == ^id)
+    |> Repo.one()
+  end
+
+  @doc """
+  Lists a project's issues (deterministically ordered, archived excluded, with
+  the same preloads as `list_issues` so nested GraphQL fields resolve).
+  """
+  @spec list_project_issues(Project.t()) :: [Issue.t()]
+  def list_project_issues(%Project{} = project) do
+    Issue
+    |> where([i], i.project_id == ^project.id)
+    |> where([i], is_nil(i.archived_at))
+    |> order_by([i], asc: i.inserted_at, asc: i.id)
+    |> preload(^@issue_preloads)
     |> Repo.all()
   end
 

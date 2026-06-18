@@ -13,16 +13,46 @@ type RootQueryType {
   "Fetch a single issue by internal id or ticket identifier."
   issue(id: String!): Issue
 
+  "List the workspace's labels."
+  issueLabels(first: Int, after: String): LabelConnection
+
   "List projects, filtered Linear-style by slug."
   projects(filter: ProjectFilter, first: Int, after: String): ProjectConnection
+
+  "Fetch a single project by internal id or slug."
+  project(id: String!): Project
 
   "Simulator API version. Placeholder query used by skeleton smoke tests."
   apiVersion: String!
 }
 
 type RootMutationType {
-  "Update an issue (e.g. transition its workflow state)."
+  "Create an issue. Auto-assigns the identifier\/number\/url\/branchName."
+  issueCreate(input: IssueCreateInput!): IssuePayload
+
+  "Update an issue (state transition and\/or title\/description\/assignee\/priority\/project)."
   issueUpdate(id: String!, input: IssueUpdateInput!): IssuePayload
+
+  "Soft-archive an issue (sets archivedAt; drops it from the issues query)."
+  issueArchive(id: String!): IssueArchivePayload
+
+  "Permanently delete an issue. Comments\/relations cascade."
+  issueDelete(id: String!): IssueArchivePayload
+
+  "Attach a label to an issue."
+  issueAddLabel(id: String!, labelId: String!): IssuePayload
+
+  "Detach a label from an issue."
+  issueRemoveLabel(id: String!, labelId: String!): IssuePayload
+
+  "Create a workspace label."
+  issueLabelCreate(input: IssueLabelCreateInput!): IssueLabelPayload
+
+  "Create a directed relation between two issues."
+  issueRelationCreate(input: IssueRelationCreateInput!): IssueRelationPayload
+
+  "Delete an issue relation by id."
+  issueRelationDelete(id: String!): DeletePayload
 
   "Create a comment on an issue."
   commentCreate(input: CommentCreateInput!): CommentPayload
@@ -62,6 +92,51 @@ input CommentUpdateInput {
 
 input IssueUpdateInput {
   stateId: String
+  title: String
+  description: String
+  assigneeId: String
+  projectId: String
+  parentId: String
+  cycleId: String
+  priority: Int
+  labelIds: [String!]
+  addedLabelIds: [String!]
+  removedLabelIds: [String!]
+}
+
+"Fields for creating an issue. `teamId` drives the auto-assigned identifier."
+input IssueCreateInput {
+  teamId: String!
+  title: String!
+  description: String
+  stateId: String
+  assigneeId: String
+  projectId: String
+  parentId: String
+  cycleId: String
+  priority: Int
+  labelIds: [String!]
+}
+
+"Fields for creating a workspace label (Linear's IssueLabelCreateInput subset)."
+input IssueLabelCreateInput {
+  name: String!
+  color: String
+}
+
+"Directed relationship between two issues (Linear's IssueRelationType)."
+enum IssueRelationType {
+  blocks
+  duplicate
+  related
+  similar
+}
+
+"Fields for creating an issue relation (Linear's IssueRelationCreateInput)."
+input IssueRelationCreateInput {
+  type: IssueRelationType!
+  issueId: String!
+  relatedIssueId: String!
 }
 
 "A Linear project."
@@ -70,6 +145,7 @@ type Project {
   name: String
   slugId: String
   teams(first: Int, after: String): TeamConnection
+  issues(first: Int, after: String): IssueConnection
 }
 
 type TeamEdge {
@@ -108,10 +184,12 @@ type Label {
   color: String
 }
 
-"A directed relation; `issue` is the source (e.g. the blocker)."
+"A directed relation; `issue` is the source, `relatedIssue` the target."
 type IssueRelation {
+  id: ID!
   type: String!
   issue: Issue
+  relatedIssue: Issue
 }
 
 "A Linear team."
@@ -136,8 +214,12 @@ type Issue {
   team: Team
   createdAt: DateTime
   updatedAt: DateTime
+  archivedAt: DateTime
   labels(first: Int, after: String): LabelConnection
   children(first: Int, after: String): IssueConnection
+  parent: Issue
+  project: Project
+  relations(first: Int, after: String): IssueRelationConnection
   inverseRelations(first: Int, after: String): IssueRelationConnection
   comments(first: Int, after: String, orderBy: PaginationOrderBy): CommentConnection
 }
@@ -239,10 +321,34 @@ type CommentPayload {
   comment: Comment
 }
 
-"issueUpdate payload."
+"issueCreate \/ issueUpdate payload."
 type IssuePayload {
   success: Boolean!
   issue: Issue
+}
+
+"issueArchive \/ issueDelete payload (Linear's IssueArchivePayload)."
+type IssueArchivePayload {
+  success: Boolean!
+  entity: Issue
+}
+
+"issueLabelCreate payload (Linear's IssueLabelPayload)."
+type IssueLabelPayload {
+  success: Boolean!
+  issueLabel: Label
+}
+
+"issueRelationCreate payload (Linear's IssueRelationPayload)."
+type IssueRelationPayload {
+  success: Boolean!
+  issueRelation: IssueRelation
+}
+
+"Generic delete payload (Linear's DeletePayload)."
+type DeletePayload {
+  success: Boolean!
+  entityId: ID
 }
 
 """

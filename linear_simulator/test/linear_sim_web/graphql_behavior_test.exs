@@ -469,6 +469,77 @@ defmodule LinearSimWeb.GraphQLBehaviorTest do
     end
   end
 
+  describe "project relationships" do
+    test "Issue.project is queryable", %{conn: conn} do
+      query = """
+      query { issue(id: "ENG-1") { project { id name slugId } } }
+      """
+
+      body = gql(conn, query, %{})
+      assert body["errors"] in [nil, []], "errors: #{inspect(body["errors"])}"
+      project = get_in(body, ["data", "issue", "project"])
+      assert project["id"] == "project_roadmap"
+      assert project["slugId"] == "roadmap"
+      assert is_binary(project["name"])
+    end
+
+    test "Issue.project is null for an issue with no project", %{conn: conn} do
+      create = """
+      mutation { issueCreate(input: {teamId: "team_eng", title: "No project"}) {
+        issue { identifier project { id } }
+      } }
+      """
+
+      body = gql(conn, create, %{})
+      issue = get_in(body, ["data", "issueCreate", "issue"])
+      assert issue["identifier"] == "ENG-2"
+      assert issue["project"] == nil
+    end
+
+    test "Project.issues connection lists the project's issues", %{conn: conn} do
+      query = """
+      query { projects { nodes { id slugId issues { nodes { identifier } } } } }
+      """
+
+      body = gql(conn, query, %{})
+      assert body["errors"] in [nil, []], "errors: #{inspect(body["errors"])}"
+
+      roadmap =
+        body
+        |> get_in(["data", "projects", "nodes"])
+        |> Enum.find(&(&1["slugId"] == "roadmap"))
+
+      ids = roadmap |> get_in(["issues", "nodes"]) |> Enum.map(& &1["identifier"])
+      assert "ENG-1" in ids
+    end
+
+    test "root project(id:) fetches a single project by id or slug, with issues", %{conn: conn} do
+      query = """
+      query($id: String!) {
+        project(id: $id) { id name slugId issues { nodes { identifier } } }
+      }
+      """
+
+      for id <- ["project_roadmap", "roadmap"] do
+        body = gql(conn, query, %{"id" => id})
+        assert body["errors"] in [nil, []], "errors for #{id}: #{inspect(body["errors"])}"
+        project = get_in(body, ["data", "project"])
+        assert project["id"] == "project_roadmap"
+        assert project["slugId"] == "roadmap"
+
+        ids = project |> get_in(["issues", "nodes"]) |> Enum.map(& &1["identifier"])
+        assert "ENG-1" in ids
+      end
+    end
+
+    test "root project(id:) returns null for an unknown id", %{conn: conn} do
+      query = "query { project(id: \"project_ghost\") { id } }"
+      body = gql(conn, query, %{})
+      assert body["errors"] in [nil, []], "errors: #{inspect(body["errors"])}"
+      assert get_in(body, ["data", "project"]) == nil
+    end
+  end
+
   describe "validation errors" do
     test "commentCreate against a missing issue returns a structured error", %{conn: conn} do
       mutation = """

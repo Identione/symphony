@@ -18,6 +18,12 @@ defmodule LinearSimWeb.GraphQL.Types.ProjectTypes do
       arg(:after, :string)
       resolve(&ProjectResolver.teams/3)
     end
+
+    field :issues, :issue_connection do
+      arg(:first, :integer)
+      arg(:after, :string)
+      resolve(&ProjectResolver.issues/3)
+    end
   end
 
   object :team_edge do
@@ -49,6 +55,12 @@ defmodule LinearSimWeb.GraphQL.Types.ProjectTypes do
       arg(:first, :integer)
       arg(:after, :string)
       resolve(&ProjectResolver.list/3)
+    end
+
+    @desc "Fetch a single project by internal id or slug."
+    field :project, :project do
+      arg(:id, non_null(:string))
+      resolve(&ProjectResolver.get/3)
     end
   end
 end
