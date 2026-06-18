@@ -1418,6 +1418,53 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert config.codex.command == "#{codex_bin} app-server"
   end
 
+  test "overseer config defaults to disabled with no overseer block (IDE-212)" do
+    write_workflow_file!(Workflow.workflow_file_path(), [])
+
+    overseer = Config.overseer()
+    assert overseer.enabled == false
+    assert overseer.engine == "api"
+    assert overseer.budget_threshold_k == 4
+    refute Config.overseer_enabled?()
+  end
+
+  test "overseer api_key resolves from $ANTHROPIC_API_KEY and gates enablement (IDE-212)" do
+    api_key_env_var = "SYMP_ANTHROPIC_KEY_#{System.unique_integer([:positive])}"
+    previous = System.get_env(api_key_env_var)
+    System.put_env(api_key_env_var, "resolved-anthropic-key")
+    on_exit(fn -> restore_env(api_key_env_var, previous) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      overseer_enabled: true,
+      overseer_api_key: "$#{api_key_env_var}"
+    )
+
+    overseer = Config.overseer()
+    assert overseer.enabled == true
+    assert overseer.api_key == "resolved-anthropic-key"
+    assert Config.overseer_enabled?()
+  end
+
+  test "an enabled overseer with an unresolvable key is treated as disabled (IDE-212)" do
+    missing_env = "SYMP_ANTHROPIC_MISSING_#{System.unique_integer([:positive])}"
+    System.delete_env(missing_env)
+
+    # Clear the `$ANTHROPIC_API_KEY` fallback so an ambient key in the dev shell
+    # can't accidentally resolve the unresolvable reference under test.
+    previous_anthropic = System.get_env("ANTHROPIC_API_KEY")
+    System.delete_env("ANTHROPIC_API_KEY")
+    on_exit(fn -> restore_env("ANTHROPIC_API_KEY", previous_anthropic) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      overseer_enabled: true,
+      overseer_api_key: "$#{missing_env}"
+    )
+
+    # enabled flag is true, but the absent key downgrades the effective gate.
+    assert Config.overseer().enabled == true
+    refute Config.overseer_enabled?()
+  end
+
   test "config no longer resolves legacy env: references" do
     workspace_env_var = "SYMP_WORKSPACE_ROOT_#{System.unique_integer([:positive])}"
     api_key_env_var = "SYMP_LINEAR_API_KEY_#{System.unique_integer([:positive])}"

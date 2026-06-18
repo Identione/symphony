@@ -93,6 +93,17 @@ defmodule SymphonyElixir.Config do
   @spec progress_trigger_min_turns() :: pos_integer()
   def progress_trigger_min_turns, do: settings!().agent.progress_trigger_min_turns
 
+  @doc "Layer 2 AI overseer config block (IDE-212)."
+  @spec overseer() :: SymphonyElixir.Config.Schema.Overseer.t()
+  def overseer, do: settings!().agent.overseer
+
+  @doc "Whether the Layer 2 overseer is enabled *and* has a resolved API key."
+  @spec overseer_enabled?() :: boolean()
+  def overseer_enabled? do
+    ov = overseer()
+    ov.enabled and is_binary(ov.api_key) and ov.api_key != ""
+  end
+
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
     case Schema.resolve_runtime_turn_sandbox_policy(settings!(), workspace) do

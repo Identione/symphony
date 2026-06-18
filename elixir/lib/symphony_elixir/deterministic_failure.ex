@@ -59,14 +59,16 @@ defmodule SymphonyElixir.DeterministicFailure do
           | {:alert, code :: atom(), count :: pos_integer()}
           | {:escalate, code :: atom(), count :: pos_integer()}
 
-  @deterministic_codes ~w(quota_exceeded context_window_exhausted invalid_request claude_sidecar_exit port_exit max_turns_reached budget_exhausted)a
+  @deterministic_codes ~w(quota_exceeded context_window_exhausted invalid_request claude_sidecar_exit port_exit max_turns_reached budget_exhausted overseer_escalation)a
 
   # Codes that escalate on the *first* occurrence rather than after the
   # configured consecutive-failure threshold. A `max_budget_usd` breach is a
   # hard, operator-visible stop — there is no value in burning N more sessions
   # to "confirm" it, and `:budget_exhausted` is `:no_retry` so it would never
-  # accumulate a streak anyway.
-  @immediate_escalation_codes ~w(budget_exhausted)a
+  # accumulate a streak anyway. `:overseer_escalation` (IDE-212) is a
+  # high-confidence Layer-2 judgment that a human is needed now — escalating on
+  # the first occurrence is the whole point.
+  @immediate_escalation_codes ~w(budget_exhausted overseer_escalation)a
 
   @doc """
   Returns the deterministic code set as a list. Exposed for tests/docs.
@@ -185,6 +187,13 @@ defmodule SymphonyElixir.DeterministicFailure do
   defp summary_line(:max_sessions_per_issue, count) do
     "Symphony ran **#{count}** agent sessions for this issue without it leaving the active set " <>
       "(the `agent.max_sessions_per_issue` cap). See `elixir/docs/token_exhaustion.md`."
+  end
+
+  # The Layer-2 overseer (IDE-212) escalates on a single high-confidence verdict,
+  # not a consecutive-failure streak — so it gets its own sentence.
+  defp summary_line(:overseer_escalation, _count) do
+    "The Layer 2 AI overseer (IDE-212) assessed this near-budget run as needing human triage " <>
+      "(thrashing / blocked) and escalated it. See the orchestrator logs for the overseer rationale."
   end
 
   defp summary_line(code, count) do

@@ -102,6 +102,8 @@ defmodule SymphonyElixir.DeterministicFailureTest do
       assert :max_turns_reached in codes
       # R1(b): a max_budget_usd breach is a hard stop that escalates.
       assert :budget_exhausted in codes
+      # IDE-212: a Layer 2 overseer escalate/abort verdict rides this code.
+      assert :overseer_escalation in codes
       refute :rate_limited in codes
       refute :overloaded in codes
       refute :unknown in codes
@@ -128,6 +130,18 @@ defmodule SymphonyElixir.DeterministicFailureTest do
 
       assert {%{count: 2}, :no_action} =
                DeterministicFailure.decide(escalated, :budget_exhausted, settings())
+    end
+
+    test "a single overseer_escalation escalates on the first occurrence (IDE-212)" do
+      assert {%{code: :overseer_escalation, count: 1}, {:escalate, :overseer_escalation, 1}} =
+               DeterministicFailure.decide(nil, :overseer_escalation, settings())
+    end
+
+    test "the overseer escalation message reads as a semantic verdict, not a streak" do
+      body = DeterministicFailure.compose_message(:overseer_escalation, 1, :escalate, "Human Review")
+      assert body =~ "moving the issue to **Human Review**"
+      assert body =~ "Layer 2 AI overseer"
+      refute body =~ "consecutive failures"
     end
   end
 

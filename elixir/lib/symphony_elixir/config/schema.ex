@@ -461,6 +461,95 @@ defmodule SymphonyElixir.Config.Schema do
     end
   end
 
+  defmodule Overseer do
+    @moduledoc false
+    use Ecto.Schema
+    import Ecto.Changeset
+
+    # Layer 2 of the IDE-189 robustness defense (IDE-212): a gated, read-only AI
+    # overseer (Sonnet) that semantically classifies a near-budget agent run as
+    # converging / thrashing / blocked and recommends nudge / extend-budget /
+    # escalate. Disabled by default; never changes the turn budget; fails open.
+    @engines ~w(api sidecar)
+
+    @type t :: %__MODULE__{}
+
+    @primary_key false
+    embedded_schema do
+      # Master switch (opt-in). When false the overseer never runs and the turn
+      # loop is byte-for-byte unchanged.
+      field(:enabled, :boolean, default: false)
+      # Engine selection (SPEC §10 a-vs-b). Only "api" (direct Anthropic
+      # one-shot, read-only) is implemented; "sidecar" is accepted for
+      # forward-compat and currently fails open (treated as disabled).
+      field(:engine, :string, default: "api")
+      field(:model, :string, default: "claude-sonnet-4-6")
+      # Reasoning-effort knob carried for parity with the Claude adapter; the
+      # direct Messages API path does not forward it today.
+      field(:effort, :string, default: "low")
+      # Resolved from `$ANTHROPIC_API_KEY` when set to the literal token or left
+      # unset (mirrors `tracker.api_key`/`$LINEAR_API_KEY`). Absent key ⇒ the
+      # overseer is treated as disabled.
+      field(:api_key, :string, default: "$ANTHROPIC_API_KEY")
+      # Budget-threshold trigger: fire when `turn >= max_turns - budget_threshold_k`.
+      field(:budget_threshold_k, :integer, default: 4)
+      # De-dup/cooldown so the budget trigger does not re-fire every turn from K
+      # down to 0: at most one call per `min_turns_between` turns, hard-capped at
+      # `max_calls_per_session` calls per agent run.
+      field(:min_turns_between, :integer, default: 3)
+      field(:max_calls_per_session, :integer, default: 2)
+      # Bounded transcript ring-buffer size (normalized envelopes) fed as evidence.
+      field(:transcript_window, :integer, default: 40)
+      # Workspace-relative globs whose tails are read as build/test evidence.
+      field(:log_globs, {:array, :string}, default: ["tmp/*build*.log", "tmp/*test*.log", "tmp/*validate*.log"])
+      # Per-evidence-section byte cap (head+tail truncation).
+      field(:input_byte_limit, :integer, default: 16_384)
+      # Below this confidence the recommended action is downgraded to continue
+      # (comment-only) so a low-confidence verdict never steers or escalates.
+      field(:confidence_floor, :float, default: 0.6)
+      # When false an `abort` verdict is treated as `escalate` (never autonomously
+      # kills a borderline session).
+      field(:allow_abort, :boolean, default: false)
+      field(:timeout_ms, :integer, default: 30_000)
+    end
+
+    @spec engines() :: [String.t()]
+    def engines, do: @engines
+
+    @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
+    def changeset(schema, attrs) do
+      schema
+      |> cast(
+        attrs,
+        [
+          :enabled,
+          :engine,
+          :model,
+          :effort,
+          :api_key,
+          :budget_threshold_k,
+          :min_turns_between,
+          :max_calls_per_session,
+          :transcript_window,
+          :log_globs,
+          :input_byte_limit,
+          :confidence_floor,
+          :allow_abort,
+          :timeout_ms
+        ],
+        empty_values: []
+      )
+      |> validate_inclusion(:engine, @engines)
+      |> validate_number(:budget_threshold_k, greater_than_or_equal_to: 0)
+      |> validate_number(:min_turns_between, greater_than_or_equal_to: 0)
+      |> validate_number(:max_calls_per_session, greater_than_or_equal_to: 0)
+      |> validate_number(:transcript_window, greater_than_or_equal_to: 0)
+      |> validate_number(:input_byte_limit, greater_than_or_equal_to: 0)
+      |> validate_number(:confidence_floor, greater_than_or_equal_to: 0.0, less_than_or_equal_to: 1.0)
+      |> validate_number(:timeout_ms, greater_than: 0)
+    end
+  end
+
   defmodule Agent do
     @moduledoc false
     use Ecto.Schema
@@ -535,6 +624,9 @@ defmodule SymphonyElixir.Config.Schema do
       field(:progress_trigger_min_turns, :integer, default: 4)
       embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
       embeds_one(:claude, Claude, on_replace: :update, defaults_to_struct: true)
+      # Layer 2 AI overseer (IDE-212). Global `agent.*` like the Layer 0/1
+      # knobs because it lives in the adapter-agnostic shared turn loop.
+      embeds_one(:overseer, Overseer, on_replace: :update, defaults_to_struct: true)
     end
 
     @spec kinds() :: [String.t()]
@@ -569,6 +661,7 @@ defmodule SymphonyElixir.Config.Schema do
       )
       |> cast_embed(:codex, with: &Codex.changeset/2)
       |> cast_embed(:claude, with: &Claude.changeset/2)
+      |> cast_embed(:overseer, with: &Overseer.changeset/2)
       |> validate_inclusion(:kind, @kinds)
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
@@ -1001,7 +1094,14 @@ defmodule SymphonyElixir.Config.Schema do
         turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
     }
 
-    %{settings | tracker: tracker, workspace: workspace, codex: codex}
+    overseer = %{
+      settings.agent.overseer
+      | api_key: resolve_secret_setting(settings.agent.overseer.api_key, System.get_env("ANTHROPIC_API_KEY"))
+    }
+
+    agent = %{settings.agent | overseer: overseer}
+
+    %{settings | tracker: tracker, workspace: workspace, codex: codex, agent: agent}
   end
 
   defp normalize_keys(value) when is_map(value) do

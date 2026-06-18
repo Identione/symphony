@@ -118,6 +118,23 @@ agent:
   # progress_trigger_min_turns: turn floor for the at_risk_no_commits arm of the
   # Layer-2 trigger predicate.
   # progress_trigger_min_turns: 4
+  # AI overseer (IDE-212 / Layer 2). A gated, READ-ONLY Anthropic call made at
+  # most a couple of times late in the budget (never per turn). It semantically
+  # classifies the run (converging/thrashing/blocked) and recommends ONE action:
+  # nudge (steers the next turn + comments), recommend_extend_budget (comment +
+  # log only — NEVER changes max_turns), escalate, or abort (escalate unless
+  # allow_abort). Disabled by default; fails open on any error. See SPEC.md §13.6.
+  # overseer:
+  #   enabled: true                  # master switch (also needs a resolved api_key)
+  #   engine: api                    # only "api" (read-only Messages call) is implemented
+  #   model: claude-sonnet-4-6
+  #   api_key: $ANTHROPIC_API_KEY    # resolved like tracker.api_key/$LINEAR_API_KEY
+  #   budget_threshold_k: 4          # fire when turn >= max_turns - k
+  #   min_turns_between: 3           # cooldown between calls
+  #   max_calls_per_session: 2       # per-run call cap
+  #   transcript_window: 40          # bounded transcript evidence window
+  #   confidence_floor: 0.6          # below this, downgrade to comment-only continue
+  #   allow_abort: false             # when false, an abort verdict is treated as escalate
   # Claude Agent SDK adapter (SPEC.md §10.8). Switch to `codex` to use the
   # legacy Codex App-Server adapter — the nested `agent.codex` block below
   # is preserved so the swap is one-line.

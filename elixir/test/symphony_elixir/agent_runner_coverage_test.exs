@@ -490,6 +490,119 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
     end
   end
 
+  describe "overseer turn-loop wiring (IDE-212, stubbed Anthropic endpoint)" do
+    defmodule OverseerStub do
+      @moduledoc false
+      use Plug.Router
+
+      plug(:match)
+      plug(Plug.Parsers, parsers: [:json], json_decoder: Jason)
+      plug(:dispatch)
+
+      post "/v1/messages" do
+        {pid, input} = Application.get_env(:symphony_elixir, :overseer_test_stub)
+        send(pid, :overseer_called)
+
+        body = %{
+          "content" => [%{"type" => "tool_use", "name" => "emit_verdict", "input" => input}]
+        }
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(200, Jason.encode!(body))
+      end
+    end
+
+    defp start_overseer_stub!(verdict_input) do
+      Application.put_env(:symphony_elixir, :overseer_test_stub, {self(), verdict_input})
+      {:ok, server} = start_supervised({Bandit, plug: OverseerStub, port: 0})
+      {:ok, {_addr, port}} = ThousandIsland.listener_info(server)
+      Application.put_env(:symphony_elixir, :overseer_api_base_url, "http://127.0.0.1:#{port}")
+
+      on_exit(fn ->
+        Application.delete_env(:symphony_elixir, :overseer_api_base_url)
+        Application.delete_env(:symphony_elixir, :overseer_test_stub)
+      end)
+    end
+
+    test "a nudge verdict steers the next turn's prompt and is consumed once" do
+      ctx = setup_workspace!()
+
+      write_stub_workflow!(ctx,
+        tracker_kind: "memory",
+        max_turns: 3,
+        overseer_enabled: true,
+        overseer_api_key: "test-key",
+        overseer_max_calls_per_session: 1
+      )
+
+      start_overseer_stub!(%{
+        "verdict" => "converging",
+        "confidence" => 0.95,
+        "recommended_action" => "nudge",
+        "steering_message" => "commit and push your work now",
+        "rationale" => "work is done but uncommitted"
+      })
+
+      fetcher = fn ["issue-cov-1"] -> {:ok, [issue()]} end
+      catch_exit(AgentRunner.run(issue(), nil, adapter: StubAdapter, issue_state_fetcher: fetcher))
+
+      assert_received :overseer_called
+      [_turn1, turn2, turn3] = drain_turn_prompts()
+
+      # The nudge rides turn 2 (the turn after the overseer fired at turn 1),
+      assert turn2 =~ "## Overseer steering (IMPORTANT)"
+      assert turn2 =~ "commit and push your work now"
+      # and is not re-applied on turn 3 (cooldown/cap stops a second call).
+      refute turn3 =~ "## Overseer steering (IMPORTANT)"
+    end
+
+    test "an escalate verdict exits the run via the deterministic-failure path" do
+      ctx = setup_workspace!()
+
+      write_stub_workflow!(ctx,
+        tracker_kind: "memory",
+        max_turns: 3,
+        overseer_enabled: true,
+        overseer_api_key: "test-key"
+      )
+
+      start_overseer_stub!(%{
+        "verdict" => "thrashing",
+        "confidence" => 0.95,
+        "recommended_action" => "escalate",
+        "steering_message" => nil,
+        "rationale" => "same error repeated 5 turns"
+      })
+
+      fetcher = fn ["issue-cov-1"] -> {:ok, [issue()]} end
+
+      assert {:agent_run_failed, :overseer_escalation, {:overseer_escalation, rationale}} =
+               catch_exit(AgentRunner.run(issue(), nil, adapter: StubAdapter, issue_state_fetcher: fetcher))
+
+      assert rationale =~ "same error repeated"
+    end
+  end
+
+  describe "overseer steering directive (IDE-212)" do
+    test "append_overseer_steering_directive/2 appends the steering block after the base prompt" do
+      prompt = AgentRunner.append_overseer_steering_directive("BASE", "commit and push your work")
+
+      assert String.starts_with?(prompt, "BASE")
+      assert prompt =~ "## Overseer steering (IMPORTANT)"
+      assert prompt =~ "commit and push your work"
+    end
+
+    test "append_overseer_steering_directive/2 is a no-op without a steering message" do
+      assert AgentRunner.append_overseer_steering_directive("BASE", nil) == "BASE"
+      assert AgentRunner.append_overseer_steering_directive("BASE", "") == "BASE"
+    end
+
+    test "classify_error_code/1 maps an overseer escalation to its own code" do
+      assert AgentRunner.classify_error_code({:overseer_escalation, "thrashing"}) == :overseer_escalation
+    end
+  end
+
   describe "rebase-on-resume directive" do
     test "prepend_resume_after_block_directive/2 prepends the pull-skill directive with blocker ids" do
       prompt =

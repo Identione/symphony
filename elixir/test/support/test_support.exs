@@ -108,6 +108,14 @@ defmodule SymphonyElixir.TestSupport do
           agent_kind: nil,
           max_concurrent_agents: 10,
           max_turns: 20,
+          overseer_enabled: false,
+          overseer_api_key: nil,
+          overseer_model: nil,
+          overseer_budget_threshold_k: nil,
+          overseer_min_turns_between: nil,
+          overseer_max_calls_per_session: nil,
+          overseer_confidence_floor: nil,
+          overseer_allow_abort: nil,
           max_retry_backoff_ms: 300_000,
           max_concurrent_agents_by_state: %{},
           retry_policy: nil,
@@ -154,6 +162,14 @@ defmodule SymphonyElixir.TestSupport do
     agent_kind = Keyword.get(config, :agent_kind)
     max_concurrent_agents = Keyword.get(config, :max_concurrent_agents)
     max_turns = Keyword.get(config, :max_turns)
+    overseer_enabled = Keyword.get(config, :overseer_enabled)
+    overseer_api_key = Keyword.get(config, :overseer_api_key)
+    overseer_model = Keyword.get(config, :overseer_model)
+    overseer_budget_threshold_k = Keyword.get(config, :overseer_budget_threshold_k)
+    overseer_min_turns_between = Keyword.get(config, :overseer_min_turns_between)
+    overseer_max_calls_per_session = Keyword.get(config, :overseer_max_calls_per_session)
+    overseer_confidence_floor = Keyword.get(config, :overseer_confidence_floor)
+    overseer_allow_abort = Keyword.get(config, :overseer_allow_abort)
     max_retry_backoff_ms = Keyword.get(config, :max_retry_backoff_ms)
     max_concurrent_agents_by_state = Keyword.get(config, :max_concurrent_agents_by_state)
     retry_policy = Keyword.get(config, :retry_policy)
@@ -206,6 +222,16 @@ defmodule SymphonyElixir.TestSupport do
         "  max_retry_backoff_ms: #{yaml_value(max_retry_backoff_ms)}",
         "  max_concurrent_agents_by_state: #{yaml_value(max_concurrent_agents_by_state)}",
         retry_policy && "  retry_policy: #{yaml_value(retry_policy)}",
+        overseer_yaml(
+          overseer_enabled,
+          overseer_api_key,
+          overseer_model,
+          overseer_budget_threshold_k,
+          overseer_min_turns_between,
+          overseer_max_calls_per_session,
+          overseer_confidence_floor,
+          overseer_allow_abort
+        ),
         claude_quota && "  claude:",
         claude_quota && "    quota: #{yaml_value(claude_quota)}",
         "codex:",
@@ -277,6 +303,25 @@ defmodule SymphonyElixir.TestSupport do
       ssh_hosts not in [nil, []] && "  ssh_hosts: #{yaml_value(ssh_hosts)}",
       !is_nil(max_concurrent_agents_per_host) &&
         "  max_concurrent_agents_per_host: #{yaml_value(max_concurrent_agents_per_host)}"
+    ]
+    |> Enum.reject(&(&1 in [nil, false]))
+    |> Enum.join("\n")
+  end
+
+  defp overseer_yaml(enabled, _key, _model, _k, _min, _cap, _floor, _abort) when enabled in [nil, false],
+    do: nil
+
+  defp overseer_yaml(true, key, model, k, min, cap, floor, abort) do
+    [
+      "  overseer:",
+      "    enabled: true",
+      key && "    api_key: #{yaml_value(key)}",
+      model && "    model: #{yaml_value(model)}",
+      k && "    budget_threshold_k: #{yaml_value(k)}",
+      min && "    min_turns_between: #{yaml_value(min)}",
+      cap && "    max_calls_per_session: #{yaml_value(cap)}",
+      floor && "    confidence_floor: #{yaml_value(floor)}",
+      !is_nil(abort) && "    allow_abort: #{yaml_value(abort)}"
     ]
     |> Enum.reject(&(&1 in [nil, false]))
     |> Enum.join("\n")

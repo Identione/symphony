@@ -4,7 +4,13 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, Git, Linear.Issue, Overseer, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.Overseer.Session, as: OverseerSession
+
+  # Normalized envelope events worth keeping in the overseer transcript window
+  # (assistant text / tool calls / turn boundaries across both adapters). Token
+  # deltas and lifecycle noise are dropped so the bounded window stays useful.
+  @overseer_transcript_events ~w(assistant_message tool_call turn_completed agent_message other_message notification)a
 
   @type worker_host :: String.t() | nil
 
@@ -54,6 +60,10 @@ defmodule SymphonyElixir.AgentRunner do
   def classify_error_code(:response_timeout), do: :response_timeout
   def classify_error_code({:port_exit, _status}), do: :port_exit
   def classify_error_code({:claude_sidecar_exit, _status}), do: :claude_sidecar_exit
+  # IDE-212: the Layer 2 overseer's escalate/abort verdicts ride the existing
+  # `{:agent_run_failed, code, reason}` exit so the deterministic-failure
+  # pipeline routes them to the human-review state.
+  def classify_error_code({:overseer_escalation, _reason}), do: :overseer_escalation
   def classify_error_code(_reason), do: :unknown
 
   @doc """
@@ -151,8 +161,13 @@ defmodule SymphonyElixir.AgentRunner do
   @doc false
   @spec compose_message_handler(module(), pid() | nil, Issue.t(), keyword()) :: (map() -> :ok)
   def compose_message_handler(adapter, recipient, issue, opts \\ []) do
-    base = fn message -> send_codex_update(recipient, issue, message) end
     verbose? = Keyword.get(opts, :verbose_logging, false)
+    overseer_session = Keyword.get(opts, :overseer_session)
+
+    base = fn message ->
+      record_overseer_envelope(overseer_session, message)
+      send_codex_update(recipient, issue, message)
+    end
 
     claude_verbose_handler = fn message ->
       log_claude_event(issue, message)
@@ -164,6 +179,18 @@ defmodule SymphonyElixir.AgentRunner do
       _ -> base
     end
   end
+
+  # Push the envelope into the run-scoped overseer transcript window when the
+  # overseer is enabled (the session pid is `nil` otherwise → zero overhead).
+  @spec record_overseer_envelope(pid() | nil, map()) :: :ok
+  defp record_overseer_envelope(nil, _message), do: :ok
+
+  defp record_overseer_envelope(session, %{event: event} = message)
+       when is_pid(session) and event in @overseer_transcript_events do
+    OverseerSession.record(session, message)
+  end
+
+  defp record_overseer_envelope(_session, _message), do: :ok
 
   @doc false
   @spec log_claude_event(Issue.t(), map()) :: :ok
@@ -285,13 +312,17 @@ defmodule SymphonyElixir.AgentRunner do
 
     Logger.info("Selected coding-agent adapter for #{issue_context(issue)}: #{inspect(adapter)}")
 
+    overseer_session = maybe_start_overseer_session()
+
     context = %{
       adapter: adapter,
       workspace: workspace,
+      worker_host: worker_host,
       codex_update_recipient: codex_update_recipient,
       opts: opts,
       issue_state_fetcher: issue_state_fetcher,
-      max_turns: max_turns
+      max_turns: max_turns,
+      overseer_session: overseer_session
     }
 
     with {:ok, session} <-
@@ -300,18 +331,46 @@ defmodule SymphonyElixir.AgentRunner do
         do_run_codex_turns(context, session, issue, 1)
       after
         adapter.stop_session(session)
+        stop_overseer_session(overseer_session)
       end
     end
   end
 
-  defp do_run_codex_turns(context, app_session, issue, turn_number) do
+  # Start the run-scoped overseer transcript/cooldown session only when the
+  # overseer is enabled+keyed; otherwise `nil` keeps the whole layer dormant.
+  @spec maybe_start_overseer_session() :: pid() | nil
+  defp maybe_start_overseer_session do
+    if Config.overseer_enabled?() do
+      case OverseerSession.start_link(Config.overseer().transcript_window) do
+        {:ok, pid} ->
+          pid
+
+        other ->
+          Logger.warning("Overseer session start failed (continuing without overseer): #{inspect(other)}")
+          nil
+      end
+    end
+  end
+
+  @spec stop_overseer_session(pid() | nil) :: :ok
+  defp stop_overseer_session(nil), do: :ok
+
+  defp stop_overseer_session(pid) when is_pid(pid) do
+    if Process.alive?(pid), do: OverseerSession.stop(pid)
+    :ok
+  end
+
+  defp do_run_codex_turns(context, app_session, issue, turn_number, steering \\ nil) do
     %{adapter: adapter, opts: opts, max_turns: max_turns, codex_update_recipient: recipient} =
       context
 
-    prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
+    prompt = build_turn_prompt(issue, opts, turn_number, max_turns, steering)
     settings = Config.settings!()
 
-    handler_opts = [verbose_logging: settings.agent.claude.verbose_logging]
+    handler_opts = [
+      verbose_logging: settings.agent.claude.verbose_logging,
+      overseer_session: Map.get(context, :overseer_session)
+    ]
 
     with {:ok, turn_session} <-
            adapter.run_turn(
@@ -340,7 +399,16 @@ defmodule SymphonyElixir.AgentRunner do
             "turn=#{turn_number}/#{max_turns}"
         )
 
-        do_run_codex_turns(context, app_session, refreshed_issue, turn_number + 1)
+        # Layer 2 overseer (IDE-212): a gated, read-only semantic check at the
+        # turn boundary. It may steer the next turn (nudge), surface a
+        # budget-extension recommendation, or escalate — never change the budget.
+        case maybe_run_overseer(context, refreshed_issue, turn_number) do
+          {:continue, steering} ->
+            do_run_codex_turns(context, app_session, refreshed_issue, turn_number + 1, steering)
+
+          {:error, _reason} = err ->
+            err
+        end
 
       {:continue, refreshed_issue} ->
         Logger.info(
@@ -358,13 +426,201 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  defp build_turn_prompt(issue, opts, 1, _max_turns) do
+  # ── Layer 2 overseer (IDE-212) ──────────────────────────────────────────────
+  #
+  # Gated, read-only semantic check at a turn boundary. Returns:
+  #   * `{:continue, nil}`  — proceed untouched (default / dormant / fail-open);
+  #   * `{:continue, msg}`  — nudge: `msg` rides the next turn's prompt;
+  #   * `{:error, {:overseer_escalation, rationale}}` — escalate/abort, surfaced
+  #     to the orchestrator via the existing deterministic-failure exit path.
+  #
+  # Every failure path is fail-open: a missing session, a disabled overseer, a
+  # transport/parse error, or a non-firing trigger all collapse to
+  # `{:continue, nil}` so the turn loop is never disturbed.
+  @spec maybe_run_overseer(map(), Issue.t(), non_neg_integer()) ::
+          {:continue, String.t() | nil} | {:error, {:overseer_escalation, String.t()}}
+  defp maybe_run_overseer(%{overseer_session: session} = context, issue, turn_number)
+       when is_pid(session) do
+    if Config.overseer_enabled?() do
+      run_overseer_if_triggered(context, issue, turn_number)
+    else
+      {:continue, nil}
+    end
+  end
+
+  defp maybe_run_overseer(_context, _issue, _turn_number), do: {:continue, nil}
+
+  @spec run_overseer_if_triggered(map(), Issue.t(), non_neg_integer()) ::
+          {:continue, String.t() | nil} | {:error, {:overseer_escalation, String.t()}}
+  defp run_overseer_if_triggered(%{overseer_session: session, max_turns: max_turns} = context, issue, turn_number) do
+    config = Config.overseer()
+    %{calls: calls, last_call_turn: last} = OverseerSession.stats(session)
+
+    trigger_ctx = %{turn: turn_number, max_turns: max_turns, calls: calls, last_call_turn: last}
+
+    if Overseer.should_run?(trigger_ctx, config) do
+      # Count the call before running so a crash mid-call still consumes the
+      # per-session budget (no infinite re-fire on a flaky engine).
+      OverseerSession.register_call(session, turn_number)
+      run_overseer_call(context, issue, turn_number, config)
+    else
+      {:continue, nil}
+    end
+  end
+
+  @spec run_overseer_call(map(), Issue.t(), non_neg_integer(), map()) ::
+          {:continue, String.t() | nil} | {:error, {:overseer_escalation, String.t()}}
+  defp run_overseer_call(%{max_turns: max_turns} = context, issue, turn_number, config) do
+    evidence = assemble_evidence(context, issue, turn_number, max_turns, config)
+
+    case Overseer.run(evidence, config) do
+      {:ok, verdict} ->
+        Logger.info(
+          "Overseer verdict for #{issue_context(issue)} turn=#{turn_number}/#{max_turns} " <>
+            "verdict=#{verdict.verdict} action=#{verdict.recommended_action} confidence=#{verdict.confidence}"
+        )
+
+        apply_overseer_action(Overseer.decide_action(verdict, config), issue, verdict)
+
+      {:error, reason} ->
+        Logger.warning(
+          "Overseer call failed for #{issue_context(issue)} turn=#{turn_number}/#{max_turns} " <>
+            "(fail-open, continuing): #{inspect(reason)}"
+        )
+
+        {:continue, nil}
+    end
+  end
+
+  @spec apply_overseer_action(Overseer.action(), Issue.t(), Overseer.verdict()) ::
+          {:continue, String.t() | nil} | {:error, {:overseer_escalation, String.t()}}
+  defp apply_overseer_action({:continue, _why}, _issue, _verdict), do: {:continue, nil}
+
+  defp apply_overseer_action({:nudge, message}, issue, verdict) do
+    post_overseer_comment(issue, "nudge", verdict.rationale, message)
+    {:continue, message}
+  end
+
+  defp apply_overseer_action({:recommend_extend_budget, rationale}, issue, _verdict) do
+    post_overseer_comment(issue, "budget-extension recommendation", rationale, nil)
+    {:continue, nil}
+  end
+
+  defp apply_overseer_action({:escalate, rationale}, issue, _verdict) do
+    post_overseer_comment(issue, "escalation", rationale, nil)
+    {:error, {:overseer_escalation, rationale}}
+  end
+
+  defp apply_overseer_action({:abort, rationale}, issue, _verdict) do
+    post_overseer_comment(issue, "abort", rationale, nil)
+    {:error, {:overseer_escalation, rationale}}
+  end
+
+  # Assemble the read-only evidence bundle. Diff/log probes are best-effort:
+  # a failure drops just that section rather than aborting the classification.
+  @spec assemble_evidence(map(), Issue.t(), non_neg_integer(), non_neg_integer(), map()) :: map()
+  defp assemble_evidence(%{overseer_session: session, workspace: workspace, worker_host: worker_host}, issue, turn_number, max_turns, config) do
+    %{
+      issue_title: issue.title,
+      issue_description: issue.description,
+      turn: turn_number,
+      max_turns: max_turns,
+      git_diff: probe_git_diff(workspace, worker_host, config),
+      logs: collect_logs(workspace, config),
+      transcript: OverseerSession.transcript(session)
+    }
+  end
+
+  @spec probe_git_diff(String.t(), worker_host(), map()) :: String.t() | nil
+  defp probe_git_diff(workspace, worker_host, config) do
+    case Git.diff_summary(workspace, worker_host, config.input_byte_limit) do
+      {:ok, diff} -> diff
+      {:error, _reason} -> nil
+    end
+  end
+
+  # Read the tails of build/test logs matching `config.log_globs`. Local-only:
+  # the diff already proves the worker_host case is covered by the transcript,
+  # and these globs resolve against the local workspace path. A read error on
+  # any single file is dropped silently (best-effort evidence).
+  @spec collect_logs(String.t(), map()) :: [{String.t(), String.t()}]
+  defp collect_logs(workspace, config) when is_binary(workspace) do
+    config.log_globs
+    |> Enum.flat_map(fn glob -> Path.wildcard(Path.join(workspace, glob)) end)
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> Enum.map(fn path -> {Path.relative_to(path, workspace), read_log_tail(path, config.input_byte_limit)} end)
+    |> Enum.reject(fn {_name, tail} -> tail in [nil, ""] end)
+  end
+
+  @spec read_log_tail(String.t(), non_neg_integer()) :: String.t() | nil
+  defp read_log_tail(path, byte_limit) do
+    case File.read(path) do
+      {:ok, content} -> tail_bytes(content, byte_limit)
+      {:error, _reason} -> nil
+    end
+  end
+
+  # Keep the last `byte_limit` bytes, then drop any partial leading codepoint so
+  # the tail is always valid UTF-8 for the prompt.
+  @spec tail_bytes(binary(), non_neg_integer()) :: String.t()
+  defp tail_bytes(content, byte_limit) when byte_size(content) <= byte_limit, do: content
+
+  defp tail_bytes(content, byte_limit) do
+    content
+    |> binary_part(byte_size(content) - byte_limit, byte_limit)
+    |> trim_invalid_leading()
+  end
+
+  @spec trim_invalid_leading(binary()) :: String.t()
+  defp trim_invalid_leading(<<>>), do: ""
+
+  defp trim_invalid_leading(binary) do
+    if String.valid?(binary) do
+      binary
+    else
+      <<_dropped, rest::binary>> = binary
+      trim_invalid_leading(rest)
+    end
+  end
+
+  # Single read-only Linear comment carrying the overseer's decision. Best-effort:
+  # a failed comment never blocks the turn-loop decision it accompanies.
+  @spec post_overseer_comment(Issue.t(), String.t(), String.t(), String.t() | nil) :: :ok
+  defp post_overseer_comment(%Issue{id: issue_id} = issue, label, rationale, steering)
+       when is_binary(issue_id) do
+    body = overseer_comment_body(label, rationale, steering)
+
+    case Tracker.create_comment(issue_id, body) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Overseer comment failed for #{issue_context(issue)}: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  defp post_overseer_comment(_issue, _label, _rationale, _steering), do: :ok
+
+  @spec overseer_comment_body(String.t(), String.t(), String.t() | nil) :: String.t()
+  defp overseer_comment_body(label, rationale, steering) do
+    steering_block =
+      case steering do
+        msg when is_binary(msg) and msg != "" -> "\n\n**Steering instruction:** #{msg}"
+        _ -> ""
+      end
+
+    "🤖 **Overseer (#{label})**\n\n#{rationale}#{steering_block}"
+  end
+
+  defp build_turn_prompt(issue, opts, 1, _max_turns, _steering) do
     issue
     |> PromptBuilder.build_prompt(opts)
     |> prepend_resume_after_block_directive(Keyword.get(opts, :resume_after_block))
   end
 
-  defp build_turn_prompt(_issue, _opts, turn_number, max_turns) do
+  defp build_turn_prompt(_issue, _opts, turn_number, max_turns, steering) do
     base = """
     Continuation guidance:
 
@@ -378,9 +634,37 @@ defmodule SymphonyElixir.AgentRunner do
     k = Config.budget_pressure_turns()
     turns_left = max_turns - turn_number
 
+    base
+    |> maybe_append_budget_pressure(turns_left, k)
+    |> append_overseer_steering_directive(steering)
+  end
+
+  defp maybe_append_budget_pressure(base, turns_left, k) do
     if turns_left > 0 and turns_left <= k,
       do: append_budget_pressure_directive(base, turns_left),
       else: base
+  end
+
+  # Layer 2 steering slot (IDE-212): when the overseer returned a `nudge`, its
+  # `steering_message` rides the *next* turn's prompt as an explicit directive.
+  # `@doc false` public seam mirroring `append_budget_pressure_directive/2`.
+  @doc false
+  @spec append_overseer_steering_directive(String.t(), String.t() | nil) :: String.t()
+  def append_overseer_steering_directive(prompt, steering)
+      when is_binary(prompt) and is_binary(steering) and steering != "" do
+    prompt <> "\n\n" <> overseer_steering_directive(steering)
+  end
+
+  def append_overseer_steering_directive(prompt, _steering) when is_binary(prompt), do: prompt
+
+  defp overseer_steering_directive(steering) do
+    """
+    ## Overseer steering (IMPORTANT)
+
+    An automated overseer reviewed this run's progress and produced one concrete instruction. Act on it now:
+
+    #{steering}
+    """
   end
 
   # Budget-pressure steering (IDE-189 / Layer 0). When the orchestrator's
