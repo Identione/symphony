@@ -1413,15 +1413,29 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp refresh_dependency_graph(%State{} = state, issues) when is_list(issues) do
+    active_states = active_state_set()
+    terminal_states = terminal_state_set()
+
+    # Anchor the graph on managed work only: a node enters the graph because this
+    # instance would dispatch it (candidate_issue?/3), not merely because Linear's
+    # active-state poll returned it. Non-candidate issues — active parents, leaves
+    # failing assignee/label filters — are excluded as roots; they reappear only
+    # as transitive blockers or as siblings of a managed child (see below).
+    candidates =
+      Enum.filter(issues, fn
+        %Issue{} = issue -> candidate_issue?(issue, active_states, terminal_states)
+        _ -> false
+      end)
+
     known =
-      issues
+      candidates
       |> Enum.flat_map(fn
         %Issue{id: id} = issue when is_binary(id) -> [{id, node_projection(issue)}]
         _ -> []
       end)
       |> Map.new()
 
-    refs = blocker_refs_index(issues)
+    refs = blocker_refs_index(candidates)
     frontier = frontier_for(known, refs)
 
     {known, refs} = expand_graph(known, frontier, refs, 0)
@@ -1429,23 +1443,21 @@ defmodule SymphonyElixir.Orchestrator do
     known =
       known
       |> finalize_dependency_graph(refs)
-      |> add_subissue_containers(issues)
+      |> add_subissue_containers(issues, active_states, terminal_states)
 
     %{state | dependency_graph: known}
   end
 
   # Group sub-issues under their parent as a container node. Anchored on managed
-  # work: we only build containers for parents that touch issues the poll already
-  # returned (a candidate/active issue's parent, or a polled parent issue
-  # itself), then surface *every* sub-issue under that parent — managed or not —
-  # so the operator sees the full family. Unmanaged children carry a
-  # manageability diagnostic (see `child_manageability/3`). Respects the
-  # `@graph_max_nodes` cap and logs when the cap drops nodes.
-  defp add_subissue_containers(known, issues) when is_map(known) and is_list(issues) do
-    active_states = active_state_set()
-    terminal_states = terminal_state_set()
-
-    containers = collect_containers(issues)
+  # work: a container is built only for the parent of a managed (candidate) leaf
+  # the poll returned — never for an arbitrary polled parent issue. Once a
+  # managed child anchors the parent, we surface *every* sub-issue under that
+  # parent — managed or not — so the operator sees the full family. Unmanaged
+  # children carry a manageability diagnostic (see `child_manageability/3`).
+  # Respects the `@graph_max_nodes` cap and logs when the cap drops nodes.
+  defp add_subissue_containers(known, issues, active_states, terminal_states)
+       when is_map(known) and is_list(issues) do
+    containers = collect_containers(issues, active_states, terminal_states)
 
     {known, dropped} =
       Enum.reduce(containers, {known, 0}, fn {parent_id, {parent_info, children}}, {acc, dropped} ->
@@ -1500,14 +1512,18 @@ defmodule SymphonyElixir.Orchestrator do
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   # Build `parent_id => {parent_display, [child Issue]}` from the polled issues.
-  # A container arises either from a child pointing up to its parent (with the
-  # parent carrying the full sibling list) or from a polled parent issue itself.
-  defp collect_containers(issues) do
+  # A container arises only from a managed (candidate) leaf pointing up to its
+  # parent — the child carries the full sibling list via `parent.children`. An
+  # active parent issue Linear happened to return does NOT anchor a container on
+  # its own.
+  defp collect_containers(issues, active_states, terminal_states) do
     Enum.reduce(issues, %{}, fn
       %Issue{} = issue, acc ->
-        acc
-        |> maybe_container_from_parent(issue)
-        |> maybe_container_from_self(issue)
+        if candidate_issue?(issue, active_states, terminal_states) do
+          maybe_container_from_parent(acc, issue)
+        else
+          acc
+        end
 
       _other, acc ->
         acc
@@ -1520,13 +1536,6 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp maybe_container_from_parent(acc, _issue), do: acc
-
-  defp maybe_container_from_self(acc, %Issue{id: id, has_children: true, children: [_ | _] = children})
-       when is_binary(id) do
-    upsert_container(acc, id, parent_info_from_self(children), children)
-  end
-
-  defp maybe_container_from_self(acc, _issue), do: acc
 
   defp upsert_container(acc, parent_id, parent_info, children) do
     Map.update(acc, parent_id, {parent_info, children}, fn {existing_info, existing_children} ->
@@ -1556,12 +1565,6 @@ defmodule SymphonyElixir.Orchestrator do
       url: parent.url
     }
   end
-
-  # When the container is sourced from a polled parent issue we have the parent's
-  # own fields directly via that issue; this fallback derives display info from a
-  # child only when the parent issue itself was not polled (sibling-sourced).
-  defp parent_info_from_self([%Issue{parent: %Issue{} = parent} | _]), do: parent_info(parent)
-  defp parent_info_from_self(_children), do: %{}
 
   defp container_node(parent_id, parent_info, children, terminal_states) do
     child_total = length(children)
