@@ -3,6 +3,7 @@ defmodule LinearSimWeb.GraphQL.Types.IssueTypes do
   use Absinthe.Schema.Notation
 
   alias LinearSimWeb.GraphQL.Resolvers.IssueResolver
+  alias LinearSimWeb.GraphQL.Resolvers.LabelResolver
   alias LinearSimWeb.GraphQL.Resolvers.TeamResolver
 
   @desc "A team workflow state."
@@ -19,10 +20,12 @@ defmodule LinearSimWeb.GraphQL.Types.IssueTypes do
     field :color, :string
   end
 
-  @desc "A directed relation; `issue` is the source (e.g. the blocker)."
+  @desc "A directed relation; `issue` is the source, `relatedIssue` the target."
   object :issue_relation do
+    field :id, non_null(:id)
     field :type, non_null(:string)
     field :issue, :issue
+    field :related_issue, :issue
   end
 
   @desc "A Linear team."
@@ -54,6 +57,7 @@ defmodule LinearSimWeb.GraphQL.Types.IssueTypes do
 
     field :created_at, :datetime, resolve: &IssueResolver.created_at/3
     field :updated_at, :datetime
+    field :archived_at, :datetime
 
     field :labels, :label_connection do
       arg(:first, :integer)
@@ -68,6 +72,12 @@ defmodule LinearSimWeb.GraphQL.Types.IssueTypes do
     end
 
     field :parent, :issue, resolve: &IssueResolver.parent/3
+
+    field :relations, :issue_relation_connection do
+      arg(:first, :integer)
+      arg(:after, :string)
+      resolve(&IssueResolver.relations/3)
+    end
 
     field :inverse_relations, :issue_relation_connection do
       arg(:first, :integer)
@@ -162,6 +172,13 @@ defmodule LinearSimWeb.GraphQL.Types.IssueTypes do
     field :issue, :issue do
       arg(:id, non_null(:string))
       resolve(&IssueResolver.get/3)
+    end
+
+    @desc "List the workspace's labels."
+    field :issue_labels, :label_connection do
+      arg(:first, :integer)
+      arg(:after, :string)
+      resolve(&LabelResolver.list/3)
     end
   end
 end

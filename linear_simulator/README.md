@@ -34,7 +34,7 @@ plane interactively:
 | --- | --- | --- |
 | Overview | `/` | Live entity counts + current scenario / response mode / capture state |
 | Scenarios | `/scenarios` | Load any scenario; force a response-mode override |
-| Entities | `/entities` | Browse issues, projects, teams, workflow states, users |
+| Entities | `/entities` | Browse issues, projects, teams, workflow states, users; create/edit/delete issues, assign labels, set a parent (sub-issues), and manage relations |
 | Captured Operations | `/captured` | Inspect captured ops; promote to the curated corpus; clear |
 | Webhooks | `/webhooks` | Sign & replay a webhook; delivery history |
 | Settings | `/settings` | Toggle operation capture / GraphQL logging; reset / wipe |
@@ -49,6 +49,27 @@ access (fine for a local dev tool).
 | --- | --- |
 | `POST /graphql` | Linear-compatible GraphQL endpoint |
 | `GET /health` | Liveness probe |
+
+### Issue mutations (GraphQL)
+
+The simulator exposes Linear-shaped issue write operations, usable directly or
+via the Entities dashboard:
+
+| Mutation | Notes |
+| --- | --- |
+| `issueCreate(input)` | Auto-assigns identifier/number/url/branchName. Input: `teamId!`, `title!`, `description`, `stateId`, `assigneeId`, `projectId`, `parentId`, `cycleId`, `priority`, `labelIds`. |
+| `issueUpdate(id, input)` | Same fields plus `labelIds` (replace), `addedLabelIds`/`removedLabelIds` (incremental). `id` accepts an internal id or identifier (`ENG-1`). |
+| `issueArchive(id)` | Soft archive (sets `archivedAt`; drops from the `issues` query). |
+| `issueDelete(id)` | Hard delete (comments/relations cascade). |
+| `issueAddLabel(id, labelId)` / `issueRemoveLabel(id, labelId)` | Attach/detach a single label. |
+| `issueLabelCreate(input)` | Create a workspace label (`name!`, `color`). |
+| `issueRelationCreate(input)` | Link two issues; `type` is `blocks`/`duplicate`/`related`/`similar`, `issueId`/`relatedIssueId` accept id or identifier. |
+| `issueRelationDelete(id)` | Remove a relation. |
+
+Plus the `issueLabels` query lists workspace labels. **Sub-issues** use the
+`parentId` field on create/update; the `issue` type exposes `parent`,
+`children`, `relations`, and `inverseRelations`. Unknown `*_id` references
+return a structured `VALIDATION_ERROR` rather than a 500.
 | `POST /admin/reset` | Reset to the default scenario (`basic_workspace`) |
 | `POST /admin/scenario/:name` | Load a named scenario |
 | `POST /admin/webhooks/replay` | Sign + deliver a Linear-style webhook to a target app |
@@ -61,7 +82,7 @@ all tables and re-seeds deterministic, string-keyed fixtures.
 
 | Scenario | Contents |
 | --- | --- |
-| `basic_workspace` | org `Acme`, user `user_hakan`, team `ENG`, project `roadmap`, one Todo issue `ENG-1`, one seeded workpad comment |
+| `basic_workspace` | org `Acme`, user `user_hakan`, team `ENG`, project `roadmap`, labels `Bug`/`Feature`/`Improvement`, one Todo issue `ENG-1`, one seeded workpad comment |
 | `empty_workspace` | the skeleton with no issues |
 | `many_issues` | 75 Todo issues (exercises pagination) |
 | `archived_issues` | one active Todo issue and one archived (Done) issue |

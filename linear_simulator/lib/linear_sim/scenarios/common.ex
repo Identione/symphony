@@ -7,6 +7,7 @@ defmodule LinearSim.Scenarios.Common do
 
   alias LinearSim.Linear.{
     ApiToken,
+    Label,
     Organization,
     Project,
     Team,
@@ -70,7 +71,21 @@ defmodule LinearSim.Scenarios.Common do
         slug_id: "roadmap"
       })
 
-    %{org: org, user: user, team: team, states: states, project: project}
+    # A small set of workspace labels so issueAddLabel / labelIds have something
+    # to attach out of the box (deterministic ids for fixtures and assertions).
+    labels = %{
+      bug: insert_label!(org, "label_bug", "Bug", "#e5484d"),
+      feature: insert_label!(org, "label_feature", "Feature", "#4c6ef5"),
+      improvement: insert_label!(org, "label_improvement", "Improvement", "#2f9e44")
+    }
+
+    %{org: org, user: user, team: team, states: states, project: project, labels: labels}
+  end
+
+  @doc "Inserts a workspace label for the given organization."
+  @spec insert_label!(struct(), String.t(), String.t(), String.t()) :: struct()
+  def insert_label!(org, id, name, color) do
+    Repo.insert!(%Label{id: id, organization_id: org.id, name: name, color: color})
   end
 
   @doc "Inserts a workflow state for the given team."

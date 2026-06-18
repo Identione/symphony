@@ -10,7 +10,11 @@ defmodule LinearSim.Linear do
   alias LinearSim.Linear.{
     ApiToken,
     Comment,
+    Cycle,
     Issue,
+    IssueLabel,
+    IssueRelation,
+    Label,
     Organization,
     Project,
     Team,
@@ -18,6 +22,17 @@ defmodule LinearSim.Linear do
     WebhookDelivery,
     WorkflowState
   }
+
+  # FK fields validated explicitly before insert/update: SQLite doesn't surface
+  # constraint names, so a bad reference would otherwise raise instead of
+  # yielding a clean changeset error (same approach as create_comment).
+  @issue_fk_checks [
+    {:state_id, WorkflowState},
+    {:assignee_id, User},
+    {:project_id, Project},
+    {:parent_id, Issue},
+    {:cycle_id, Cycle}
+  ]
 
   @doc "Coarse entity counts for the current simulator state (dashboard overview)."
   @spec counts() :: %{atom() => non_neg_integer()}
@@ -141,12 +156,14 @@ defmodule LinearSim.Linear do
     :labels,
     {:children, @child_preloads},
     {:parent, [:state, :assignee, :labels, {:children, @child_preloads}]},
-    {:inverse_relations, [issue: :state]}
+    relations: [issue: :state, related_issue: :state],
+    inverse_relations: [issue: :state, related_issue: :state]
   ]
 
   @doc """
   Lists issues for an organization, applying a Linear-style nested filter
-  (project.slugId.eq, state.name.in, id.in). Results are deterministically
+  (project.slugId.eq, state.name.in, id.in). Archived issues are excluded by
+  default (matching Linear's `issues` query). Results are deterministically
   ordered by insertion time then id so cursors are stable.
   """
   @spec list_issues(Organization.t() | nil, map()) :: [Issue.t()]
@@ -155,6 +172,7 @@ defmodule LinearSim.Linear do
   def list_issues(%Organization{} = org, filter) do
     Issue
     |> where([i], i.organization_id == ^org.id)
+    |> where([i], is_nil(i.archived_at))
     |> apply_issue_filter(filter)
     |> order_by([i], asc: i.inserted_at, asc: i.id)
     |> preload(^@issue_preloads)
@@ -255,17 +273,303 @@ defmodule LinearSim.Linear do
     end
   end
 
-  @doc "Updates an issue (by internal id or identifier)."
+  @doc """
+  Updates an issue (by internal id or identifier). Accepts scalar/FK fields
+  (`title`, `description`, `priority`, `state_id`, `assignee_id`, `project_id`,
+  `parent_id`, `cycle_id`) plus label operations: `label_ids` (full replace),
+  `added_label_ids`, and `removed_label_ids` (incremental), mirroring Linear's
+  `IssueUpdateInput`. Keys may be atoms or strings.
+  """
   @spec update_issue(String.t(), map()) ::
           {:ok, Issue.t()} | {:error, Ecto.Changeset.t() | :not_found}
   def update_issue(id, attrs) do
-    query = from i in Issue, where: i.id == ^id or i.identifier == ^id
+    attrs = normalize_attrs(attrs)
 
-    case Repo.one(query) do
-      nil -> {:error, :not_found}
-      issue -> issue |> Issue.changeset(attrs) |> Repo.update()
+    case fetch_issue(id) do
+      nil ->
+        {:error, :not_found}
+
+      issue ->
+        case issue |> Issue.changeset(attrs) |> validate_issue_references() |> Repo.update() do
+          {:ok, updated} ->
+            apply_label_ops(updated.id, attrs)
+            {:ok, updated}
+
+          error ->
+            error
+        end
     end
   end
+
+  @doc """
+  Creates a new issue in the organization, auto-assigning the internal id and
+  the per-team `number`/`identifier`/`url`/`branch_name`. The caller supplies
+  the editable fields (`team_id`, `title`, and optionally `description`,
+  `state_id`, `assignee_id`, `project_id`, `parent_id`, `cycle_id`, `priority`,
+  `label_ids`). Blank optional values are treated as nil by Ecto's cast, so
+  unset selects don't violate foreign keys.
+  """
+  @spec create_issue(Organization.t() | nil, map()) ::
+          {:ok, Issue.t()} | {:error, Ecto.Changeset.t()}
+  def create_issue(nil, _attrs), do: {:error, Issue.changeset(%Issue{}, %{})}
+
+  def create_issue(%Organization{} = org, attrs) when is_map(attrs) do
+    attrs = normalize_attrs(attrs)
+
+    case %Issue{}
+         |> Issue.changeset(build_issue_attrs(org, team_for(attrs), attrs))
+         |> validate_issue_references()
+         |> Repo.insert() do
+      {:ok, issue} ->
+        apply_label_ops(issue.id, attrs)
+        {:ok, issue}
+
+      error ->
+        error
+    end
+  end
+
+  @doc """
+  Deletes an issue by internal id or ticket identifier (e.g. `ENG-1`).
+  Comments/relations cascade via the DB.
+  """
+  @spec delete_issue(String.t()) :: {:ok, Issue.t()} | {:error, :not_found}
+  def delete_issue(id) do
+    case fetch_issue(id) do
+      nil -> {:error, :not_found}
+      issue -> Repo.delete(issue)
+    end
+  end
+
+  @doc """
+  Soft-archives an issue by stamping `archived_at` (by internal id or
+  identifier). Archived issues drop out of `list_issues` but remain fetchable
+  by id, mirroring Linear's `issueArchive`.
+  """
+  @spec archive_issue(String.t()) :: {:ok, Issue.t()} | {:error, :not_found}
+  def archive_issue(id) do
+    case fetch_issue(id) do
+      nil -> {:error, :not_found}
+      issue -> issue |> Issue.changeset(%{archived_at: DateTime.utc_now()}) |> Repo.update()
+    end
+  end
+
+  ## Labels -----------------------------------------------------------------
+
+  @doc "Lists an organization's labels, deterministically ordered."
+  @spec list_labels(Organization.t() | nil) :: [Label.t()]
+  def list_labels(nil), do: []
+
+  def list_labels(%Organization{} = org) do
+    Label
+    |> where([l], l.organization_id == ^org.id)
+    |> order_by([l], asc: l.inserted_at, asc: l.id)
+    |> Repo.all()
+  end
+
+  @doc "Creates a label in the organization (Linear's `issueLabelCreate`)."
+  @spec create_label(Organization.t() | nil, map()) ::
+          {:ok, Label.t()} | {:error, Ecto.Changeset.t()}
+  def create_label(nil, _attrs), do: {:error, Label.changeset(%Label{}, %{})}
+
+  def create_label(%Organization{} = org, attrs) do
+    attrs =
+      attrs
+      |> normalize_attrs()
+      |> Map.merge(%{"id" => "label_" <> Ecto.UUID.generate(), "organization_id" => org.id})
+
+    %Label{} |> Label.changeset(attrs) |> Repo.insert()
+  end
+
+  @doc """
+  Attaches a label to an issue (Linear's `issueAddLabel`). Idempotent.
+  Returns `{:error, :not_found}` if the issue or label does not exist.
+  """
+  @spec add_issue_label(String.t(), String.t()) :: {:ok, Issue.t()} | {:error, :not_found}
+  def add_issue_label(issue_id, label_id) do
+    with %Issue{} = issue <- fetch_issue(issue_id),
+         %Label{} <- Repo.get(Label, label_id) do
+      upsert_issue_label(issue.id, label_id)
+      {:ok, issue}
+    else
+      _ -> {:error, :not_found}
+    end
+  end
+
+  @doc """
+  Detaches a label from an issue (Linear's `issueRemoveLabel`). Idempotent —
+  succeeds even if the label was not attached. `{:error, :not_found}` only if
+  the issue itself is unknown.
+  """
+  @spec remove_issue_label(String.t(), String.t()) :: {:ok, Issue.t()} | {:error, :not_found}
+  def remove_issue_label(issue_id, label_id) do
+    case fetch_issue(issue_id) do
+      nil ->
+        {:error, :not_found}
+
+      %Issue{} = issue ->
+        Repo.delete_all(
+          from il in IssueLabel, where: il.issue_id == ^issue.id and il.label_id == ^label_id
+        )
+
+        {:ok, issue}
+    end
+  end
+
+  ## Relations --------------------------------------------------------------
+
+  @doc """
+  Creates a directed relation between two issues (Linear's `issueRelationCreate`).
+  `issue_id`/`related_issue_id` accept internal ids or identifiers. `type` is one
+  of #{inspect(IssueRelation.relation_types())}. Returns `{:error, :not_found}`
+  if either issue is unknown.
+  """
+  @spec create_issue_relation(map()) ::
+          {:ok, IssueRelation.t()} | {:error, Ecto.Changeset.t() | :not_found}
+  def create_issue_relation(attrs) do
+    attrs = normalize_attrs(attrs)
+
+    with %Issue{} = source <- fetch_issue(attrs["issue_id"]),
+         %Issue{} = target <- fetch_issue(attrs["related_issue_id"]),
+         {:ok, relation} <-
+           %IssueRelation{}
+           |> IssueRelation.changeset(%{
+             "id" => attrs["id"] || "rel_" <> Ecto.UUID.generate(),
+             "issue_id" => source.id,
+             "related_issue_id" => target.id,
+             "type" => attrs["type"]
+           })
+           |> Repo.insert() do
+      {:ok, Repo.preload(relation, issue: :state, related_issue: :state)}
+    else
+      nil -> {:error, :not_found}
+      {:error, %Ecto.Changeset{} = changeset} -> {:error, changeset}
+    end
+  end
+
+  @doc "Deletes an issue relation by id (Linear's `issueRelationDelete`)."
+  @spec delete_issue_relation(String.t()) :: {:ok, IssueRelation.t()} | {:error, :not_found}
+  def delete_issue_relation(id) do
+    case Repo.get(IssueRelation, id) do
+      nil -> {:error, :not_found}
+      relation -> Repo.delete(relation)
+    end
+  end
+
+  # Applies label_ids (full replace) and added/removed_label_ids (incremental)
+  # from a normalized attrs map. Unknown label ids are skipped, not errors.
+  defp apply_label_ops(issue_id, attrs) do
+    if Map.has_key?(attrs, "label_ids") do
+      Repo.delete_all(from il in IssueLabel, where: il.issue_id == ^issue_id)
+
+      attrs
+      |> Map.get("label_ids")
+      |> existing_label_ids()
+      |> Enum.each(&upsert_issue_label(issue_id, &1))
+    end
+
+    attrs
+    |> Map.get("added_label_ids", [])
+    |> existing_label_ids()
+    |> Enum.each(&upsert_issue_label(issue_id, &1))
+
+    Enum.each(List.wrap(Map.get(attrs, "removed_label_ids", [])), fn label_id ->
+      Repo.delete_all(
+        from il in IssueLabel, where: il.issue_id == ^issue_id and il.label_id == ^label_id
+      )
+    end)
+
+    :ok
+  end
+
+  defp existing_label_ids(ids) do
+    ids = ids |> List.wrap() |> Enum.reject(&(&1 in [nil, ""]))
+    if ids == [], do: [], else: Repo.all(from l in Label, where: l.id in ^ids, select: l.id)
+  end
+
+  defp upsert_issue_label(issue_id, label_id) do
+    unless Repo.get_by(IssueLabel, issue_id: issue_id, label_id: label_id) do
+      Repo.insert!(%IssueLabel{
+        id: "il_" <> Ecto.UUID.generate(),
+        issue_id: issue_id,
+        label_id: label_id
+      })
+    end
+  end
+
+  defp fetch_issue(id) do
+    Repo.one(from i in Issue, where: i.id == ^id or i.identifier == ^id)
+  end
+
+  # Stringify top-level keys so atom-keyed (GraphQL) and string-keyed (web form)
+  # callers share one code path; list/scalar values pass through untouched.
+  defp normalize_attrs(attrs) do
+    Map.new(attrs, fn
+      {key, value} when is_atom(key) -> {Atom.to_string(key), value}
+      {key, value} -> {key, value}
+    end)
+  end
+
+  # Rejects *_id values that point at non-existent rows with a clean changeset
+  # error rather than letting SQLite raise an unnamed FK constraint.
+  defp validate_issue_references(changeset) do
+    Enum.reduce(@issue_fk_checks, changeset, fn {field, schema}, cs ->
+      case Ecto.Changeset.get_field(cs, field) do
+        nil ->
+          cs
+
+        id ->
+          if Repo.exists?(from r in schema, where: r.id == ^id),
+            do: cs,
+            else: Ecto.Changeset.add_error(cs, field, "does not reference an existing record")
+      end
+    end)
+  end
+
+  defp team_for(attrs) do
+    case attrs["team_id"] do
+      id when is_binary(id) and id != "" -> Repo.get(Team, id)
+      _ -> nil
+    end
+  end
+
+  # No (or unknown) team: stamp the id/org so the changeset reports the genuinely
+  # missing fields (team_id, identifier, number) rather than a bare id error.
+  defp build_issue_attrs(org, nil, attrs) do
+    Map.merge(attrs, %{"id" => new_issue_id(), "organization_id" => org.id})
+  end
+
+  defp build_issue_attrs(org, %Team{} = team, attrs) do
+    number = next_issue_number(team.id)
+    identifier = "#{team.key}-#{number}"
+
+    Map.merge(attrs, %{
+      "id" => new_issue_id(),
+      "organization_id" => org.id,
+      "team_id" => team.id,
+      "number" => number,
+      "identifier" => identifier,
+      "url" => issue_url(org, identifier),
+      "branch_name" => issue_branch_name(identifier)
+    })
+  end
+
+  defp next_issue_number(team_id) do
+    max =
+      Issue
+      |> where([i], i.team_id == ^team_id)
+      |> select([i], max(i.number))
+      |> Repo.one()
+
+    (max || 0) + 1
+  end
+
+  defp new_issue_id, do: "issue_" <> Ecto.UUID.generate()
+
+  defp issue_url(%Organization{url_key: url_key}, identifier),
+    do: "https://linear.app/#{url_key}/issue/#{identifier}"
+
+  defp issue_branch_name(identifier), do: "sim/" <> String.downcase(identifier)
 
   defp apply_issue_filter(query, filter) when is_map(filter) do
     query
