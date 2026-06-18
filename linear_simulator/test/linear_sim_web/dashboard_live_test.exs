@@ -89,6 +89,173 @@ defmodule LinearSimWeb.DashboardLiveTest do
     end
   end
 
+  describe "Issue editing" do
+    test "creating an issue via the form adds it to the workspace", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/entities")
+
+      view |> element("button[phx-click='new_issue']") |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit='save_issue']", %{
+          "issue" => %{"title" => "Dashboard-created issue", "team_id" => "team_eng"}
+        })
+        |> render_submit()
+
+      assert html =~ "Dashboard-created issue"
+      # basic_workspace seeds ENG-1, so the new issue is ENG-2.
+      assert html =~ "ENG-2"
+
+      titles =
+        LinearSim.Linear.default_organization()
+        |> LinearSim.Linear.list_issues(%{})
+        |> Enum.map(& &1.title)
+
+      assert "Dashboard-created issue" in titles
+    end
+
+    test "submitting a blank title shows a validation error", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/entities")
+
+      view |> element("button[phx-click='new_issue']") |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit='save_issue']", %{
+          "issue" => %{"title" => "", "team_id" => "team_eng"}
+        })
+        |> render_submit()
+
+      assert html =~ "can&#39;t be blank" or html =~ "can't be blank"
+    end
+
+    test "editing an issue updates its title", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/entities")
+
+      view
+      |> element("button[phx-value-id='issue_eng_1'][phx-click='edit_issue']")
+      |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit='save_issue']", %{"issue" => %{"title" => "Renamed via UI"}})
+        |> render_submit()
+
+      assert html =~ "Renamed via UI"
+      refute html =~ "Build Linear simulator"
+    end
+
+    test "assigning labels via the form persists and shows in the table", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/entities")
+
+      view
+      |> element("button[phx-value-id='issue_eng_1'][phx-click='edit_issue']")
+      |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit='save_issue']", %{
+          "issue" => %{"label_ids" => ["label_bug", "label_feature"]}
+        })
+        |> render_submit()
+
+      # The Labels column now renders the assigned label names.
+      assert html =~ "Bug"
+      assert html =~ "Feature"
+
+      labels =
+        LinearSim.Linear.default_organization()
+        |> LinearSim.Linear.list_issues(%{})
+        |> hd()
+        |> Map.fetch!(:labels)
+        |> Enum.map(& &1.name)
+        |> Enum.sort()
+
+      assert labels == ["Bug", "Feature"]
+    end
+
+    test "the new-issue form exposes the seeded labels as options", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/entities")
+      html = view |> element("button[phx-click='new_issue']") |> render_click()
+
+      assert html =~ "Labels"
+      assert html =~ "Improvement"
+    end
+
+    test "setting a parent via the form makes the issue a sub-issue", %{conn: conn} do
+      org = LinearSim.Linear.default_organization()
+      [team] = LinearSim.Linear.list_teams(org)
+
+      {:ok, child} =
+        LinearSim.Linear.create_issue(org, %{"team_id" => team.id, "title" => "Child"})
+
+      {:ok, view, _html} = live(conn, "/entities")
+
+      view
+      |> element("button[phx-value-id='#{child.id}'][phx-click='edit_issue']")
+      |> render_click()
+
+      view
+      |> form("form[phx-submit='save_issue']", %{"issue" => %{"parent_id" => "issue_eng_1"}})
+      |> render_submit()
+
+      assert LinearSim.Linear.get_issue_by_id_or_identifier(org, child.id).parent_id ==
+               "issue_eng_1"
+    end
+
+    test "adding and removing a relation in the edit modal persists live", %{conn: conn} do
+      org = LinearSim.Linear.default_organization()
+      [team] = LinearSim.Linear.list_teams(org)
+
+      {:ok, other} =
+        LinearSim.Linear.create_issue(org, %{"team_id" => team.id, "title" => "Other"})
+
+      {:ok, view, _html} = live(conn, "/entities")
+
+      view
+      |> element("button[phx-value-id='issue_eng_1'][phx-click='edit_issue']")
+      |> render_click()
+
+      html =
+        view
+        |> form("form[phx-submit='add_relation']", %{
+          "relation" => %{"type" => "blocks", "related_issue_id" => other.id}
+        })
+        |> render_submit()
+
+      assert html =~ "blocks"
+      assert html =~ other.identifier
+
+      eng1 = LinearSim.Linear.get_issue_by_id_or_identifier(org, "issue_eng_1")
+      assert [%{type: "blocks", related_issue_id: rid}] = eng1.relations
+      assert rid == other.id
+
+      # Remove it again via the live × button.
+      [relation] = eng1.relations
+
+      view
+      |> element("button[phx-click='remove_relation'][phx-value-id='#{relation.id}']")
+      |> render_click()
+
+      assert LinearSim.Linear.get_issue_by_id_or_identifier(org, "issue_eng_1").relations == []
+    end
+
+    test "deleting an issue removes it from the table", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/entities")
+
+      assert render(view) =~ "ENG-1"
+
+      html =
+        view
+        |> element("button[phx-value-id='issue_eng_1'][phx-click='delete_issue']")
+        |> render_click()
+
+      refute html =~ "ENG-1"
+      assert html =~ "No rows for this scenario."
+      assert LinearSim.Linear.list_issues(LinearSim.Linear.default_organization(), %{}) == []
+    end
+  end
+
   describe "Captured operations" do
     test "renders an empty state when nothing is captured", %{conn: conn} do
       LinearSim.OperationCapture.clear()

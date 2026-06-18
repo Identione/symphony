@@ -21,10 +21,16 @@ defmodule LinearSim.Linear.IssueRelation do
     timestamps()
   end
 
+  @relation_types ~w(blocks duplicate related similar)
+
+  @doc "The valid Linear relation types."
+  def relation_types, do: @relation_types
+
   @doc false
   def changeset(relation, attrs) do
     relation
     |> cast(attrs, [:id, :issue_id, :related_issue_id, :type])
     |> validate_required([:id, :issue_id, :related_issue_id, :type])
+    |> validate_inclusion(:type, @relation_types)
   end
 end
