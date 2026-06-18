@@ -205,6 +205,9 @@ query IssueTeamStates($id: String!) {
 }
 ```
 
+> **Do not use `workflowStates(filter: ...)` directly** — `$teamId` expects `ID!` not
+> `String!` and the query fails. Use `IssueTeamStates` (via `issue.team.states`) instead.
+
 ### Edit an existing comment
 
 Use `commentUpdate` through `linear_graphql`:
@@ -258,6 +261,15 @@ mutation MoveIssueToState($id: String!, $stateId: String!) {
 ```
 
 ### Attach a GitHub PR to an issue
+
+> **Before calling `attachmentLinkGitHubPR` or `attachmentLinkURL`**, check whether the URL
+> is already attached using `IssueDetails` (the `attachments.nodes` field). Match on the
+> PR number / path suffix, not exact string equality, so a trailing slash or query
+> param does not defeat the check. If the PR is already in the list, skip — do not
+> re-attach.
+>
+> Also: Linear auto-attaches a PR if the PR title contains the issue identifier
+> (e.g. `IDE-141`). In that case the attachment already exists before you call anything.
 
 Use the GitHub-specific attachment mutation when linking a PR:
 

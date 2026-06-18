@@ -93,6 +93,22 @@ The agent should be able to talk to Linear, either via a configured Linear MCP s
 - Operate autonomously end-to-end unless blocked by missing requirements, secrets, or permissions.
 - Use the blocked-access escape hatch only for true external blockers (missing required tools/auth) after exhausting documented fallbacks.
 
+## Shell and VCS safety rules
+
+- Guard optional deletions and cleanup so a missing file does not cancel sibling
+  parallel tool calls. Prefer an existence check; reserve `|| true` for explicitly
+  benign misses. Do not blanket-suppress cleanup errors that should stay visible:
+  `[ ! -e path/to/file ] || rm path/to/file`
+- Before `git add <path>`, verify the path exists with `git status` or `ls`. Prefer
+  `git add -u` (stage modified tracked files) over explicit paths when staging
+  already-tracked changes; in a dirty worktree, scope first with `git status --short`.
+  Use `git add -A` only when intentionally staging new untracked files too.
+- `sleep N && <cmd>` chains are blocked by the sandbox hook. For polling, use an
+  `until`/`while` loop (`until <condition>; do sleep 5; done`). For a genuine one-shot
+  delay, run the delay and the command as separate steps rather than chaining.
+- Valid TodoWrite status values are `pending`, `in_progress`, `completed`. No other
+  values are accepted.
+
 ## Related skills
 
 - `linear`: interact with Linear.

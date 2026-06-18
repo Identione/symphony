@@ -57,6 +57,14 @@ description:
 
 ## Commands
 
+> **Common `--json` fields for `gh pr view`** (use these, not guesses):
+> - `state` → `"OPEN"` | `"CLOSED"` | `"MERGED"`
+> - `mergeable` → `"MERGEABLE"` | `"CONFLICTING"` | `"UNKNOWN"`
+> - `mergeStateStatus` → merge gate status
+> - `number`, `title`, `body`, `url`, `headRefName`, `reviews`, `checks`
+>
+> ❌ `--json merged` — this field does **NOT** exist; use `--json state` and check for `"MERGED"`.
+
 ```
 # Ensure branch and PR context
 branch=$(git branch --show-current)
