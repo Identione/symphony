@@ -1076,9 +1076,10 @@ Tick sequence:
 1. Reconcile running issues.
 2. Run dispatch preflight validation.
 3. Fetch candidate issues from tracker using active states.
-4. Sort issues by dispatch priority.
-5. Dispatch eligible issues while slots remain.
-6. Notify observability/status consumers of state changes.
+4. Roll up parent/umbrella issues whose sub-issues are all `Done` (§8.7).
+5. Sort issues by dispatch priority.
+6. Dispatch eligible issues while slots remain.
+7. Notify observability/status consumers of state changes.
 
 If per-tick validation fails, dispatch is skipped for that tick, but reconciliation still happens
 first.
@@ -1098,7 +1099,8 @@ An issue is dispatch-eligible only if all are true:
     collide with the sub-issue's own PR. (Parents are still surfaced for
     observability as container nodes in the dependency graph — see §4.2's
     `dependency_graph` — grouping their sub-issues, including ones this instance
-    does not manage.)
+    does not manage. A parent is also rolled up to `Done` once all of its
+    sub-issues are `Done` — see §8.7.)
 - It is not already in `running`.
 - It is not already in `claimed`.
 - Global concurrency slots are available.
@@ -1212,6 +1214,30 @@ When the service starts:
 3. If the terminal-issues fetch fails, log a warning and continue startup.
 
 This prevents stale terminal workspaces from accumulating after restarts.
+
+### 8.7 Parent Issue Auto-Completion
+
+Parent/umbrella issues are never dispatched (§8.2) — their work lives in their
+sub-issues — so nothing in the agent loop advances them. Once every sub-issue is
+finished, the parent would otherwise sit open indefinitely. To close that gap,
+every poll tick the orchestrator rolls a parent up to `Done` when all of the
+following hold:
+
+- The issue is a parent (has sub-issues) returned by the active-state candidate
+  poll, so it is currently in an active (non-terminal) state. A parent already
+  in a terminal state — including one deliberately `Cancelled` — is never
+  touched.
+- Its sub-issue set is fully present (the per-parent child fetch is bounded; a
+  parent whose returned child list is at the fetch cap is skipped, since the set
+  may be truncated) and non-empty.
+- *Every* sub-issue is in the `Done` state specifically. A sub-issue in any other
+  terminal state (`Cancelled`, `Closed`, …) leaves the parent open.
+
+When satisfied, the orchestrator moves the parent to `Done` via the tracker. The
+move drops the parent out of the active-state poll, so the roll-up fires at most
+once per parent. Nested umbrellas cascade naturally across ticks: completing a
+parent that is itself a sub-issue makes its own parent eligible on a later tick.
+A failed tracker update is logged and retried on the next tick.
 
 ## 9. Workspace Management and Safety
 

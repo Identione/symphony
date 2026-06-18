@@ -29,6 +29,13 @@ defmodule SymphonyElixir.Orchestrator do
   # Caps bound Linear API usage when crawling transitive blockers.
   @graph_expansion_max_rounds 3
   @graph_max_nodes 200
+  # When every sub-issue of a parent/umbrella issue is Done, the parent is moved
+  # to this state (see complete_parents_with_all_children_done/2). Mirrors the
+  # per-parent `children(first: N)` fetch cap in Linear.Client (@child_page_size):
+  # a parent whose child list is at the cap may be truncated, so we don't
+  # auto-complete it.
+  @parent_done_state "Done"
+  @subissue_child_cap 50
   @empty_codex_totals %{
     input_tokens: 0,
     output_tokens: 0,
@@ -717,6 +724,7 @@ defmodule SymphonyElixir.Orchestrator do
          {:ok, issues} <- Tracker.fetch_candidate_issues() do
       state =
         state
+        |> complete_parents_with_all_children_done(issues)
         |> refresh_dependency_blocked(issues)
         |> refresh_dependency_graph(issues)
 
@@ -840,6 +848,13 @@ defmodule SymphonyElixir.Orchestrator do
 
   def reconcile_issue_states_for_test(issues, state) when is_list(issues) do
     reconcile_running_issue_states(issues, state, active_state_set(), terminal_state_set())
+  end
+
+  @doc false
+  @spec complete_parents_with_all_children_done_for_test([Issue.t()], term()) :: term()
+  def complete_parents_with_all_children_done_for_test(issues, %State{} = state)
+      when is_list(issues) do
+    complete_parents_with_all_children_done(state, issues)
   end
 
   @doc false
@@ -1418,6 +1433,68 @@ defmodule SymphonyElixir.Orchestrator do
         Logger.debug("Issue waiting on blockers: issue_id=#{issue_id} issue_identifier=#{identifier}")
       end
     end)
+  end
+
+  # Roll a parent/umbrella issue up to Done once *every* one of its sub-issues is
+  # Done. Parent issues are trackers, never dispatched (see parent_issue?/1), so
+  # nothing else advances them — Symphony closes them out on behalf of their
+  # completed children. Acts only on parents the active-state poll returned (so
+  # the parent is non-terminal: a deliberately cancelled parent is never
+  # resurrected) whose full child set is present and entirely Done. Moving the
+  # parent to Done drops it out of the active poll, so this fires at most once
+  # per parent. Pure side effect on the tracker; the orchestrator state is
+  # returned unchanged for pipelining.
+  defp complete_parents_with_all_children_done(%State{} = state, issues) when is_list(issues) do
+    active_states = active_state_set()
+
+    Enum.each(issues, fn
+      %Issue{} = issue -> maybe_complete_parent_issue(issue, active_states)
+      _ -> :ok
+    end)
+
+    state
+  end
+
+  defp maybe_complete_parent_issue(
+         %Issue{has_children: true, children: children} = parent,
+         active_states
+       )
+       when is_list(children) and children != [] do
+    cond do
+      not active_issue_state?(to_string(parent.state), active_states) ->
+        # Parent is already terminal (or otherwise inactive) — leave it as-is.
+        :ok
+
+      length(children) >= @subissue_child_cap ->
+        Logger.debug("Skipping parent auto-complete; sub-issue list may be truncated at the fetch cap: #{issue_context(parent)} children=#{length(children)} cap=#{@subissue_child_cap}")
+
+      all_children_done?(children) ->
+        move_parent_to_done(parent)
+
+      true ->
+        :ok
+    end
+  end
+
+  defp maybe_complete_parent_issue(_issue, _active_states), do: :ok
+
+  defp all_children_done?(children) when is_list(children) do
+    Enum.all?(children, fn
+      %Issue{state: state} -> match_normalized_state?(to_string(state), "done")
+      _ -> false
+    end)
+  end
+
+  defp move_parent_to_done(%Issue{} = parent) do
+    case Tracker.update_issue_state(parent.id, @parent_done_state) do
+      :ok ->
+        Logger.info("All sub-issues done; moved parent issue to #{@parent_done_state}: #{issue_context(parent)} from=#{inspect(parent.state)} children=#{length(parent.children)}")
+
+      {:error, reason} ->
+        Logger.warning("Failed to move parent issue to #{@parent_done_state} after all sub-issues done: #{issue_context(parent)} from=#{inspect(parent.state)} reason=#{inspect(reason)}")
+    end
+
+    :ok
   end
 
   defp refresh_dependency_graph(%State{} = state, issues) when is_list(issues) do
