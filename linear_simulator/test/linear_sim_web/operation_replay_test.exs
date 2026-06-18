@@ -40,31 +40,24 @@ defmodule LinearSimWeb.OperationReplayTest do
       end
 
       assert is_map(response["data"])
-      assert_expected_paths(response, get_in(metadata, ["expected", "paths"]) || %{})
+
+      case LinearSim.Compat.Paths.compare(
+             response,
+             get_in(metadata, ["expected", "paths"]) || %{}
+           ) do
+        :ok ->
+          :ok
+
+        {:error, mismatches} ->
+          flunk(
+            "#{metadata["name"]} path mismatches: " <>
+              Enum.map_join(mismatches, "; ", fn {path, expected, actual} ->
+                "expected #{path} == #{inspect(expected)}, got #{inspect(actual)}"
+              end)
+          )
+      end
     end
   end
 
   defp read_json(path), do: path |> File.read!() |> Jason.decode!()
-
-  defp assert_expected_paths(response, paths) do
-    Enum.each(paths, fn {path, expected} ->
-      actual = get_path(response, String.split(path, "."))
-
-      assert actual == expected,
-             "expected #{path} == #{inspect(expected)}, got #{inspect(actual)}"
-    end)
-  end
-
-  defp get_path(value, []), do: value
-
-  defp get_path(value, [segment | rest]) do
-    next =
-      case Integer.parse(segment) do
-        {index, ""} when is_list(value) -> Enum.at(value, index)
-        _ when is_map(value) -> Map.get(value, segment)
-        _ -> nil
-      end
-
-    get_path(next, rest)
-  end
 end

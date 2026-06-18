@@ -82,29 +82,57 @@ unrecognised token yields a Linear-like auth error.
 
 ## Implemented operations
 
-The curated corpus lives under `priv/linear/operations/curated/` — the exact eight
-operations Symphony sends (five queries, three mutations), each with example
-variables, scenario, auth, and expected response paths. They are replayed in CI by
+The curated corpus lives under `priv/linear/operations/curated/` — the 12
+operations Symphony sends (the core five queries + three mutations, plus four
+preflight queries), each with example variables, scenario, auth, and expected
+response paths. They are replayed in CI by
 `test/linear_sim_web/operation_replay_test.exs`.
 
-### Compatibility tooling
+### Compatibility harness
 
-- `mix linear_sim.dump_schema` — writes the simulator's SDL to
-  `priv/linear_sim/schema.graphql` for review/diffing.
-- `mix linear_sim.validate_operations` — validates every curated operation
-  against the simulator schema via Absinthe (parse + schema validation, no
-  execution, no Node dependency). Exits non-zero on any failure.
-- Operation replay (`test/linear_sim_web/operation_replay_test.exs`) executes
-  each curated operation against its scenario and asserts response paths.
-- **Operation capture** (`config :linear_sim, :operation_capture, enabled: true`)
-  writes incoming GraphQL documents to `priv/linear/operations/captured/` —
-  useful for discovering **agent ad-hoc operations** (e.g. the `MoveIssue`
-  mutation a coding agent issues via symphony's `linear_graphql` tool). Promote
-  useful captures into the curated corpus.
+The harness proves — in pure Elixir, no Node — that every operation Symphony
+sends validates against **both** the real Linear schema and the simulator schema,
+and replays correctly against deterministic scenarios. How it works and what you
+can do with it is documented in
+[`docs/compatibility-harness.md`](docs/compatibility-harness.md) (design rationale
+in [`docs/linear-sim.md`](docs/linear-sim.md) § "Compatibility Coverage"). Run the
+whole chain with:
 
-Validating against the *real Linear reference schema* (a `mix linear.fetch_schema`
-that introspects `https://api.linear.app/graphql`) needs a real Linear token and
-is left as future work.
+```bash
+make compat        # dump_schema → validate_operations → replay_operations → compatibility_report
+```
+
+Individual tasks:
+
+- `mix linear.fetch_schema` — introspects `https://api.linear.app/graphql`
+  (needs `LINEAR_API_KEY`) and writes the committed reference snapshot:
+  `priv/linear/schema_reference.json` (authoritative), `schema_reference.graphql`
+  (best-effort SDL, for diffs), and `schema_metadata.json`. Run **deliberately**,
+  like a dependency bump — it is *not* part of `make compat`.
+- `mix linear_sim.dump_schema` — writes the simulator's `schema.graphql` + the
+  symmetric `schema.json` under `priv/linear_sim/`.
+- `mix linear_sim.validate_operations` — validates each curated operation against
+  **both** schemas and classifies it into the four-quadrant matrix (docs §6).
+  Simulator-invalid ops are a required (non-zero) failure; reference drift is
+  advisory. If the reference snapshot is absent the reference column is skipped
+  with a warning and only the simulator gate applies.
+- `mix linear_sim.replay_operations` — replays the corpus against scenarios via
+  `Absinthe.run/3` (the `make compat`/CI entrypoint; the HTTP replay path stays
+  covered by `test/linear_sim_web/operation_replay_test.exs`).
+- `mix linear_sim.compatibility_report` — aggregates the above plus schema drift
+  into `tmp/linear_sim/compatibility_report.{txt,json}` (docs §8).
+
+The shared validation engine lives under `lib/linear_sim/compat/`
+(`ReferenceSchema` indexes either schema's introspection JSON; `OperationValidator`
+walks an operation's selection sets against it). Each curated `metadata.json`
+carries a `compatibility` block (`level`/`requiresBehavior`/`knownDifferences`,
+docs §11) that the report surfaces as behavioural gaps.
+
+**Operation capture** (`config :linear_sim, :operation_capture, enabled: true`)
+writes incoming GraphQL documents to `priv/linear/operations/captured/` — useful
+for discovering **agent ad-hoc operations** (e.g. a `MoveIssue` mutation a coding
+agent issues via symphony's `linear_graphql` tool). Promote useful captures into
+the curated corpus.
 
 ## Pointing Symphony at the simulator
 

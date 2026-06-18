@@ -9,7 +9,7 @@ defmodule LinearSimWeb.GraphQL.Plugs.Context do
 
   import Plug.Conn
 
-  alias LinearSim.Linear
+  alias LinearSim.Compat.Context
 
   @impl true
   def init(opts), do: opts
@@ -19,39 +19,9 @@ defmodule LinearSimWeb.GraphQL.Plugs.Context do
     context =
       conn
       |> get_req_header("authorization")
-      |> parse_authorization()
-      |> build_context()
+      |> List.first()
+      |> Context.from_auth()
 
     Absinthe.Plug.put_options(conn, context: context)
-  end
-
-  defp parse_authorization(["Bearer " <> token | _]), do: String.trim(token)
-  defp parse_authorization([token | _]) when is_binary(token), do: String.trim(token)
-  defp parse_authorization(_), do: nil
-
-  defp build_context(nil) do
-    %{
-      current_user: Linear.default_user(),
-      current_organization: Linear.default_organization()
-    }
-  end
-
-  defp build_context(token) do
-    case Linear.resolve_token(token) do
-      {:ok, user, organization} ->
-        %{
-          current_user: user,
-          current_organization: organization,
-          simulator_token: token
-        }
-
-      :error ->
-        %{
-          current_user: nil,
-          current_organization: nil,
-          simulator_token: token,
-          auth_error: :invalid_token
-        }
-    end
   end
 end

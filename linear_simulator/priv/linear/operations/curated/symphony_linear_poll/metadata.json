@@ -4,6 +4,11 @@
   "operationName": "SymphonyLinearPoll",
   "auth": "Bearer user_hakan",
   "source": "symphony lib/symphony_elixir/linear/client.ex",
+  "compatibility": {
+    "level": "behavior",
+    "requiresBehavior": ["pagination:first", "filter:project", "filter:state", "sort:createdAt"],
+    "knownDifferences": ["hasNextPage is computed from scenario data, not live pagination"]
+  },
   "expected": {
     "allowErrors": false,
     "paths": {

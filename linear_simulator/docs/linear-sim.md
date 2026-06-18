@@ -1711,6 +1711,8 @@ Verify:
 
 ## Compatibility Coverage
 
+> Implemented: see [`compatibility-harness.md`](compatibility-harness.md) for how the harness below works and how to run it (`make compat`).
+
 The simulator is operation-compatible first, not full-schema-complete.
 
 A full Linear clone would require matching Linear’s entire schema, authorization behavior, validation rules, pagination semantics, mutation side effects, rate limits, webhook timing, and error formatting. That is not the goal for v1.

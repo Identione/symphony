@@ -1,0 +1,119 @@
+{
+  "__schema": {
+    "queryType": { "name": "Query" },
+    "mutationType": { "name": "Mutation" },
+    "types": [
+      {
+        "kind": "OBJECT",
+        "name": "Query",
+        "fields": [
+          {
+            "name": "viewer",
+            "args": [],
+            "type": { "kind": "OBJECT", "name": "User", "ofType": null }
+          },
+          {
+            "name": "node",
+            "args": [
+              {
+                "name": "id",
+                "type": {
+                  "kind": "NON_NULL",
+                  "name": null,
+                  "ofType": { "kind": "SCALAR", "name": "ID", "ofType": null }
+                }
+              }
+            ],
+            "type": { "kind": "OBJECT", "name": "User", "ofType": null }
+          }
+        ],
+        "inputFields": null,
+        "enumValues": null
+      },
+      {
+        "kind": "OBJECT",
+        "name": "Mutation",
+        "fields": [
+          {
+            "name": "issueCreate",
+            "args": [
+              {
+                "name": "input",
+                "type": {
+                  "kind": "NON_NULL",
+                  "name": null,
+                  "ofType": { "kind": "INPUT_OBJECT", "name": "IssueCreateInput", "ofType": null }
+                }
+              }
+            ],
+            "type": { "kind": "OBJECT", "name": "IssuePayload", "ofType": null }
+          }
+        ],
+        "inputFields": null,
+        "enumValues": null
+      },
+      {
+        "kind": "OBJECT",
+        "name": "User",
+        "fields": [
+          { "name": "id", "args": [], "type": { "kind": "SCALAR", "name": "String", "ofType": null } },
+          { "name": "name", "args": [], "type": { "kind": "SCALAR", "name": "String", "ofType": null } }
+        ],
+        "inputFields": null,
+        "enumValues": null
+      },
+      {
+        "kind": "OBJECT",
+        "name": "IssuePayload",
+        "fields": [
+          { "name": "success", "args": [], "type": { "kind": "SCALAR", "name": "Boolean", "ofType": null } },
+          { "name": "issue", "args": [], "type": { "kind": "OBJECT", "name": "Issue", "ofType": null } }
+        ],
+        "inputFields": null,
+        "enumValues": null
+      },
+      {
+        "kind": "OBJECT",
+        "name": "Issue",
+        "fields": [
+          { "name": "id", "args": [], "type": { "kind": "SCALAR", "name": "String", "ofType": null } },
+          { "name": "identifier", "args": [], "type": { "kind": "SCALAR", "name": "String", "ofType": null } },
+          { "name": "priority", "args": [], "type": { "kind": "ENUM", "name": "IssuePriority", "ofType": null } }
+        ],
+        "inputFields": null,
+        "enumValues": null
+      },
+      {
+        "kind": "INPUT_OBJECT",
+        "name": "IssueCreateInput",
+        "fields": null,
+        "inputFields": [
+          {
+            "name": "title",
+            "type": {
+              "kind": "NON_NULL",
+              "name": null,
+              "ofType": { "kind": "SCALAR", "name": "String", "ofType": null }
+            }
+          },
+          { "name": "priority", "type": { "kind": "ENUM", "name": "IssuePriority", "ofType": null } }
+        ],
+        "enumValues": null
+      },
+      {
+        "kind": "ENUM",
+        "name": "IssuePriority",
+        "fields": null,
+        "inputFields": null,
+        "enumValues": [
+          { "name": "NONE" },
+          { "name": "LOW" },
+          { "name": "HIGH" }
+        ]
+      },
+      { "kind": "SCALAR", "name": "String", "fields": null, "inputFields": null, "enumValues": null },
+      { "kind": "SCALAR", "name": "Boolean", "fields": null, "inputFields": null, "enumValues": null },
+      { "kind": "SCALAR", "name": "ID", "fields": null, "inputFields": null, "enumValues": null }
+    ]
+  }
+}

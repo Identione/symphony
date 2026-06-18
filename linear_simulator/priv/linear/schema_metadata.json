@@ -1,0 +1,6 @@
+{
+  "endpoint": "https://api.linear.app/graphql",
+  "fetchedAt": "2026-06-18T03:39:45.534572Z",
+  "notes": "Reference schema used for simulator compatibility checks",
+  "source": "linear"
+}

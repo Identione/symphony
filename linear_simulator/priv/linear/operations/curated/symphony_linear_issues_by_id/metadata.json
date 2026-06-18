@@ -4,6 +4,11 @@
   "operationName": "SymphonyLinearIssuesById",
   "auth": "Bearer user_hakan",
   "source": "symphony lib/symphony_elixir/linear/client.ex",
+  "compatibility": {
+    "level": "behavior",
+    "requiresBehavior": ["filter:id", "pagination:first"],
+    "knownDifferences": []
+  },
   "expected": {
     "allowErrors": false,
     "paths": {

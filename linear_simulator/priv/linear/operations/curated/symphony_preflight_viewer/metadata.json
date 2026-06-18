@@ -4,6 +4,11 @@
   "operationName": "SymphonyPreflightViewer",
   "auth": "Bearer user_hakan",
   "source": "symphony lib/symphony_elixir/cli/preflight.ex",
+  "compatibility": {
+    "level": "shape",
+    "requiresBehavior": [],
+    "knownDifferences": []
+  },
   "expected": {
     "allowErrors": false,
     "paths": {
