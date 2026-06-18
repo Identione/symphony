@@ -32,13 +32,12 @@ defmodule SymphonyElixir.DeterministicFailure do
 
   require Logger
 
-  alias SymphonyElixir.{Config, Tracker}
+  alias SymphonyElixir.{Config, Tracker, Workpad}
   alias SymphonyElixir.Linear.Issue
 
   @typedoc "Threshold severity emitted to Linear."
   @type severity :: :alert | :escalate
 
-  @workpad_marker "## Symphony Workpad"
   @escalation_section_marker "<!-- symphony:deterministic-failure -->"
 
   @typedoc """
@@ -240,7 +239,7 @@ defmodule SymphonyElixir.DeterministicFailure do
     escalation_state = settings.agent.deterministic_failure_escalation_state
     section = compose_message(code, count, severity, escalation_state)
 
-    case find_workpad_comment(issue_id) do
+    case Workpad.find(issue_id) do
       {:ok, %{id: comment_id, body: body}} ->
         new_body = append_failure_section(body, section)
         log_comment_intent(issue, code, count, severity, :update)
@@ -292,27 +291,6 @@ defmodule SymphonyElixir.DeterministicFailure do
     end
   end
 
-  defp find_workpad_comment(issue_id) do
-    case Tracker.fetch_comments(issue_id) do
-      {:ok, comments} ->
-        comments
-        |> Enum.find(&workpad_candidate?/1)
-        |> case do
-          nil -> :not_found
-          comment -> {:ok, comment}
-        end
-
-      {:error, _reason} = err ->
-        err
-    end
-  end
-
-  defp workpad_candidate?(%{body: body} = comment) when is_binary(body) do
-    is_nil(Map.get(comment, :resolved_at)) and String.contains?(body, @workpad_marker)
-  end
-
-  defp workpad_candidate?(_comment), do: false
-
   defp append_failure_section(body, section) when is_binary(body) do
     body_without_prior =
       case String.split(body, @escalation_section_marker, parts: 2) do
@@ -333,7 +311,7 @@ defmodule SymphonyElixir.DeterministicFailure do
     """
     ## #{header}
 
-    No `#{@workpad_marker}` comment was found on this issue, so this standalone
+    No `#{Workpad.marker()}` comment was found on this issue, so this standalone
     blocker comment is being posted instead (per the workflow's blocked-access
     escape hatch).
 

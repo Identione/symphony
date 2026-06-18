@@ -25,7 +25,7 @@ defmodule SymphonyElixir.Overseer.Client do
   @verdict_tool_schema %{
     "type" => "object",
     "additionalProperties" => false,
-    "required" => ["verdict", "confidence", "recommended_action", "steering_message", "rationale"],
+    "required" => ["verdict", "confidence", "recommended_action", "steering_message", "findings", "rationale"],
     "properties" => %{
       "verdict" => %{"type" => "string", "enum" => ["converging", "thrashing", "blocked"]},
       "confidence" => %{"type" => "number", "minimum" => 0, "maximum" => 1},
@@ -34,6 +34,18 @@ defmodule SymphonyElixir.Overseer.Client do
         "enum" => ["continue", "nudge", "recommend_extend_budget", "escalate", "abort"]
       },
       "steering_message" => %{"type" => ["string", "null"]},
+      # IDE-230: structured background findings, populated when giving up
+      # (escalate/abort) so the human-review hand-off records what was tried, the
+      # blocker, and what a human needs. Null on approve/continue.
+      "findings" => %{
+        "type" => ["object", "null"],
+        "additionalProperties" => false,
+        "properties" => %{
+          "summary" => %{"type" => ["string", "null"]},
+          "blockers" => %{"type" => "array", "items" => %{"type" => "string"}},
+          "next_steps_for_human" => %{"type" => "array", "items" => %{"type" => "string"}}
+        }
+      },
       "rationale" => %{"type" => "string"}
     }
   }

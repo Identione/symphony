@@ -466,19 +466,22 @@ defmodule SymphonyElixir.Config.Schema do
     use Ecto.Schema
     import Ecto.Changeset
 
-    # Layer 2 of the IDE-189 robustness defense (IDE-212): a gated, read-only AI
-    # overseer (Sonnet) that semantically classifies a near-budget agent run as
-    # converging / thrashing / blocked and recommends nudge / extend-budget /
-    # escalate. Disabled by default; never changes the turn budget; fails open.
+    # Layer 2 of the IDE-189 robustness defense (IDE-212, extended by IDE-230):
+    # a gated AI overseer (Sonnet) that semantically classifies an extending agent
+    # run as converging / thrashing / blocked and either approves continued
+    # extension (up to `absolute_max_turns`) or gives up (escalates to Human Review
+    # with findings). On by default; dormant without a resolved key; fails open.
     @engines ~w(api sidecar)
 
     @type t :: %__MODULE__{}
 
     @primary_key false
     embedded_schema do
-      # Master switch (opt-in). When false the overseer never runs and the turn
-      # loop is byte-for-byte unchanged.
-      field(:enabled, :boolean, default: false)
+      # Master switch (IDE-230: on by default). When false the overseer never
+      # runs and the turn loop caps at `agent.max_turns` exactly as before. When
+      # true but no API key resolves, the overseer is dormant: the run still caps
+      # at `agent.max_turns` (no auto-extend) and posts a "could not judge" comment.
+      field(:enabled, :boolean, default: true)
       # Engine selection (SPEC §10 a-vs-b). Only "api" (direct Anthropic
       # one-shot, read-only) is implemented; "sidecar" is accepted for
       # forward-compat and currently fails open (treated as disabled).
@@ -491,13 +494,32 @@ defmodule SymphonyElixir.Config.Schema do
       # unset (mirrors `tracker.api_key`/`$LINEAR_API_KEY`). Absent key ⇒ the
       # overseer is treated as disabled.
       field(:api_key, :string, default: "$ANTHROPIC_API_KEY")
-      # Budget-threshold trigger: fire when `turn >= max_turns - budget_threshold_k`.
+      # Legacy (IDE-212): the old budget-threshold trigger fired when
+      # `turn >= max_turns - budget_threshold_k`. IDE-230 replaced it with the
+      # streak/cadence trigger below; this field is retained for forward-compat
+      # config but no longer drives the trigger.
       field(:budget_threshold_k, :integer, default: 4)
-      # De-dup/cooldown so the budget trigger does not re-fire every turn from K
-      # down to 0: at most one call per `min_turns_between` turns, hard-capped at
-      # `max_calls_per_session` calls per agent run.
+      # IDE-230 trigger: consult the overseer when the consecutive deterministic
+      # fail-streak reaches `streak_to_llm`, OR every `mandatory_llm_every` turns
+      # regardless (a periodic semantic review that catches busy-but-doomed runs
+      # the deterministic check can't see). Set `mandatory_llm_every: 0` to disable
+      # the periodic arm.
+      field(:streak_to_llm, :integer, default: 5)
+      field(:mandatory_llm_every, :integer, default: 40)
+      # Hard per-session ceiling: the run extends turn-by-turn up to this many
+      # turns (IDE-230), gated by the overseer. `agent.max_turns` survives only as
+      # the keyless-fallback ceiling (no extension when the overseer is dormant).
+      field(:absolute_max_turns, :integer, default: 500)
+      # Bounded timeout for the single graceful wind-down turn the agent gets to
+      # commit + update its workpad before a move to Human Review (IDE-230).
+      field(:winddown_timeout_ms, :integer, default: 120_000)
+      # De-dup/cooldown so the streak trigger does not re-fire every turn: at most
+      # one call per `min_turns_between` turns, hard-capped at
+      # `max_calls_per_session` calls per agent run. The cap is a safety ceiling
+      # over the (now much longer) extension horizon — hitting it stops extension
+      # rather than silently running on to `absolute_max_turns` with no judge.
       field(:min_turns_between, :integer, default: 3)
-      field(:max_calls_per_session, :integer, default: 2)
+      field(:max_calls_per_session, :integer, default: 25)
       # Bounded transcript ring-buffer size (normalized envelopes) fed as evidence.
       field(:transcript_window, :integer, default: 40)
       # Workspace-relative globs whose tails are read as build/test evidence.
@@ -528,6 +550,10 @@ defmodule SymphonyElixir.Config.Schema do
           :effort,
           :api_key,
           :budget_threshold_k,
+          :streak_to_llm,
+          :mandatory_llm_every,
+          :absolute_max_turns,
+          :winddown_timeout_ms,
           :min_turns_between,
           :max_calls_per_session,
           :transcript_window,
@@ -541,6 +567,10 @@ defmodule SymphonyElixir.Config.Schema do
       )
       |> validate_inclusion(:engine, @engines)
       |> validate_number(:budget_threshold_k, greater_than_or_equal_to: 0)
+      |> validate_number(:streak_to_llm, greater_than_or_equal_to: 1)
+      |> validate_number(:mandatory_llm_every, greater_than_or_equal_to: 0)
+      |> validate_number(:absolute_max_turns, greater_than_or_equal_to: 1)
+      |> validate_number(:winddown_timeout_ms, greater_than: 0)
       |> validate_number(:min_turns_between, greater_than_or_equal_to: 0)
       |> validate_number(:max_calls_per_session, greater_than_or_equal_to: 0)
       |> validate_number(:transcript_window, greater_than_or_equal_to: 0)

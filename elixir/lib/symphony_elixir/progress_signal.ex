@@ -26,7 +26,11 @@ defmodule SymphonyElixir.ProgressSignal do
   From the rolling streaks of those we derive a `t:status/0` and an independent
   `at_risk_no_commits` boolean:
 
-      :oscillating     last 4 hashes are A,B,A,B with A != B
+      :oscillating     the working tree revisited an earlier state — the current
+                       content hash reappears within the recent-hash window (more
+                       than one turn back). Generalizes the old A,B,A,B period-2
+                       check to any repeating cycle (A,B,C,A,B,C, …) and non-strict
+                       "wandered back to a prior tree" churn (IDE-230).
       :repeated_error  error_sig != nil AND its streak >= K
       :stuck_state     identical hash for >= K turns AND the tree is empty
       :progressing     otherwise
@@ -100,8 +104,10 @@ defmodule SymphonyElixir.ProgressSignal do
           turn_count: non_neg_integer()
         }
 
-  # Oscillation needs the last four hashes to spot an A,B,A,B flip-flop.
-  @history_limit 4
+  # Revisit detection (IDE-230) keeps a wider window than the old period-2 check
+  # so longer cycles (A,B,C,A,B,C, …) are caught — the window must span at least
+  # one full cycle for the repeat to be visible.
+  @history_limit 10
 
   @doc """
   The zero-state for a freshly dispatched issue (no turns observed yet).
@@ -214,9 +220,21 @@ defmodule SymphonyElixir.ProgressSignal do
     end
   end
 
-  # A,B,A,B with A != B over the last four boundaries (most-recent first).
+  # Revisit detection (IDE-230): the current tree state (head of the
+  # most-recent-first history) reappears somewhere earlier in the window,
+  # excluding the immediately-previous turn (an identical consecutive hash is
+  # `:stuck_state`, not a cycle). This generalizes the old A,B,A,B period-2 match
+  # to any repeating cycle (A,B,C,A,B,C, …) and "wandered back to a prior tree"
+  # churn. A one-off revert trips it for a single turn only; the worker-side
+  # consecutive-fail streak (IDE-230) filters that, so it never escalates alone.
   @spec oscillating_history?([String.t()]) :: boolean()
-  defp oscillating_history?([a, b, a, b]) when a != b and is_binary(a) and is_binary(b), do: true
+  defp oscillating_history?([current, prev | older]) when is_binary(current) do
+    # The tree must have *changed* from last turn (`current != prev` — an
+    # unchanged tree is `:stuck_state`, not a cycle) AND the current state must
+    # reappear from further back (a revisit).
+    current != prev and current in older
+  end
+
   defp oscillating_history?(_history), do: false
 
   # Streak counts consecutive identical hashes; history keeps the last

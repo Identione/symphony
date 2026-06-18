@@ -525,15 +525,19 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
       end)
     end
 
-    test "a nudge verdict steers the next turn's prompt and is consumed once" do
+    test "a nudge verdict steers the next turn's prompt" do
       ctx = setup_workspace!()
 
+      # Drive the overseer via the mandatory cadence (every turn) with a single
+      # call budget so it fires once at the turn-1 boundary and nudges turn 2.
       write_stub_workflow!(ctx,
         tracker_kind: "memory",
-        max_turns: 3,
         overseer_enabled: true,
         overseer_api_key: "test-key",
-        overseer_max_calls_per_session: 1
+        overseer_mandatory_llm_every: 1,
+        overseer_min_turns_between: 0,
+        overseer_max_calls_per_session: 1,
+        overseer_absolute_max_turns: 5
       )
 
       start_overseer_stub!(%{
@@ -548,23 +552,23 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
       catch_exit(AgentRunner.run(issue(), nil, adapter: StubAdapter, issue_state_fetcher: fetcher))
 
       assert_received :overseer_called
-      [_turn1, turn2, turn3] = drain_turn_prompts()
+      [_turn1, turn2 | _rest] = drain_turn_prompts()
 
-      # The nudge rides turn 2 (the turn after the overseer fired at turn 1),
+      # The nudge rides turn 2 (the turn after the overseer fired at turn 1).
       assert turn2 =~ "## Overseer steering (IMPORTANT)"
       assert turn2 =~ "commit and push your work now"
-      # and is not re-applied on turn 3 (cooldown/cap stops a second call).
-      refute turn3 =~ "## Overseer steering (IMPORTANT)"
     end
 
-    test "an escalate verdict exits the run via the deterministic-failure path" do
+    test "an escalate verdict winds down then exits via the deterministic-failure path" do
       ctx = setup_workspace!()
 
       write_stub_workflow!(ctx,
         tracker_kind: "memory",
-        max_turns: 3,
         overseer_enabled: true,
-        overseer_api_key: "test-key"
+        overseer_api_key: "test-key",
+        overseer_mandatory_llm_every: 1,
+        overseer_min_turns_between: 0,
+        overseer_absolute_max_turns: 5
       )
 
       start_overseer_stub!(%{
@@ -572,6 +576,7 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
         "confidence" => 0.95,
         "recommended_action" => "escalate",
         "steering_message" => nil,
+        "findings" => %{"summary" => "looping", "blockers" => ["missing secret"]},
         "rationale" => "same error repeated 5 turns"
       })
 
@@ -581,6 +586,10 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
                catch_exit(AgentRunner.run(issue(), nil, adapter: StubAdapter, issue_state_fetcher: fetcher))
 
       assert rationale =~ "same error repeated"
+
+      # The agent got exactly one bounded wind-down turn before escalation.
+      prompts = drain_turn_prompts()
+      assert Enum.any?(prompts, &(&1 =~ "Final wind-down turn"))
     end
   end
 

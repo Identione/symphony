@@ -226,6 +226,31 @@ retry cadence between cap-hits matches the existing `:normal`-exit
 continuation delay (1 second constant, set via the `:max_turns_reached`
 entry in `Orchestrator.RetryPolicy`).
 
+### IDE-230: overseer-gated extension changes the dominant give-up path
+
+When the Layer-2 overseer is enabled+keyed (on by default; see
+`elixir/docs/` SPEC §13.6), `agent.max_turns` is **no longer the active
+cutoff** — the session extends turn-by-turn up to
+`agent.overseer.absolute_max_turns` (default 500) under overseer approval, and
+`agent.max_turns` survives only as the keyless-fallback ceiling. The dominant
+give-up path shifts from "N sessions × `max_turns`" (the streak above) to "one
+long session + overseer judgement":
+
+- When the overseer judges no further progress is expected (and rules out a
+  transient cause) it emits `escalate`/`abort`. `AgentRunner` runs one bounded
+  **wind-down turn** (the agent commits anything worth keeping and updates its
+  `## Symphony Workpad` comment), posts the rationale + structured findings, and
+  exits `{:agent_run_failed, :overseer_escalation, …}`.
+- `:overseer_escalation` is both **immediate-escalation** (IDE-73, first
+  occurrence) and **`:no_retry`** (`Orchestrator.RetryPolicy`) — the issue moves
+  straight to `agent.deterministic_failure_escalation_state` ("Human Review")
+  with no 5×-style retry.
+- When the overseer is dormant (no resolved key) or returns no judgement at the
+  base budget, the run caps at `agent.max_turns` exactly as before and posts a
+  one-shot "could not judge" comment so the missing auto-extend is never silent.
+- The cumulative `agent.max_sessions_per_issue` cap still backstops poll-only /
+  blocked-parent re-dispatch loops where the issue never leaves the active set.
+
 ## Logging Conformance
 
 Per `elixir/docs/logging.md`, error/lifecycle logs should carry `issue_id`,

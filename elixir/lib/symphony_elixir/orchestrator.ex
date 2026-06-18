@@ -340,7 +340,11 @@ defmodule SymphonyElixir.Orchestrator do
     # `:DOWN` arrives and the workspace persists for the 1s-cadence retry, so
     # snapshot the converging work to a durable WIP ref before the fresh session
     # (or a later operator) resumes on the same — still dirty — tree.
-    if extract_error_code(reason) == :max_turns_reached do
+    #
+    # IDE-230: an `:overseer_escalation` is about to move the issue to Human
+    # Review and clean up the workspace — snapshot here too so a wind-down turn
+    # that failed to commit still leaves a durable WIP ref behind.
+    if extract_error_code(reason) in [:max_turns_reached, :overseer_escalation] do
       identifier = running_entry_identifier(running_entry, issue_id)
       maybe_preserve_uncommitted_work(running_entry, issue_id, identifier, :max_turns)
     end

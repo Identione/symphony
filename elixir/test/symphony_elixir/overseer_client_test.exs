@@ -117,6 +117,13 @@ defmodule SymphonyElixir.Overseer.ClientTest do
     assert schema["additionalProperties"] == false
 
     assert Enum.sort(schema["required"]) ==
-             Enum.sort(["verdict", "confidence", "recommended_action", "steering_message", "rationale"])
+             Enum.sort([
+               "verdict",
+               "confidence",
+               "recommended_action",
+               "steering_message",
+               "findings",
+               "rationale"
+             ])
   end
 end

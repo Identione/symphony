@@ -4,7 +4,8 @@ defmodule SymphonyElixir.AgentRunner do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, Git, Linear.Issue, Overseer, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Config, Git, Linear.Issue, Overseer, PromptBuilder, Tracker, Workpad, Workspace}
+  alias SymphonyElixir.Config.Schema.Overseer, as: OverseerConfig
   alias SymphonyElixir.Overseer.Session, as: OverseerSession
 
   # Normalized envelope events worth keeping in the overseer transcript window
@@ -390,33 +391,15 @@ defmodule SymphonyElixir.AgentRunner do
   end
 
   defp handle_turn_continuation(context, app_session, issue, turn_number) do
-    %{issue_state_fetcher: fetcher, max_turns: max_turns} = context
+    %{issue_state_fetcher: fetcher} = context
 
     case continue_with_issue?(issue, fetcher) do
-      {:continue, refreshed_issue} when turn_number < max_turns ->
-        Logger.info(
-          "Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion " <>
-            "turn=#{turn_number}/#{max_turns}"
-        )
-
-        # Layer 2 overseer (IDE-212): a gated, read-only semantic check at the
-        # turn boundary. It may steer the next turn (nudge), surface a
-        # budget-extension recommendation, or escalate — never change the budget.
-        case maybe_run_overseer(context, refreshed_issue, turn_number) do
-          {:continue, steering} ->
-            do_run_codex_turns(context, app_session, refreshed_issue, turn_number + 1, steering)
-
-          {:error, _reason} = err ->
-            err
-        end
-
       {:continue, refreshed_issue} ->
-        Logger.info(
-          "Reached agent.max_turns for #{issue_context(refreshed_issue)} with issue still active; " <>
-            "returning control to orchestrator"
-        )
-
-        :max_turns_reached
+        if is_pid(context.overseer_session) do
+          extend_with_overseer(context, app_session, refreshed_issue, turn_number)
+        else
+          legacy_budget_continuation(context, app_session, refreshed_issue, turn_number)
+        end
 
       {:done, _refreshed_issue} ->
         :ok
@@ -426,108 +409,221 @@ defmodule SymphonyElixir.AgentRunner do
     end
   end
 
-  # ── Layer 2 overseer (IDE-212) ──────────────────────────────────────────────
-  #
-  # Gated, read-only semantic check at a turn boundary. Returns:
-  #   * `{:continue, nil}`  — proceed untouched (default / dormant / fail-open);
-  #   * `{:continue, msg}`  — nudge: `msg` rides the next turn's prompt;
-  #   * `{:error, {:overseer_escalation, rationale}}` — escalate/abort, surfaced
-  #     to the orchestrator via the existing deterministic-failure exit path.
-  #
-  # Every failure path is fail-open: a missing session, a disabled overseer, a
-  # transport/parse error, or a non-firing trigger all collapse to
-  # `{:continue, nil}` so the turn loop is never disturbed.
-  @spec maybe_run_overseer(map(), Issue.t(), non_neg_integer()) ::
-          {:continue, String.t() | nil} | {:error, {:overseer_escalation, String.t()}}
-  defp maybe_run_overseer(%{overseer_session: session} = context, issue, turn_number)
-       when is_pid(session) do
-    if Config.overseer_enabled?() do
-      run_overseer_if_triggered(context, issue, turn_number)
+  # Keyless / disabled overseer: byte-for-byte the pre-IDE-230 behavior — cap at
+  # `agent.max_turns`. When the overseer is *enabled* but dormant (no resolved
+  # key), the cap is annotated with a one-shot "could not judge" Linear comment so
+  # the missing auto-extend is never silent.
+  defp legacy_budget_continuation(context, app_session, issue, turn_number) do
+    %{max_turns: max_turns} = context
+
+    if turn_number < max_turns do
+      Logger.info(
+        "Continuing agent run for #{issue_context(issue)} after normal turn completion " <>
+          "turn=#{turn_number}/#{max_turns}"
+      )
+
+      do_run_codex_turns(context, app_session, issue, turn_number + 1, nil)
     else
-      {:continue, nil}
+      Logger.info(
+        "Reached agent.max_turns for #{issue_context(issue)} with issue still active; " <>
+          "returning control to orchestrator"
+      )
+
+      maybe_post_dormant_overseer_comment(issue)
+      :max_turns_reached
     end
   end
 
-  defp maybe_run_overseer(_context, _issue, _turn_number), do: {:continue, nil}
+  # ── Layer 2 overseer-gated extension (IDE-212 / IDE-230) ─────────────────────
+  #
+  # The session extends turn-by-turn up to `overseer.absolute_max_turns`. Each
+  # boundary: run the free worker-side deterministic ProgressSignal check (which
+  # updates the consecutive fail-streak), then either keep extending or consult
+  # the overseer when the streak reached `streak_to_llm` or the turn hits the
+  # `mandatory_llm_every` cadence. The overseer approves continued extension or
+  # gives up (wind-down + escalate). The absolute ceiling and an exhausted call
+  # budget both wind down and stop. Every path is fail-open.
+  @typep overseer_outcome ::
+           {:approve, String.t() | nil} | {:give_up, String.t()} | {:no_judgement, term()}
 
-  @spec run_overseer_if_triggered(map(), Issue.t(), non_neg_integer()) ::
-          {:continue, String.t() | nil} | {:error, {:overseer_escalation, String.t()}}
-  defp run_overseer_if_triggered(%{overseer_session: session, max_turns: max_turns} = context, issue, turn_number) do
+  defp extend_with_overseer(context, app_session, issue, turn_number) do
+    %{overseer_session: session} = context
     config = Config.overseer()
-    %{calls: calls, last_call_turn: last} = OverseerSession.stats(session)
+    settings = Config.settings!()
 
-    trigger_ctx = %{turn: turn_number, max_turns: max_turns, calls: calls, last_call_turn: last}
+    observe_progress(context, turn_number, settings)
 
-    if Overseer.should_run?(trigger_ctx, config) do
-      # Count the call before running so a crash mid-call still consumes the
-      # per-session budget (no infinite re-fire on a flaky engine).
-      OverseerSession.register_call(session, turn_number)
-      run_overseer_call(context, issue, turn_number, config)
-    else
-      {:continue, nil}
+    %{fail_streak: streak, calls: calls, last_call_turn: last} =
+      OverseerSession.progress_snapshot(session)
+
+    cond do
+      turn_number >= config.absolute_max_turns ->
+        Logger.info(
+          "Reached overseer.absolute_max_turns=#{config.absolute_max_turns} for " <>
+            "#{issue_context(issue)} with issue still active; winding down"
+        )
+
+        run_winddown_turn(context, app_session, issue, "the absolute turn ceiling (#{config.absolute_max_turns}) was reached")
+
+        :max_turns_reached
+
+      Overseer.should_run?(%{turn: turn_number, calls: calls, last_call_turn: last, fail_streak: streak}, config) ->
+        # Count the call before running so a crash mid-call still consumes the
+        # per-session budget (no infinite re-fire on a flaky engine).
+        OverseerSession.register_call(session, turn_number)
+        consult_overseer(context, app_session, issue, turn_number, config)
+
+      Overseer.triggered?(turn_number, streak, config) and calls >= config.max_calls_per_session ->
+        # A judgement is wanted but the call budget is spent — stop extending
+        # rather than run on to the absolute ceiling with no judge.
+        Logger.warning(
+          "Overseer call budget (#{config.max_calls_per_session}) exhausted for " <>
+            "#{issue_context(issue)} turn=#{turn_number}; capping run"
+        )
+
+        maybe_post_cap_comment(context, issue, "the overseer call budget (#{config.max_calls_per_session}) was exhausted")
+        :max_turns_reached
+
+      true ->
+        do_run_codex_turns(context, app_session, issue, turn_number + 1, nil)
     end
   end
 
-  @spec run_overseer_call(map(), Issue.t(), non_neg_integer(), map()) ::
-          {:continue, String.t() | nil} | {:error, {:overseer_escalation, String.t()}}
-  defp run_overseer_call(%{max_turns: max_turns} = context, issue, turn_number, config) do
-    evidence = assemble_evidence(context, issue, turn_number, max_turns, config)
+  @spec consult_overseer(map(), term(), Issue.t(), non_neg_integer(), OverseerConfig.t()) ::
+          :ok | :max_turns_reached | {:error, {:overseer_escalation, String.t()}} | term()
+  defp consult_overseer(context, app_session, issue, turn_number, config) do
+    case run_overseer_call(context, issue, turn_number, config) do
+      {:approve, steering} ->
+        OverseerSession.reset_fail_streak(context.overseer_session)
+        do_run_codex_turns(context, app_session, issue, turn_number + 1, steering)
+
+      {:give_up, rationale} ->
+        run_winddown_turn(context, app_session, issue, rationale)
+        {:error, {:overseer_escalation, rationale}}
+
+      {:no_judgement, _reason} ->
+        # No verdict available → never auto-extend past the base budget on a
+        # blind guess. Under the base budget, continuing matches today's behavior.
+        if turn_number >= context.max_turns do
+          maybe_post_cap_comment(context, issue, "the overseer engine returned no judgement")
+          :max_turns_reached
+        else
+          do_run_codex_turns(context, app_session, issue, turn_number + 1, nil)
+        end
+    end
+  end
+
+  # Worker-side Layer-1 ProgressSignal (IDE-230). Reuses the orchestrator's
+  # `Git.working_tree_signals/4` probe + `ProgressSignal` core, but holds the
+  # rolling state on the run-scoped `OverseerSession`. `error_sig` is `nil`
+  # worker-side (terminal errors abort before this boundary), so `:repeated_error`
+  # never fires here — `:stuck_state` / `:oscillating` / `at_risk_no_commits`
+  # carry the signal. A probe error is fail-open: the streak is left unchanged.
+  @spec observe_progress(map(), non_neg_integer(), Config.Schema.t()) :: :ok
+  defp observe_progress(%{overseer_session: session, workspace: workspace, worker_host: worker_host}, turn_number, settings) do
+    marker = OverseerSession.dispatch_head(session)
+    timeout = settings.agent.progress_signal_git_timeout_ms
+
+    case Git.working_tree_signals(workspace, marker, worker_host, timeout) do
+      {:ok, signals} ->
+        OverseerSession.put_dispatch_head(session, signals.head)
+
+        observation = %{
+          hash: signals.hash,
+          empty: signals.empty,
+          commits_since: signals.commits_since,
+          error_sig: nil,
+          turn_count: turn_number
+        }
+
+        OverseerSession.advance_progress(session, observation, settings)
+        :ok
+
+      {:error, _reason} ->
+        :ok
+    end
+  end
+
+  @spec run_overseer_call(map(), Issue.t(), non_neg_integer(), OverseerConfig.t()) :: overseer_outcome()
+  defp run_overseer_call(context, issue, turn_number, config) do
+    evidence = assemble_evidence(context, issue, turn_number, config)
 
     case Overseer.run(evidence, config) do
       {:ok, verdict} ->
         Logger.info(
-          "Overseer verdict for #{issue_context(issue)} turn=#{turn_number}/#{max_turns} " <>
+          "Overseer verdict for #{issue_context(issue)} turn=#{turn_number}/#{config.absolute_max_turns} " <>
             "verdict=#{verdict.verdict} action=#{verdict.recommended_action} confidence=#{verdict.confidence}"
         )
 
         apply_overseer_action(Overseer.decide_action(verdict, config), issue, verdict)
 
       {:error, reason} ->
-        Logger.warning(
-          "Overseer call failed for #{issue_context(issue)} turn=#{turn_number}/#{max_turns} " <>
-            "(fail-open, continuing): #{inspect(reason)}"
-        )
+        Logger.warning("Overseer call failed for #{issue_context(issue)} turn=#{turn_number} (no judgement): #{inspect(reason)}")
 
-        {:continue, nil}
+        {:no_judgement, reason}
     end
   end
 
-  @spec apply_overseer_action(Overseer.action(), Issue.t(), Overseer.verdict()) ::
-          {:continue, String.t() | nil} | {:error, {:overseer_escalation, String.t()}}
-  defp apply_overseer_action({:continue, _why}, _issue, _verdict), do: {:continue, nil}
+  @spec apply_overseer_action(Overseer.action(), Issue.t(), Overseer.verdict()) :: overseer_outcome()
+  defp apply_overseer_action({:continue, _why}, _issue, _verdict), do: {:approve, nil}
 
   defp apply_overseer_action({:nudge, message}, issue, verdict) do
     post_overseer_comment(issue, "nudge", verdict.rationale, message)
-    {:continue, message}
+    {:approve, message}
   end
 
   defp apply_overseer_action({:recommend_extend_budget, rationale}, issue, _verdict) do
-    post_overseer_comment(issue, "budget-extension recommendation", rationale, nil)
-    {:continue, nil}
+    post_overseer_comment(issue, "budget extension approved", rationale, nil)
+    {:approve, nil}
   end
 
-  defp apply_overseer_action({:escalate, rationale}, issue, _verdict) do
-    post_overseer_comment(issue, "escalation", rationale, nil)
-    {:error, {:overseer_escalation, rationale}}
+  defp apply_overseer_action({:escalate, rationale, findings}, issue, _verdict) do
+    post_overseer_giveup_comment(issue, "escalation", rationale, findings)
+    {:give_up, rationale}
   end
 
-  defp apply_overseer_action({:abort, rationale}, issue, _verdict) do
-    post_overseer_comment(issue, "abort", rationale, nil)
-    {:error, {:overseer_escalation, rationale}}
+  defp apply_overseer_action({:abort, rationale, findings}, issue, _verdict) do
+    post_overseer_giveup_comment(issue, "abort", rationale, findings)
+    {:give_up, rationale}
   end
 
-  # Assemble the read-only evidence bundle. Diff/log probes are best-effort:
-  # a failure drops just that section rather than aborting the classification.
-  @spec assemble_evidence(map(), Issue.t(), non_neg_integer(), non_neg_integer(), map()) :: map()
-  defp assemble_evidence(%{overseer_session: session, workspace: workspace, worker_host: worker_host}, issue, turn_number, max_turns, config) do
+  # Assemble the read-only evidence bundle. Workpad/diff/log probes are
+  # best-effort: a failure drops just that section rather than aborting the
+  # classification. The workpad (plan + acceptance criteria) and the worker-side
+  # deterministic assessment are fed so the overseer judges progress vs. the plan.
+  @spec assemble_evidence(map(), Issue.t(), non_neg_integer(), OverseerConfig.t()) :: map()
+  defp assemble_evidence(%{overseer_session: session, workspace: workspace, worker_host: worker_host}, issue, turn_number, config) do
     %{
       issue_title: issue.title,
       issue_description: issue.description,
+      workpad: probe_workpad(issue, config.input_byte_limit),
       turn: turn_number,
-      max_turns: max_turns,
+      max_turns: config.absolute_max_turns,
+      signals: signals_evidence(session),
       git_diff: probe_git_diff(workspace, worker_host, config),
       logs: collect_logs(workspace, config),
       transcript: OverseerSession.transcript(session)
+    }
+  end
+
+  @spec probe_workpad(Issue.t(), non_neg_integer()) :: String.t() | nil
+  defp probe_workpad(%Issue{id: id}, limit) when is_binary(id) do
+    case Workpad.text(id) do
+      text when is_binary(text) -> String.slice(text, 0, limit)
+      _ -> nil
+    end
+  end
+
+  defp probe_workpad(_issue, _limit), do: nil
+
+  @spec signals_evidence(pid()) :: map()
+  defp signals_evidence(session) do
+    %{assessment: assessment, fail_streak: streak} = OverseerSession.progress_snapshot(session)
+
+    %{
+      status: assessment.status,
+      at_risk_no_commits: assessment.at_risk_no_commits,
+      deterministic_fail_streak: streak
     }
   end
 
@@ -599,6 +695,12 @@ defmodule SymphonyElixir.AgentRunner do
         Logger.warning("Overseer comment failed for #{issue_context(issue)}: #{inspect(reason)}")
         :ok
     end
+  rescue
+    # Comment posting is strictly best-effort: a tracker that raises must never
+    # break the turn-loop decision it accompanies.
+    exception ->
+      Logger.warning("Overseer comment raised for #{issue_context(issue)}: #{Exception.message(exception)}")
+      :ok
   end
 
   defp post_overseer_comment(_issue, _label, _rationale, _steering), do: :ok
@@ -612,6 +714,138 @@ defmodule SymphonyElixir.AgentRunner do
       end
 
     "🤖 **Overseer (#{label})**\n\n#{rationale}#{steering_block}"
+  end
+
+  # Give-up comment (IDE-230): the overseer's rationale plus its structured
+  # findings (why no more progress is expected, blockers, next steps for a human).
+  @spec post_overseer_giveup_comment(Issue.t(), String.t(), String.t(), map() | nil) :: :ok
+  defp post_overseer_giveup_comment(issue, label, rationale, findings) do
+    post_overseer_comment(issue, label, rationale <> render_findings(findings), nil)
+  end
+
+  @spec render_findings(map() | nil) :: String.t()
+  defp render_findings(findings) when is_map(findings) do
+    sections =
+      [
+        findings_text("Summary", Map.get(findings, "summary")),
+        findings_bullets("Blockers", Map.get(findings, "blockers")),
+        findings_bullets("Next steps for a human", Map.get(findings, "next_steps_for_human"))
+      ]
+      |> Enum.reject(&is_nil/1)
+
+    case sections do
+      [] -> ""
+      parts -> "\n\n### Findings\n\n" <> Enum.join(parts, "\n\n")
+    end
+  end
+
+  defp render_findings(_findings), do: ""
+
+  @spec findings_text(String.t(), term()) :: String.t() | nil
+  defp findings_text(label, value) when is_binary(value) and value != "", do: "**#{label}:** #{value}"
+  defp findings_text(_label, _value), do: nil
+
+  @spec findings_bullets(String.t(), term()) :: String.t() | nil
+  defp findings_bullets(label, list) when is_list(list) and list != [] do
+    case list |> Enum.filter(&(is_binary(&1) and &1 != "")) |> Enum.map_join("\n", &"- #{&1}") do
+      "" -> nil
+      bullets -> "**#{label}:**\n#{bullets}"
+    end
+  end
+
+  defp findings_bullets(_label, _list), do: nil
+
+  # One-shot "could not judge" cap comment (IDE-230) for the enabled+keyed path
+  # when the run is stopped without a fresh verdict (engine error at the base
+  # budget, or an exhausted call budget). Idempotent via the run-scoped session.
+  @spec maybe_post_cap_comment(map(), Issue.t(), String.t()) :: :ok
+  defp maybe_post_cap_comment(%{overseer_session: session}, issue, reason) when is_pid(session) do
+    if OverseerSession.claim_capped_comment(session) do
+      post_overseer_comment(
+        issue,
+        "capped — overseer could not judge",
+        "The run was capped at the current turn because #{reason}.",
+        nil
+      )
+    end
+
+    :ok
+  end
+
+  # Dormant-overseer cap comment (IDE-230): the overseer is enabled but has no
+  # resolved key (or unsupported engine), so the run capped at `agent.max_turns`
+  # with no auto-extend. Posted once at the cap turn so it is never silent. When
+  # the overseer is fully disabled (`enabled: false`) the operator opted out, so
+  # nothing is posted.
+  @spec maybe_post_dormant_overseer_comment(Issue.t()) :: :ok
+  defp maybe_post_dormant_overseer_comment(issue) do
+    ov = Config.overseer()
+
+    if ov.enabled and not Config.overseer_enabled?() do
+      post_overseer_comment(
+        issue,
+        "capped — overseer could not judge",
+        "The run was capped at `agent.max_turns` (no auto-extend) because the overseer " <>
+          "could not render a judgement: #{dormant_reason(ov)}.",
+        nil
+      )
+    end
+
+    :ok
+  end
+
+  @spec dormant_reason(OverseerConfig.t()) :: String.t()
+  defp dormant_reason(ov) do
+    cond do
+      not is_binary(ov.api_key) or ov.api_key == "" -> "no `ANTHROPIC_API_KEY` resolved"
+      ov.engine != "api" -> "engine #{inspect(ov.engine)} is not implemented"
+      true -> "the overseer is dormant"
+    end
+  end
+
+  # The single graceful wind-down turn (IDE-230): before the session is torn down
+  # and the issue moves to Human Review, the agent gets one bounded turn to commit
+  # what it deems worth keeping and update its workpad. It cannot re-enter the
+  # loop or rescue the run — the result is discarded and control falls through to
+  # the escalation/`:max_turns_reached` return.
+  @spec run_winddown_turn(map(), term(), Issue.t(), String.t()) :: :ok
+  defp run_winddown_turn(context, app_session, issue, reason) do
+    %{adapter: adapter, codex_update_recipient: recipient, overseer_session: session} = context
+    settings = Config.settings!()
+
+    Logger.info("Running wind-down turn for #{issue_context(issue)} before escalation: #{reason}")
+
+    handler_opts = [
+      verbose_logging: settings.agent.claude.verbose_logging,
+      overseer_session: session
+    ]
+
+    try do
+      adapter.run_turn(app_session, winddown_prompt(reason), issue,
+        on_message: compose_message_handler(adapter, recipient, issue, handler_opts),
+        turn_timeout_ms: Config.overseer().winddown_timeout_ms
+      )
+    rescue
+      exception ->
+        Logger.warning("Wind-down turn raised for #{issue_context(issue)}: #{Exception.message(exception)}")
+    end
+
+    :ok
+  end
+
+  defp winddown_prompt(reason) do
+    """
+    ## Final wind-down turn (IMPORTANT)
+
+    Symphony is handing this issue to a human (moving it to the Human Review state) because #{reason}.
+
+    This is your FINAL turn. Do NOT start new work. Use it only to:
+
+    - Commit any work worth keeping using the `commit` skill (partial progress is fine — committed beats lost).
+    - Update the `## Symphony Workpad` comment with the current status: what is done, what remains, and any blockers a human needs to know.
+
+    Once you have committed and updated the workpad, end the turn.
+    """
   end
 
   defp build_turn_prompt(issue, opts, 1, _max_turns, _steering) do

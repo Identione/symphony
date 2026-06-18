@@ -208,17 +208,24 @@ repo:
   window; `agent.progress_signal_git_timeout_ms` (default `2000`) bounds the
   probe; `agent.progress_trigger_min_turns` (default `4`) is the turn floor for
   the overseer trigger. See `docs/progress_signals.md`.
-- `agent.overseer` (OPTIONAL, disabled by default) is the Layer-2 AI overseer
-  (IDE-212): a gated, **read-only** Anthropic call made at most a couple of times
-  late in the budget (never per turn) that semantically classifies the run
-  (converging/thrashing/blocked) and recommends one action — `nudge` (steers the
-  next turn's prompt + a Linear comment), `recommend_extend_budget` (comment +
-  log only, **never** changes `max_turns`), `escalate` (routed through the
-  deterministic-failure pipeline), or `abort` (treated as `escalate` unless
-  `allow_abort`). A verdict below `confidence_floor` (default `0.6`) is downgraded
-  to a comment-only continue. Enable with `agent.overseer.enabled: true` and a
-  resolvable `agent.overseer.api_key` (defaults to `$ANTHROPIC_API_KEY`); every
-  error path fails open, leaving the run untouched. See SPEC.md §13.6.
+- `agent.overseer` (**on by default**, dormant without a resolved key) is the
+  Layer-2 AI overseer (IDE-212 / IDE-230): the binding controller of the
+  per-session turn budget. A session extends turn-by-turn up to
+  `absolute_max_turns` (default `500`) under overseer approval; `agent.max_turns`
+  survives only as the keyless-fallback ceiling. At each turn boundary the worker
+  runs the free Layer-1 deterministic check and consults the overseer when the
+  consecutive no-progress streak hits `streak_to_llm` (default `5`) or every
+  `mandatory_llm_every` turns (default `40`). A **read-only** Anthropic call
+  classifies the run vs. its plan and either approves (`continue` / `nudge` /
+  `recommend_extend_budget`) or gives up (`escalate` / `abort`) — posting
+  structured findings, running one bounded graceful wind-down turn (commit +
+  workpad update), suppressing the retry (`:overseer_escalation` is
+  immediate-escalation + `:no_retry`), and moving the issue to Human Review. A
+  verdict below `confidence_floor` (default `0.6`) downgrades to an approval.
+  Without a resolved `agent.overseer.api_key` (defaults to `$ANTHROPIC_API_KEY`),
+  or when the call cap (`max_calls_per_session`, default `25`) is exhausted, the
+  run caps at `agent.max_turns` and posts a "could not judge" comment (never
+  silent). Every error path fails open. See SPEC.md §13.6.
 - `agent.codex.quota` / `agent.claude.quota` (both OPTIONAL, disabled by
   default) add account-quota-aware dispatch pausing: when `enabled`, Symphony
   stops dispatching *new* issues while the active provider's usage is at/above

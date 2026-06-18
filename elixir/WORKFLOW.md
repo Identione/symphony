@@ -118,22 +118,26 @@ agent:
   # progress_trigger_min_turns: turn floor for the at_risk_no_commits arm of the
   # Layer-2 trigger predicate.
   # progress_trigger_min_turns: 4
-  # AI overseer (IDE-212 / Layer 2). A gated, READ-ONLY Anthropic call made at
-  # most a couple of times late in the budget (never per turn). It semantically
-  # classifies the run (converging/thrashing/blocked) and recommends ONE action:
-  # nudge (steers the next turn + comments), recommend_extend_budget (comment +
-  # log only — NEVER changes max_turns), escalate, or abort (escalate unless
-  # allow_abort). Disabled by default; fails open on any error. See SPEC.md §13.6.
+  # AI overseer (IDE-212 / IDE-230 / Layer 2). A gated Anthropic call that judges
+  # an extending run against its plan and either APPROVES continued extension
+  # (up to absolute_max_turns) or GIVES UP — posting findings, suppressing the
+  # retry, and moving the issue to Human Review after one graceful wind-down turn.
+  # ON BY DEFAULT, but dormant without a resolved api_key (then the run caps at
+  # `max_turns` and posts a "could not judge" comment). Fails open on any error.
+  # See SPEC.md §13.6. Uncomment to override the defaults shown:
   # overseer:
-  #   enabled: true                  # master switch (also needs a resolved api_key)
+  #   enabled: true                  # on by default; needs a resolved api_key to act
   #   engine: api                    # only "api" (read-only Messages call) is implemented
   #   model: claude-sonnet-4-6
   #   api_key: $ANTHROPIC_API_KEY    # resolved like tracker.api_key/$LINEAR_API_KEY
-  #   budget_threshold_k: 4          # fire when turn >= max_turns - k
+  #   streak_to_llm: 5               # consult after 5 consecutive deterministic no-progress turns
+  #   mandatory_llm_every: 40        # also consult every N turns regardless (0 disables)
+  #   absolute_max_turns: 500        # hard per-session ceiling (max_turns is the keyless fallback)
+  #   winddown_timeout_ms: 120000    # bounded final commit + workpad-update turn before Human Review
   #   min_turns_between: 3           # cooldown between calls
-  #   max_calls_per_session: 2       # per-run call cap
+  #   max_calls_per_session: 25      # per-run call cap (hitting it stops extension, never silent)
   #   transcript_window: 40          # bounded transcript evidence window
-  #   confidence_floor: 0.6          # below this, downgrade to comment-only continue
+  #   confidence_floor: 0.6          # below this, downgrade to a (continue) approval
   #   allow_abort: false             # when false, an abort verdict is treated as escalate
   # Claude Agent SDK adapter (SPEC.md §10.8). Switch to `codex` to use the
   # legacy Codex App-Server adapter — the nested `agent.codex` block below

@@ -12,36 +12,45 @@ defmodule SymphonyElixir.Overseer.PromptBuilder do
 
   @system_prompt """
   You are a turn-budget overseer for an autonomous coding agent. The agent works
-  a single ticket in its own workspace over a bounded number of turns. You are
-  invoked once, late in the budget, with read-only evidence about the run. Your
-  job is to classify the run and recommend a single action. You cannot run tools,
-  read files, or change anything — you only emit one structured verdict.
+  a single ticket in its own workspace, extending turn by turn as long as it makes
+  valuable progress. You are invoked periodically (and whenever a cheap
+  deterministic check has flagged a streak of no-progress turns) with read-only
+  evidence about the run. Your job is to judge progress AGAINST THE PLAN and
+  decide whether the run should keep extending or be handed to a human. You cannot
+  run tools, read files, or change anything — you only emit one structured verdict.
+
+  Judge actual progress against the plan and acceptance criteria in the PLAN /
+  WORKPAD section (when present): are the checklist items / acceptance criteria
+  being completed over time, or is the agent churning without closing them?
 
   Classify the run as one of:
-    - "converging": acceptance criteria look met or nearly met; remaining gaps are
-      finalization (e.g. uncommitted-but-finished work). The right move is usually
-      a precise nudge (commit/push) or, if more turns are genuinely needed, a
-      budget-extension recommendation.
-    - "thrashing": repeated identical errors or oscillating diffs with no
-      diagnostic progress. A nudge will not help; escalate for human triage.
+    - "converging": acceptance criteria are being met or steadily closed; valuable
+      progress is being made. Keep extending.
+    - "thrashing": repeated identical errors or revisited/oscillating diffs with no
+      diagnostic progress against the plan. Extending more will not help.
     - "blocked": progress is stalled on an external dependency the agent cannot
       resolve itself (missing secret, upstream outage, unmet cross-issue blocker).
 
   Choose recommended_action from:
-    - "continue": healthy; let the run proceed untouched.
-    - "nudge": one concrete, actionable instruction will finalize the work. Put it
-      in steering_message. Use this ONLY when a single nudge plausibly resolves the
-      gap within the remaining turns.
-    - "recommend_extend_budget": converging but needs more turns than remain. This
-      only surfaces a recommendation to a human — it does NOT change the budget.
-    - "escalate": route to a human; no automated nudge resolves this.
+    - "continue": valuable progress; let the run keep extending untouched.
+    - "nudge": progress is good but one concrete instruction will help (e.g.
+      commit/push, refocus). Put it in steering_message; the run keeps extending.
+    - "recommend_extend_budget": converging and clearly needs many more turns —
+      an explicit vote to keep extending.
+    - "escalate": no more valuable progress is expected and the cause is NOT a
+      transient/intermittent outage — hand to a human now.
     - "abort": high-confidence wasted spend; stop now. Reserve for clear thrashing.
 
   Hard rules:
     - steering_message MUST be non-null if and only if recommended_action is
       "nudge"; otherwise it MUST be null.
-    - Be conservative: prefer "continue" or "nudge" over "escalate"/"abort" unless
-      the evidence clearly shows wasted effort.
+    - findings MUST be populated when you give up (recommended_action "escalate"
+      or "abort"): set findings.summary (why no more progress is expected),
+      findings.blockers (concrete blockers observed), and
+      findings.next_steps_for_human. On every other action, findings MUST be null.
+    - Only "escalate"/"abort" when you are confident the cause is deterministic,
+      not a transient/intermittent outage (a transient cause deserves a retry, not
+      a human hand-off). Prefer "continue"/"nudge" otherwise.
     - confidence is your calibrated probability (0..1) that the verdict is correct.
     - rationale is one short paragraph citing the concrete evidence.
   """
@@ -53,6 +62,7 @@ defmodule SymphonyElixir.Overseer.PromptBuilder do
   @type evidence :: %{
           optional(:issue_title) => String.t() | nil,
           optional(:issue_description) => String.t() | nil,
+          optional(:workpad) => String.t() | nil,
           optional(:turn) => non_neg_integer(),
           optional(:max_turns) => non_neg_integer(),
           optional(:signals) => map() | nil,
@@ -75,6 +85,7 @@ defmodule SymphonyElixir.Overseer.PromptBuilder do
   defp render_user(evidence) do
     [
       section("ISSUE", render_issue(evidence)),
+      section("PLAN / WORKPAD", present(evidence[:workpad])),
       section("BUDGET / SIGNALS", render_signals(evidence)),
       section("GIT DIFF (HEAD)", present(evidence[:git_diff])),
       section("BUILD / TEST LOGS", render_logs(evidence[:logs])),
