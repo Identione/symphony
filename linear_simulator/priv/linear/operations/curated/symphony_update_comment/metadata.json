@@ -1,0 +1,18 @@
+{
+  "name": "symphony_update_comment",
+  "scenario": "basic_workspace",
+  "operationName": "SymphonyUpdateComment",
+  "auth": "Bearer user_hakan",
+  "source": "symphony lib/symphony_elixir/linear/adapter.ex",
+  "compatibility": {
+    "level": "behavior",
+    "requiresBehavior": ["mutation:sideEffect"],
+    "knownDifferences": []
+  },
+  "expected": {
+    "allowErrors": false,
+    "paths": {
+      "data.commentUpdate.success": true
+    }
+  }
+}

@@ -1,0 +1,9 @@
+query SymphonyPreflightProject($slugId: String!) {
+  projects(filter: {slugId: {eq: $slugId}}, first: 1) {
+    nodes {
+      id
+      name
+      slugId
+    }
+  }
+}

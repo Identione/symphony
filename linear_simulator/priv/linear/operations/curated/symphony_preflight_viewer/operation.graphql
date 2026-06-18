@@ -1,0 +1,6 @@
+query SymphonyPreflightViewer {
+  viewer {
+    id
+    name
+  }
+}

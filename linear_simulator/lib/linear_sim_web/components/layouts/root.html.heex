@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="csrf-token" content={get_csrf_token()} />
+    <.live_title default="Linear Simulator">
+      {assigns[:page_title]}
+    </.live_title>
+
+    <script src="https://cdn.tailwindcss.com?plugins=forms"></script>
+    <link
+      href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      rel="stylesheet"
+    />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:opsz,wght,FILL,GRAD@20..48,100..700,0..1,-50..200"
+      rel="stylesheet"
+    />
+    <script>
+      tailwind.config = {
+        darkMode: "class",
+        theme: {
+          extend: {
+            fontFamily: {
+              sans: ["Inter", "ui-sans-serif", "system-ui"],
+              mono: ["JetBrains Mono", "ui-monospace", "monospace"]
+            },
+            colors: {
+              background: "#08090A",
+              surface: "#121315",
+              "surface-container-lowest": "#0d0e0f",
+              "surface-container-low": "#16171B",
+              "surface-container": "#1b1c1d",
+              "surface-container-high": "#292a2b",
+              "surface-container-highest": "#343536",
+              "surface-variant": "#23252A",
+              "on-surface": "#F7F8F8",
+              "on-surface-variant": "#8A8F98",
+              secondary: "#8A8F98",
+              outline: "#454652",
+              "outline-variant": "#23252A",
+              primary: "#bdc2ff",
+              "primary-container": "#5e6ad2",
+              "on-primary": "#121f8b",
+              "on-primary-container": "#fdfaff"
+            }
+          }
+        }
+      };
+    </script>
+    <style>
+      body { background-color: #08090A; color: #F7F8F8; }
+      .material-symbols-outlined { font-family: "Material Symbols Outlined"; font-weight: normal; font-style: normal; line-height: 1; letter-spacing: normal; text-transform: none; display: inline-block; white-space: nowrap; word-wrap: normal; direction: ltr; }
+      ::-webkit-scrollbar { width: 8px; height: 8px; }
+      ::-webkit-scrollbar-track { background: #08090A; }
+      ::-webkit-scrollbar-thumb { background: #23252A; border-radius: 8px; }
+    </style>
+    <script defer src="/assets/phoenix.min.js"></script>
+    <script defer src="/assets/phoenix_live_view.min.js"></script>
+    <script>
+      window.addEventListener("DOMContentLoaded", () => {
+        let csrfToken = document.querySelector("meta[name='csrf-token']").getAttribute("content");
+        let liveSocket = new window.LiveView.LiveSocket("/live", window.Phoenix.Socket, {
+          params: { _csrf_token: csrfToken }
+        });
+        liveSocket.connect();
+        window.liveSocket = liveSocket;
+      });
+    </script>
+  </head>
+  <body>
+    {@inner_content}
+  </body>
+</html>

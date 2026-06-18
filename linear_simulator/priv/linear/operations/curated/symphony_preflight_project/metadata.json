@@ -1,0 +1,19 @@
+{
+  "name": "symphony_preflight_project",
+  "scenario": "basic_workspace",
+  "operationName": "SymphonyPreflightProject",
+  "auth": "Bearer user_hakan",
+  "source": "symphony lib/symphony_elixir/cli/preflight.ex",
+  "compatibility": {
+    "level": "shape",
+    "requiresBehavior": ["filter:slugId"],
+    "knownDifferences": []
+  },
+  "expected": {
+    "allowErrors": false,
+    "paths": {
+      "data.projects.nodes.0.slugId": "roadmap",
+      "data.projects.nodes.0.name": "Roadmap"
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "symphony_preflight_states",
+  "scenario": "basic_workspace",
+  "operationName": "SymphonyPreflightStates",
+  "auth": "Bearer user_hakan",
+  "source": "symphony lib/symphony_elixir/cli/preflight.ex",
+  "compatibility": {
+    "level": "shape",
+    "requiresBehavior": ["filter:name"],
+    "knownDifferences": []
+  },
+  "expected": {
+    "allowErrors": false,
+    "paths": {
+      "data.projects.nodes.0.teams.nodes.0.states.nodes.0.name": "Todo"
+    }
+  }
+}

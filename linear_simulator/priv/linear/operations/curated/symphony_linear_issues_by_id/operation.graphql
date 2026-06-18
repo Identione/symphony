@@ -1,0 +1,44 @@
+query SymphonyLinearIssuesById($ids: [ID!]!, $first: Int!, $relationFirst: Int!) {
+  issues(filter: {id: {in: $ids}}, first: $first) {
+    nodes {
+      id
+      identifier
+      title
+      description
+      priority
+      state {
+        name
+        type
+      }
+      branchName
+      url
+      assignee {
+        id
+      }
+      labels {
+        nodes {
+          name
+        }
+      }
+      children(first: 1) {
+        nodes {
+          id
+        }
+      }
+      inverseRelations(first: $relationFirst) {
+        nodes {
+          type
+          issue {
+            id
+            identifier
+            state {
+              name
+            }
+          }
+        }
+      }
+      createdAt
+      updatedAt
+    }
+  }
+}

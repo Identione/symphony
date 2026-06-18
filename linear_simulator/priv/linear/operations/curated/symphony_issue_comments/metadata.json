@@ -1,0 +1,19 @@
+{
+  "name": "symphony_issue_comments",
+  "scenario": "basic_workspace",
+  "operationName": "SymphonyIssueComments",
+  "auth": "Bearer user_hakan",
+  "source": "symphony lib/symphony_elixir/linear/adapter.ex",
+  "compatibility": {
+    "level": "shape",
+    "requiresBehavior": ["pagination:first"],
+    "knownDifferences": ["hasNextPage is computed from scenario data, not live pagination"]
+  },
+  "expected": {
+    "allowErrors": false,
+    "paths": {
+      "data.issue.comments.nodes.0.id": "comment_eng_1_workpad",
+      "data.issue.comments.pageInfo.hasNextPage": false
+    }
+  }
+}

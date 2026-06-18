@@ -1,0 +1,20 @@
+{
+  "name": "symphony_linear_poll",
+  "scenario": "basic_workspace",
+  "operationName": "SymphonyLinearPoll",
+  "auth": "Bearer user_hakan",
+  "source": "symphony lib/symphony_elixir/linear/client.ex",
+  "compatibility": {
+    "level": "behavior",
+    "requiresBehavior": ["pagination:first", "filter:project", "filter:state", "sort:createdAt"],
+    "knownDifferences": ["hasNextPage is computed from scenario data, not live pagination"]
+  },
+  "expected": {
+    "allowErrors": false,
+    "paths": {
+      "data.issues.nodes.0.identifier": "ENG-1",
+      "data.issues.nodes.0.branchName": "hakan/eng-1",
+      "data.issues.pageInfo.hasNextPage": false
+    }
+  }
+}
