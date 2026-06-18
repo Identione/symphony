@@ -68,11 +68,15 @@ start: ensure-trust ensure-deps ## Launch the Phoenix server detached.
 	  echo "$(RED)error:$(RESET) already running (pid $$(cat $(PID_FILE)))"; exit 1; \
 	fi
 	@echo "starting linear_sim -> $(OUT_LOG)"
-	@# setsid puts the server in its own session/process group; the leader pid
-	@# (== PGID) is recorded so `stop` can signal the whole group. `mix phx.server`
-	@# spawns the BEAM as a child, so tracking a single pid would orphan it.
+	@# Detach into a new session/process group so the leader pid (== PGID) can be
+	@# recorded and `stop` can signal the whole group — `mix phx.server` spawns the
+	@# BEAM as a child, so tracking a single pid would orphan it. We use Perl's
+	@# POSIX::setsid instead of setsid(1) because the latter is Linux-only (absent
+	@# on macOS); Perl ships on both. setsid() succeeds here because backgrounding
+	@# with `&` leaves the process in the shell's group (not a group leader).
 	@cd $(ROOT) && \
-	  PORT=$(PORT) setsid sh -c 'echo $$$$ > "$(PID_FILE)"; exec mise exec -- mix phx.server' \
+	  PORT=$(PORT) perl -MPOSIX=setsid -e 'setsid; exec @ARGV or die $$!' \
+	    sh -c 'echo $$$$ > "$(PID_FILE)"; exec mise exec -- mix phx.server' \
 	    > "$(OUT_LOG)" 2>&1 < /dev/null &
 	@sleep 2
 	@if kill -0 $$(cat $(PID_FILE)) 2>/dev/null; then \

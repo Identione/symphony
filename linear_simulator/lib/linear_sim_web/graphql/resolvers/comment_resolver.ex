@@ -8,6 +8,11 @@ defmodule LinearSimWeb.GraphQL.Resolvers.CommentResolver do
   @spec created_at(map(), map(), Absinthe.Resolution.t()) :: {:ok, DateTime.t() | nil}
   def created_at(%{inserted_at: ts}, _args, _resolution), do: {:ok, ts}
 
+  @doc "Resolves a comment's author (nil for system/unattributed comments)."
+  @spec user(map(), map(), Absinthe.Resolution.t()) :: {:ok, struct() | nil}
+  def user(%{user: %Ecto.Association.NotLoaded{}}, _args, _resolution), do: {:ok, nil}
+  def user(%{user: user}, _args, _resolution), do: {:ok, user}
+
   @doc "Resolves the `commentCreate` mutation."
   @spec create(map(), map(), Absinthe.Resolution.t()) :: {:ok, map()} | {:error, term()}
   def create(_parent, %{input: %{issue_id: issue_id, body: body}}, resolution) do

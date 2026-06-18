@@ -47,6 +47,15 @@ config :linear_sim, :operation_capture,
   include_variables: true,
   redact_variables: ["accessToken", "apiKey", "password", "token"]
 
+# Unsupported-operation recording (docs/linear-sim.md). Records GraphQL operations
+# the simulator's schema cannot handle (unknown field/argument/enum) to a single
+# JSONL file, deduplicated by signature, so gaps are easy to find and implement.
+# On by default; this surfaces missing operations as Symphony exercises new paths.
+config :linear_sim, :unsupported_operations,
+  enabled: true,
+  path: "priv/linear/operations/unsupported.jsonl",
+  redact_variables: ["accessToken", "apiKey", "password", "token"]
+
 # Import environment specific config. This must remain at the bottom
 # of this file so it overrides the configuration defined above.
 import_config "#{config_env()}.exs"

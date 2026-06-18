@@ -621,6 +621,59 @@ end
 
 Start with plain logging. Add Telemetry later if structured metrics or tracing become useful.
 
+### Recording unsupported operations
+
+The simulator only implements the slice of Linear's GraphQL API that clients
+actually exercise. When a client sends an operation the schema **cannot handle** —
+an unknown field, argument, enum value, or input field — Absinthe's validation
+phase rejects it with `HTTP 200 {"errors": [...]}`. `LinearSimWeb.GraphQL.UnsupportedRecorder`
+appends those — and only those — to a single JSONL file so the gaps are easy to
+find and implement next.
+
+It runs as `Absinthe.Plug`'s `:before_send` hook (the only place that sees the
+resolved result):
+
+```elixir
+forward "/graphql", Absinthe.Plug,
+  schema: LinearSimWeb.GraphQL.Schema,
+  before_send: {LinearSimWeb.GraphQL.UnsupportedRecorder, :record}
+```
+
+**Classifier.** Absinthe attaches a `:path` to *resolution* errors (changeset /
+not-found returned from a resolver — normal API behaviour) but leaves
+validation/parse errors without one. An error map lacking `:path` therefore means
+the schema couldn't handle that operation — those are what's recorded. Business
+errors are correctly ignored.
+
+Entries are deduplicated by signature (operation name + the set of error messages),
+so a polling client repeatedly hitting the same gap yields a single line. Each line:
+
+```json
+{"capturedAt":"2026-06-18T10:15:00Z","operationName":"GetCycles",
+ "errors":["Cannot query field \"cycles\" on type \"Query\"."],
+ "query":"query GetCycles {...}","variables":{...}}
+```
+
+Config (on by default; the file is gitignored — it's a runtime to-do list, not a
+committed artifact):
+
+```elixir
+config :linear_sim, :unsupported_operations,
+  enabled: true,
+  path: "priv/linear/operations/unsupported.jsonl",
+  redact_variables: ["accessToken", "apiKey", "password", "token"]
+```
+
+The dashboard surfaces the count: a red badge in the top bar (on every page) and
+an "Unsupported ops" row on the Overview's *Current state* panel, both driven by
+`UnsupportedRecorder.count/0`. Clicking the badge opens a modal that lists every
+recorded call as pretty-printed JSON (`UnsupportedRecorder.list/0`). A newly
+recorded gap broadcasts a state change (`Shell.notify_changed/0`) so the count —
+and the open modal — update live without a page refresh.
+
+To close a gap, read the file, pick an operation, then follow the resolver +
+context-function + schema-type extension flow (§16) and add a test.
+
 ---
 
 ## 12. GraphQL Error Formatting
@@ -1067,6 +1120,65 @@ mutation SymphonyUpdateComment($id: String!, $body: String!) {
 }
 ```
 
+### Attachments (agent-driven)
+
+Not part of Symphony's adapter, but the coding agent records the PR on an issue via
+the `linear` skill before finalizing — without this it cannot leave `In Progress`,
+so the orchestrator re-claims it forever. Implemented surface (resolvers in
+`attachment_resolver.ex`, context in `linear.ex`):
+
+| Field | Semantics |
+|---|---|
+| `attachmentLinkURL` / `attachmentLinkGitHubPR` / `attachmentLinkGitHubIssue` | Link a URL; **error** on a duplicate `(issue, url)` — `"This URL has already been linked with <ID>."` |
+| `attachmentCreate(input:)` | **Upsert** on `(issue, url)` — returns the existing attachment and updates the title |
+| `attachmentUpdate(id:, input:)` / `attachmentDelete(id:)` | Edit title/subtitle; delete |
+| `issue { attachments }`, `attachment(id:)`, `attachmentsForURL(url:)` | Read links back |
+
+The link*-vs-`attachmentCreate` split (error vs upsert), `issueId` accepting an
+identifier or UUID, and `subtitle`/`id` shapes were verified against the live
+Linear API (2026-06-18). The simulator stores literal inputs only — it does **not**
+replicate Linear's async GitHub enrichment (`sourceType`/`source`/`metadata`
+backfill and title override); `metadata` resolves to `{}`, `source` to `null`.
+
+**Deferred** (record, not implemented): the third-party integration links —
+`attachmentLinkGitLabMR`, `attachmentLinkSlack`, `attachmentLinkDiscord`,
+`attachmentLinkFront`, `attachmentLinkIntercom`, `attachmentLinkJiraIssue`,
+`attachmentLinkSalesforce`, `attachmentLinkZendesk`, `attachmentSyncToSlack`,
+`attachmentSources`, and `Project.attachments`. Each would be a thin alias on the
+same persistence path if ever needed.
+
+> **SDL casing note:** the default `LanguageConventions` adapter maps the exact
+> Linear names the client sends (e.g. `attachmentLinkURL`) to snake-case field
+> identifiers, so those queries resolve correctly — but the *introspected* SDL
+> shows the adapter's re-camelized form (`attachmentLinkUrl`,
+> `attachmentLinkGitHubPr`, `attachmentsForUrl`). This is cosmetic: the inbound
+> names work, and attachments are not curated operations.
+
+### Discovery queries (agent-driven)
+
+Not part of Symphony's adapter, but coding agents (and MCP-style Linear clients) probe
+the workspace with standard Linear root queries to discover teams, users, and workflow
+states before acting. The simulator captured these as schema gaps in
+`priv/linear/operations/unsupported.jsonl`; the ones below are real Linear fields and are
+now implemented (resolvers in `team_resolver.ex` / `user_resolver.ex`, context in
+`linear.ex`):
+
+| Field | Semantics |
+|---|---|
+| `teams(first:, after:)` | List the organization's teams (connection) |
+| `team(id:)` | Fetch a team by internal id **or** team key (e.g. `ENG`), mirroring `issue(id:)` |
+| `users(first:, after:)` | List the organization's users (connection) |
+| `workflowStates(filter:, first:, after:)` | List states across the org's teams; filter by `team.key.eq`, `team.id.eq`, `name.eq` |
+| `User.displayName` | Linear's display name; the simulator returns the user's `name` |
+| `Comment.user` | The comment's author |
+| `WorkflowState.team` | The state's owning team (preloaded by the root `workflowStates` query) |
+
+Intentionally **not** added, because real Linear rejects them too (the client is wrong —
+the gap belongs in the caller, not the simulator): `Comment.isResolved` (use `resolvedAt`),
+`Team.workflowStates` (use `Team.states`), `User.team` (Linear has no singular `team`),
+`issueViaIdentifier` (use `issue(id:)`), and an `identifier` field on `IssueFilter` (use
+`issue(id:)` or `number`). These remain in `unsupported.jsonl` as a record of client bugs.
+
 ### Filter argument requirements
 
 Symphony's polling query uses a nested filter argument:
@@ -1219,7 +1331,9 @@ defmodule LinearSim.Scenarios.BasicWorkspace do
           team_id: team.id,
           name: "Todo",
           type: "unstarted",
-          position: 1
+          # Color mirrors the real Linear workspace (fetched from the API).
+          color: "#e2e2e2",
+          position: 2
         })
 
       Repo.insert!(%Issue{

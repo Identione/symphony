@@ -16,8 +16,8 @@ defmodule LinearSim.ScenariosTest do
 
       assert is_binary(branch)
       assert is_binary(url)
-      # Standard workflow states are present (symphony's full default workflow).
-      assert Repo.aggregate(WorkflowState, :count) == 8
+      # The full IDE-team workflow states are present (mirrors real Linear).
+      assert Repo.aggregate(WorkflowState, :count) == 10
     end
 
     test "empty_workspace seeds the skeleton but no issues" do

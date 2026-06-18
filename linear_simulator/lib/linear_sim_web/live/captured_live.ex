@@ -50,7 +50,7 @@ defmodule LinearSimWeb.CapturedLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <.shell active={@active} scenario={@scenario} mode={@mode} capturing={@capturing}>
+    <.shell active={@active} scenario={@scenario} mode={@mode} capturing={@capturing} unsupported_count={@unsupported_count} show_unsupported={@show_unsupported} unsupported_entries={@unsupported_entries}>
       <div class="flex items-center justify-between mb-4">
         <div class="flex items-center gap-3">
           <h2 class="text-xl font-bold">Captured Operations</h2>

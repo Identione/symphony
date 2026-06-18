@@ -36,5 +36,8 @@ linear_sim-*.tar
 # Captured GraphQL operations are raw evidence, not committed (docs §5).
 /priv/linear/operations/captured/
 
+# Unsupported operations the schema couldn't handle — a runtime to-do list, not committed.
+/priv/linear/operations/unsupported.jsonl
+
 # Dashboard JS client is copied from deps by `mix assets.setup`, not committed.
 /priv/static/assets/

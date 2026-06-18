@@ -34,7 +34,7 @@ defmodule LinearSimWeb.OverviewLive do
     assigns = assign(assigns, :stats, @stats)
 
     ~H"""
-    <.shell active={@active} scenario={@scenario} mode={@mode} capturing={@capturing}>
+    <.shell active={@active} scenario={@scenario} mode={@mode} capturing={@capturing} unsupported_count={@unsupported_count} show_unsupported={@show_unsupported} unsupported_entries={@unsupported_entries}>
       <div class="flex items-center justify-between mb-4">
         <h2 class="text-xl font-bold">Overview</h2>
         <span class="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-wide text-on-surface-variant">
@@ -63,9 +63,19 @@ defmodule LinearSimWeb.OverviewLive do
               <span class="text-on-surface-variant text-[13px]">Response mode</span>
               <.mode_pill mode={@mode} />
             </div>
-            <div class="flex justify-between items-center py-2">
+            <div class="flex justify-between items-center py-2 border-b border-outline-variant">
               <span class="text-on-surface-variant text-[13px]">Operation capture</span>
               <span class="font-mono text-xs">{@capturing && "enabled" || "disabled"}</span>
+            </div>
+            <div class="flex justify-between items-center py-2">
+              <span class="text-on-surface-variant text-[13px]">Unsupported ops</span>
+              <span class={[
+                "font-mono text-xs px-2 py-0.5 rounded border",
+                @unsupported_count > 0 && "text-red-400 bg-red-500/10 border-red-500/20" ||
+                  "text-on-surface-variant border-outline-variant"
+              ]}>
+                {@unsupported_count}
+              </span>
             </div>
           </div>
         </div>

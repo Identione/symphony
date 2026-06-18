@@ -49,7 +49,7 @@ defmodule LinearSimWeb.SettingsLive do
   @impl true
   def render(assigns) do
     ~H"""
-    <.shell active={@active} scenario={@scenario} mode={@mode} capturing={@capturing}>
+    <.shell active={@active} scenario={@scenario} mode={@mode} capturing={@capturing} unsupported_count={@unsupported_count} show_unsupported={@show_unsupported} unsupported_entries={@unsupported_entries}>
       <h2 class="text-xl font-bold mb-1">Settings</h2>
       <p class="text-[13px] text-on-surface-variant mb-6">Runtime configuration for this simulator instance.</p>
       <p :if={@note} class="mb-4 text-[13px] font-mono text-primary">{@note}</p>

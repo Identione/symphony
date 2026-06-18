@@ -29,6 +29,19 @@ defmodule LinearSimWeb.ConnCase do
       import Phoenix.ConnTest
       import Phoenix.LiveViewTest
       import LinearSimWeb.ConnCase
+
+      @doc """
+      POSTs a GraphQL query (with variables) to `/graphql` as the default test
+      user and returns the parsed JSON body. Defined here so every GraphQL test
+      shares one client instead of redefining its own.
+      """
+      def gql(conn, query, variables \\ %{}) do
+        conn
+        |> put_req_header("content-type", "application/json")
+        |> put_req_header("authorization", "Bearer user_hakan")
+        |> post("/graphql", %{"query" => query, "variables" => variables})
+        |> json_response(200)
+      end
     end
   end
 

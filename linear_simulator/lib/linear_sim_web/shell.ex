@@ -14,6 +14,7 @@ defmodule LinearSimWeb.Shell do
     only: [attach_hook: 4, connected?: 1]
 
   alias LinearSim.{Mode, OperationCapture, Scenarios}
+  alias LinearSimWeb.GraphQL.UnsupportedRecorder
   alias Phoenix.LiveView.Socket
   alias Phoenix.PubSub
 
@@ -38,18 +39,27 @@ defmodule LinearSimWeb.Shell do
 
     socket
     |> assign(:active, active)
+    |> assign(:show_unsupported, false)
+    |> assign(:unsupported_entries, [])
     |> assign_status()
     |> attach_hook(:shell_events, :handle_event, &shell_event/3)
     |> attach_hook(:shell_info, :handle_info, &shell_info/2)
   end
 
-  @doc "Re-reads the live status assigns (scenario, mode, capture flag)."
+  @doc "Re-reads the live status assigns (scenario, mode, capture flag, gap count)."
   @spec assign_status(Socket.t()) :: Socket.t()
   def assign_status(socket) do
-    socket
-    |> assign(:scenario, Scenarios.current())
-    |> assign(:mode, Mode.get())
-    |> assign(:capturing, OperationCapture.enabled?())
+    socket =
+      socket
+      |> assign(:scenario, Scenarios.current())
+      |> assign(:mode, Mode.get())
+      |> assign(:capturing, OperationCapture.enabled?())
+      |> assign(:unsupported_count, UnsupportedRecorder.count())
+
+    # Keep the open modal's list in sync without paying the read when it's closed.
+    if socket.assigns[:show_unsupported],
+      do: assign(socket, :unsupported_entries, UnsupportedRecorder.list()),
+      else: socket
   end
 
   @doc "Broadcasts that simulator state changed so every open page refreshes."
@@ -66,6 +76,17 @@ defmodule LinearSimWeb.Shell do
     toggle_capture()
     notify_changed()
     {:halt, assign_status(socket)}
+  end
+
+  defp shell_event("shell:show_unsupported", _params, socket) do
+    {:halt,
+     socket
+     |> assign(:show_unsupported, true)
+     |> assign(:unsupported_entries, UnsupportedRecorder.list())}
+  end
+
+  defp shell_event("shell:hide_unsupported", _params, socket) do
+    {:halt, assign(socket, :show_unsupported, false)}
   end
 
   defp shell_event(_event, _params, socket), do: {:cont, socket}
@@ -85,6 +106,9 @@ defmodule LinearSimWeb.Shell do
   attr :scenario, :string, required: true
   attr :mode, :atom, required: true
   attr :capturing, :boolean, default: false
+  attr :unsupported_count, :integer, default: 0
+  attr :show_unsupported, :boolean, default: false
+  attr :unsupported_entries, :list, default: []
   attr :page_title, :string, default: nil
   slot :inner_block, required: true
 
@@ -126,6 +150,16 @@ defmodule LinearSimWeb.Shell do
             <div class="h-4 w-px bg-outline-variant"></div>
             <span class="font-mono text-xs text-primary px-2 py-0.5 bg-primary/10 border border-primary/20 rounded">{String.upcase(@scenario)}</span>
             <.mode_pill mode={@mode} />
+            <button
+              :if={@unsupported_count > 0}
+              id="unsupported-badge"
+              phx-click="shell:show_unsupported"
+              title="GraphQL operations the simulator could not handle — click to inspect"
+              class="flex items-center gap-1 font-mono text-[11px] font-bold px-2 py-0.5 rounded uppercase bg-red-500/10 text-red-400 border border-red-500/20 hover:bg-red-500/20 transition-colors"
+            >
+              <span class="material-symbols-outlined text-sm">report</span>
+              {@unsupported_count} unsupported
+            </button>
           </div>
           <div class="flex items-center gap-3">
             <span class="flex items-center gap-1.5 text-[11px] font-semibold text-on-surface-variant">
@@ -156,6 +190,49 @@ defmodule LinearSimWeb.Shell do
           </div>
         </footer>
       </main>
+
+      <div
+        :if={@show_unsupported}
+        id="unsupported-modal"
+        class="fixed inset-0 z-[60] flex items-center justify-center p-6"
+      >
+        <div class="absolute inset-0 bg-black/60" phx-click="shell:hide_unsupported"></div>
+        <div class="relative z-10 w-full max-w-3xl max-h-[80vh] flex flex-col bg-surface-container border border-outline-variant rounded-lg shadow-2xl">
+          <div class="flex items-center justify-between px-5 h-12 border-b border-outline-variant">
+            <h3 class="text-sm font-bold flex items-center gap-2 text-red-400">
+              <span class="material-symbols-outlined text-base">report</span>
+              Unsupported GraphQL operations
+              <span class="font-mono text-[11px] text-on-surface-variant">({@unsupported_count})</span>
+            </h3>
+            <button
+              phx-click="shell:hide_unsupported"
+              class="text-on-surface-variant hover:text-on-surface transition-colors"
+              aria-label="Close"
+            >
+              <span class="material-symbols-outlined text-lg">close</span>
+            </button>
+          </div>
+
+          <div class="overflow-y-auto p-4 space-y-3">
+            <p class="text-[11px] text-on-surface-variant font-mono">
+              Recorded to {UnsupportedRecorder.path()} — implement these to grow simulator coverage.
+            </p>
+            <div :if={@unsupported_entries == []} class="text-on-surface-variant text-sm py-8 text-center">
+              No unsupported operations recorded.
+            </div>
+            <div
+              :for={entry <- @unsupported_entries}
+              class="border border-outline-variant rounded bg-surface-container-lowest"
+            >
+              <div class="flex items-center justify-between px-3 py-2 border-b border-outline-variant">
+                <span class="font-mono text-xs font-bold text-primary">{entry["operationName"]}</span>
+                <span class="font-mono text-[10px] text-on-surface-variant">{entry["capturedAt"]}</span>
+              </div>
+              <pre class="overflow-x-auto p-3 text-[11px] font-mono text-on-surface leading-relaxed whitespace-pre"><%= Jason.encode!(entry, pretty: true) %></pre>
+            </div>
+          </div>
+        </div>
+      </div>
     </div>
     """
   end

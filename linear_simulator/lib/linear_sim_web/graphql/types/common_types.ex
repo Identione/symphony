@@ -2,6 +2,17 @@ defmodule LinearSimWeb.GraphQL.Types.CommonTypes do
   @moduledoc "Shared GraphQL types: page info, filter comparators, order enum, payloads."
   use Absinthe.Schema.Notation
 
+  @desc "Arbitrary JSON object (Linear's JSONObject). Output-only in the simulator."
+  scalar :json, name: "JSONObject" do
+    serialize(& &1)
+
+    parse(fn
+      %Absinthe.Blueprint.Input.Null{} -> {:ok, nil}
+      %Absinthe.Blueprint.Input.String{value: value} -> Jason.decode(value)
+      _ -> :error
+    end)
+  end
+
   @desc "Relay page info."
   object :page_info do
     field :start_cursor, :string
@@ -64,5 +75,11 @@ defmodule LinearSimWeb.GraphQL.Types.CommonTypes do
   object :delete_payload do
     field :success, non_null(:boolean)
     field :entity_id, :id
+  end
+
+  @desc "attachmentLink*/attachmentCreate/attachmentUpdate payload (Linear's AttachmentPayload)."
+  object :attachment_payload do
+    field :success, non_null(:boolean)
+    field :attachment, non_null(:attachment)
   end
 end

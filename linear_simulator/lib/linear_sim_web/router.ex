@@ -45,7 +45,9 @@ defmodule LinearSimWeb.Router do
   scope "/" do
     pipe_through :graphql
 
-    forward "/graphql", Absinthe.Plug, schema: LinearSimWeb.GraphQL.Schema
+    forward "/graphql", Absinthe.Plug,
+      schema: LinearSimWeb.GraphQL.Schema,
+      before_send: {LinearSimWeb.GraphQL.UnsupportedRecorder, :record}
   end
 
   scope "/", LinearSimWeb do

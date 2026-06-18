@@ -12,6 +12,7 @@ defmodule LinearSim.Linear.WorkflowState do
   schema "workflow_states" do
     field :name, :string
     field :type, :string
+    field :color, :string
     field :position, :integer
 
     belongs_to :team, LinearSim.Linear.Team
@@ -22,7 +23,7 @@ defmodule LinearSim.Linear.WorkflowState do
   @doc false
   def changeset(state, attrs) do
     state
-    |> cast(attrs, [:id, :team_id, :name, :type, :position])
+    |> cast(attrs, [:id, :team_id, :name, :type, :color, :position])
     |> validate_required([:id, :team_id, :name, :type])
   end
 end
