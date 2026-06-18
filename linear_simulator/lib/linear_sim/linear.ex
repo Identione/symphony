@@ -130,13 +130,18 @@ defmodule LinearSim.Linear do
     end
   end
 
+  # Sub-issue fields symphony's poll query reads on each child (state.name/type,
+  # assignee.id, labels.nodes.name) and on the parent's children.
+  @child_preloads [:state, :assignee, :labels]
+
   @issue_preloads [
     :state,
     :assignee,
     :team,
     :labels,
-    :children,
-    inverse_relations: [issue: :state]
+    {:children, @child_preloads},
+    {:parent, [:state, :assignee, :labels, {:children, @child_preloads}]},
+    {:inverse_relations, [issue: :state]}
   ]
 
   @doc """

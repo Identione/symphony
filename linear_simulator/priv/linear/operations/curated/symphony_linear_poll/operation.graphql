@@ -20,9 +20,56 @@ query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first:
           name
         }
       }
-      children(first: 1) {
+      children(first: 50) {
         nodes {
           id
+          identifier
+          title
+          priority
+          state {
+            name
+            type
+          }
+          url
+          assignee {
+            id
+          }
+          labels {
+            nodes {
+              name
+            }
+          }
+        }
+      }
+      parent {
+        id
+        identifier
+        title
+        url
+        state {
+          name
+          type
+        }
+        children(first: 50) {
+          nodes {
+            id
+            identifier
+            title
+            priority
+            state {
+              name
+              type
+            }
+            url
+            assignee {
+              id
+            }
+            labels {
+              nodes {
+                name
+              }
+            }
+          }
         }
       }
       inverseRelations(first: $relationFirst) {

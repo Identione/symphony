@@ -85,7 +85,9 @@ start: ensure-trust ensure-deps ## Launch the Phoenix server detached.
 	fi
 
 foreground: ensure-trust ensure-deps ## Launch attached (Ctrl-C to stop).
-	@cd $(ROOT) && PORT=$(PORT) mise exec -- mix phx.server
+	@# +Bd disables the Erlang break handler so a single Ctrl-C terminates the VM
+	@# instead of dropping into the (a)bort/(c)ontinue break menu.
+	@cd $(ROOT) && ELIXIR_ERL_OPTIONS="+Bd" PORT=$(PORT) mise exec -- mix phx.server
 
 # --- Stop ------------------------------------------------------------------
 ##@ Stop
