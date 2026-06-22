@@ -69,6 +69,7 @@ defmodule SymphonyElixir.CodexAppServerErrorTest do
           {"overloaded", :overloaded, %{"error" => %{"code" => "api_overloaded", "type" => "overloaded_error", "status" => 503}}},
           {"quota_exceeded", :quota_exceeded, %{"error" => %{"code" => "quota_exceeded", "type" => "billing_error", "status" => 402}}},
           {"invalid_request", :invalid_request, %{"error" => %{"code" => "invalid_request", "type" => "invalid_request_error", "status" => 400}}},
+          {"authentication_failed_401", :invalid_request, %{"error" => %{"code" => "invalid_api_key", "type" => "authentication_error", "status" => 401}}},
           {"unknown", :unknown, %{"error" => %{"code" => "unexpected", "type" => "other", "status" => 500}}}
         ] do
       test "turn/failed with #{label} maps to :#{label}", %{workspace: workspace} do
@@ -95,6 +96,7 @@ defmodule SymphonyElixir.CodexAppServerErrorTest do
           {"overloaded", :overloaded, %{"error" => %{"code" => "api_overloaded", "type" => "overloaded_error", "status" => 503}}},
           {"quota_exceeded", :quota_exceeded, %{"error" => %{"code" => "quota_exceeded", "status" => 402}}},
           {"invalid_request", :invalid_request, %{"error" => %{"code" => "invalid_request", "status" => 400}}},
+          {"authentication_failed_401", :invalid_request, %{"error" => %{"code" => "invalid_api_key", "type" => "authentication_error", "status" => 401}}},
           {"unknown", :unknown, %{"error" => %{"code" => "unexpected", "status" => 500}}}
         ] do
       test "codex/event/error with #{label} maps to :#{label}", %{workspace: workspace} do

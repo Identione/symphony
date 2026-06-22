@@ -304,6 +304,38 @@ parser honors; `RetryPolicy` lets `:rate_limited` back off up to a 6h ceiling
 (vs `:overloaded`'s 15-min cap) so it waits out the real reset instead of
 re-hitting the wall.
 
+A 401 from `api.anthropic.com` lands in the same trap and arrives via three
+distinct SDK shapes, all of which the sidecar must classify or the
+continuation loop spins until `:max_turns_reached`:
+
+1. `SystemMessage(subtype="api_error", data={"error":{"status":401,...}})` —
+   the Claude CLI subprocess forwards the upstream HTTP response verbatim.
+   The sidecar dug only the `init` subtype out of `SystemMessage` and dropped
+   everything else; it now classifies `api_error` by status (`401 →
+   "authentication_failed"`, `429 → "rate_limit"`, `413 →
+   "context_window_exhausted"`, `5xx → "server_error"`, other `4xx →
+   "invalid_request"`) and emits an error envelope.
+2. `ResultMessage(is_error=True, subtype="success", api_error_status=401)` —
+   added in `claude-agent-sdk` for the CLI ≥ v2.1.110. Mapping `subtype` here
+   yields the literal `"success"` which Elixir's `to_error_code/1` reads as
+   `:unknown` (transient, retries forever). The sidecar now prefers
+   `api_error_status` over `subtype` when present and reuses the same
+   status → code table.
+3. `AssistantMessage(error=None, content=[TextBlock("Failed to authenticate.
+   API Error: 401 Invalid authentication credentials")])` — observed in some
+   Claude Code traces where neither of the above is emitted. The sidecar's
+   `_assistant_prose_error_code` catches the prose via a narrow regex
+   (requires both `failed to authenticate` and `401`) and emits the same
+   `authentication_failed` envelope.
+
+The Codex adapter mirrors this at the JSON-RPC layer: `@codex_error_rules`
+carries an HTTP 401 / `authentication_error` rule that classifies
+`turn/failed` and `codex/event/error` notifications to `:invalid_request`
+instead of falling through to `:unknown`. Without these, a session-wide auth
+failure churns `agent.max_turns` retries and exits with
+`:max_turns_reached`, taking five consecutive runs to escalate to Human
+Review.
+
 Transient codes (`rate_limited`, `overloaded`, `turn_timeout`,
 `response_timeout`, `unknown`) reset the counter so a brief upstream blip
 never trips the threshold. Switching to a *different* deterministic code

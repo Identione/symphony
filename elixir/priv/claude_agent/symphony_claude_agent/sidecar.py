@@ -102,6 +102,157 @@ _USAGE_LIMIT_PROSE_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 
+# A 401 from api.anthropic.com surfaces the same way (plain prose, no
+# AssistantMessage.error). Requires both "failed to authenticate" and "401" so
+# product copy mentioning authentication doesn't become a synthetic failure.
+_AUTH_FAILURE_PROSE_RE = re.compile(
+    r"failed\s+to\s+authenticate\b.*\b401\b",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+# Upstream HTTP status → ``AssistantMessageError`` literal. Mirrors the
+# vocabulary the Elixir ``Claude.AppServer.to_error_code/1`` maps from. Used
+# for both ``SystemMessage(subtype="api_error")`` and
+# ``ResultMessage(api_error_status=...)`` paths so a session-wide upstream
+# failure surfaces on the first occurrence instead of churning ``agent.max_turns``.
+_HTTP_STATUS_TO_ERROR_CODE = {
+    401: "authentication_failed",
+    402: "billing_error",
+    413: "context_window_exhausted",
+    429: "rate_limit",
+    500: "server_error",
+    502: "server_error",
+    503: "server_error",
+    504: "server_error",
+    529: "server_error",
+}
+
+
+def _http_status_to_error_code(status: int | None) -> str:
+    """Map an upstream HTTP status to the SDK error literal Elixir maps from."""
+    if status is None:
+        return "unknown"
+    if status in _HTTP_STATUS_TO_ERROR_CODE:
+        return _HTTP_STATUS_TO_ERROR_CODE[status]
+    if 400 <= status < 500:
+        return "invalid_request"
+    if 500 <= status < 600:
+        return "server_error"
+    return "unknown"
+
+
+def _coerce_status(value: Any) -> int | None:
+    """Return ``value`` as an int if it parses as a positive HTTP status, else None."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value > 0 else None
+    if isinstance(value, str):
+        try:
+            parsed = int(value.strip())
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
+    return None
+
+
+# Keys an upstream payload may hold the HTTP status under. Walked breadth-first
+# at every nesting level so we don't get fooled by alternate schemas like
+# ``{"error":{"response":{"status":401}}}``. Keep narrow — adding generic keys
+# (e.g. ``code``) risks colliding with non-status int fields.
+_STATUS_KEYS = ("status", "status_code", "statusCode", "http_status")
+_NESTING_KEYS = ("error", "response", "body", "details", "data")
+
+
+def _extract_api_error_status(data: dict[str, Any]) -> int | None:
+    """Best-effort dig out the HTTP status from a SystemMessage api_error payload.
+
+    Walks both the canonical ``data["error"]["status"]`` shape and observed
+    variants where the upstream response is wrapped under ``response`` /
+    ``body`` etc. Accepts string-valued statuses (some upstream frames emit
+    ``"401"`` rather than ``401``). Bounded BFS so a malformed cycle can't loop.
+    """
+
+    seen: set[int] = set()
+    queue: list[Any] = [data]
+    visits = 0
+    while queue and visits < 32:
+        visits += 1
+        node = queue.pop(0)
+        if not isinstance(node, dict):
+            continue
+        node_id = id(node)
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        for key in _STATUS_KEYS:
+            if key in node:
+                status = _coerce_status(node[key])
+                if status is not None:
+                    return status
+        for key in _NESTING_KEYS:
+            if key in node:
+                queue.append(node[key])
+    return None
+
+
+def _render_upstream_detail(data: dict[str, Any]) -> str | None:
+    """Best-effort one-line render of the upstream error's ``type`` / ``message``
+    for operator triage. Walks the same nesting keys ``_extract_api_error_status``
+    does so the detail stays close to the canonical payload shape."""
+
+    seen: set[int] = set()
+    queue: list[Any] = [data]
+    visits = 0
+    while queue and visits < 32:
+        visits += 1
+        node = queue.pop(0)
+        if not isinstance(node, dict):
+            continue
+        node_id = id(node)
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        msg = node.get("message")
+        typ = node.get("type")
+        if isinstance(msg, str) and msg.strip():
+            return f"{typ}: {msg}" if isinstance(typ, str) and typ else msg
+        for key in _NESTING_KEYS:
+            if key in node:
+                queue.append(node[key])
+    return None
+
+
+def _extract_retry_after_seconds(data: dict[str, Any]) -> int | None:
+    """Pull a ``Retry-After`` header value out of a SystemMessage api_error
+    payload. The CLI surfaces it under ``data["error"]["headers"]`` with case-
+    insensitive keys; accept both ``retry-after`` and ``Retry-After``."""
+
+    seen: set[int] = set()
+    queue: list[Any] = [data]
+    visits = 0
+    while queue and visits < 32:
+        visits += 1
+        node = queue.pop(0)
+        if not isinstance(node, dict):
+            continue
+        node_id = id(node)
+        if node_id in seen:
+            continue
+        seen.add(node_id)
+        headers = node.get("headers")
+        if isinstance(headers, dict):
+            for hkey, hval in headers.items():
+                if isinstance(hkey, str) and hkey.lower() == "retry-after":
+                    secs = _coerce_status(hval)
+                    if secs is not None:
+                        return secs
+        for key in _NESTING_KEYS:
+            if key in node:
+                queue.append(node[key])
+    return None
+
 
 def _classify_from_message(msg: str) -> str:
     """Return an error code by scanning the lowercased message for known keywords."""
@@ -221,6 +372,12 @@ class SessionState:
     tool_schemas: dict[str, dict[str, Any]] = field(default_factory=dict)
     # Monotonic timestamp of the last forwarded `assistant_delta`, for throttling.
     stream_activity_monotonic: float = 0.0
+    # Retry-after (seconds) recovered from the most recent api_error payload's
+    # ``Retry-After`` header. SystemMessage api_error carries the header;
+    # ResultMessage(api_error_status=…) that follows does not, so the orchestrator
+    # would otherwise lose the upstream reset window. Pinned here so a 429
+    # ResultMessage envelope inherits the value the SystemMessage saw first.
+    last_api_retry_after_seconds: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -790,12 +947,58 @@ async def _forward_message(state: SessionState, message: Any) -> None:
             emit(envelope)
         return
     if _SDK_AVAILABLE and isinstance(message, SystemMessage):
-        if getattr(message, "subtype", None) == "init":
-            data = getattr(message, "data", {}) or {}
+        subtype = getattr(message, "subtype", None)
+        data = getattr(message, "data", {}) or {}
+        if subtype == "init":
             session_id = data.get("session_id") if isinstance(data, dict) else None
             if session_id:
                 state.session_id = session_id
                 emit({"type": "system_init", "session_id": session_id})
+            return
+        # The Claude CLI subprocess forwards upstream HTTP errors from
+        # api.anthropic.com as ``{"type":"system","subtype":"api_error",
+        # "error":{"status":401,"headers":{"retry-after":"42"},...}}``.
+        # Silently dropping these makes Elixir re-prompt through the
+        # continuation loop until ``agent.max_turns``; surface them as a
+        # structured error so a session-wide auth/billing/rate-limit wall
+        # escalates on the first occurrence, embedding the Retry-After header
+        # as a ``retry-after <seconds>`` substring so Elixir's existing
+        # parser (added in #64) honors the real reset window.
+        if subtype == "api_error":
+            data_dict = data if isinstance(data, dict) else {}
+            status = _extract_api_error_status(data_dict)
+            retry_after = _extract_retry_after_seconds(data_dict)
+            # Pin the retry-after on the session so a subsequent
+            # ResultMessage(api_error_status=…) — which carries no headers —
+            # inherits the upstream reset window the SystemMessage saw first.
+            if retry_after is not None:
+                state.last_api_retry_after_seconds = retry_after
+            # An api_error subtype is always a real upstream failure; even
+            # when we cannot recover the status digit (alternate schema,
+            # missing field), prefer a deterministic ``:invalid_request``
+            # over ``:unknown`` so the IDE-73 pipeline picks it up instead of
+            # the transient-retry path that runs out the ``agent.max_turns``
+            # clock.
+            code = _http_status_to_error_code(status) if status is not None else "invalid_request"
+            message = (
+                f"HTTP {status} from api.anthropic.com"
+                if status is not None
+                else "api_error from api.anthropic.com"
+            )
+            upstream_detail = _render_upstream_detail(data_dict)
+            if upstream_detail:
+                message = f"{message}: {upstream_detail}"
+            if retry_after is not None:
+                message = f"{message} retry-after {retry_after}"
+            emit(
+                {
+                    "type": "error",
+                    "error": message,
+                    "error_code": code,
+                    "session_id": state.session_id,
+                }
+            )
+            return
         return
 
     if _SDK_AVAILABLE and isinstance(message, ResultMessage):
@@ -805,12 +1008,36 @@ async def _forward_message(state: SessionState, message: Any) -> None:
         # forever. Surface it as a structured error so the orchestrator can map
         # the subtype to a deterministic code and escalate instead.
         if getattr(message, "is_error", False):
+            api_status = getattr(message, "api_error_status", None)
             subtype = getattr(message, "subtype", None) or "unknown"
+            # An upstream API failure surfaces as ``is_error=True``,
+            # ``subtype="success"``, and the HTTP status in ``api_error_status``
+            # (claude-agent-sdk: emitted by the CLI since v2.1.110). Mapping
+            # ``subtype`` here would yield the literal ``"success"`` which
+            # Elixir's ``to_error_code/1`` treats as ``:unknown`` (transient,
+            # retries forever). Map the status to the upstream error literal.
+            # ResultMessage carries no Retry-After header; if the preceding
+            # SystemMessage(api_error) surfaced one, inherit it from
+            # SessionState so the orchestrator still sees the real reset.
+            code = (
+                _http_status_to_error_code(api_status)
+                if api_status is not None
+                else subtype
+            )
+            if api_status is not None:
+                message_text = f"HTTP {api_status}"
+            else:
+                message_text = subtype
+            if state.last_api_retry_after_seconds is not None:
+                message_text = (
+                    f"{message_text} retry-after "
+                    f"{state.last_api_retry_after_seconds}"
+                )
             emit(
                 {
                     "type": "error",
-                    "error": subtype,
-                    "error_code": subtype,
+                    "error": message_text,
+                    "error_code": code,
                     "session_id": state.session_id,
                 }
             )
@@ -956,6 +1183,8 @@ def _assistant_prose_error_code(prose: str | None) -> str | None:
         return None
     if _USAGE_LIMIT_PROSE_RE.search(prose):
         return "rate_limit"
+    if _AUTH_FAILURE_PROSE_RE.search(prose):
+        return "authentication_failed"
     return None
 
 
