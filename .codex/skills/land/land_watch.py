@@ -218,6 +218,65 @@ def summarize_checks(check_runs: list[dict[str, Any]]) -> tuple[bool, bool, list
     return pending, failed, failures
 
 
+# A CI job that never started for an account/infrastructure reason (failed
+# billing, exceeded spending limit, Actions disabled) reports
+# conclusion=failure but is NOT fixable by code changes — pushing a new commit
+# just re-triggers the identical failure, so the land loop would spin forever
+# burning tokens. Detect these so the watcher can stop and escalate instead.
+INFRA_BLOCK_RE = re.compile(
+    r"not started because"
+    r"|payment.*(?:failed|declined)"
+    r"|spending limit"
+    r"|billing & plans"
+    r"|actions?\b.*(?:disabled|not enabled|isn't enabled)"
+    r"|exceeded.*included (?:minutes|storage|quota)",
+    re.IGNORECASE,
+)
+
+
+async def get_check_annotations(check_run_id: int) -> list[dict[str, Any]]:
+    """Fetch a check-run's annotations. Billing/startup failures carry their
+    explanation here (the check-run's own output.title/summary are often null
+    for jobs that never ran). Best-effort: returns [] on any error."""
+    try:
+        data = await run_gh(
+            "api",
+            "--method",
+            "GET",
+            f"repos/{{owner}}/{{repo}}/check-runs/{check_run_id}/annotations",
+        )
+        return json.loads(data)
+    except (RuntimeError, json.JSONDecodeError):
+        return []
+
+
+async def detect_infra_blocks(check_runs: list[dict[str, Any]]) -> list[str]:
+    """Return reasons for any failed check that was blocked before running
+    (billing / spending limit / Actions disabled). Empty when the failures look
+    like genuine, fixable CI failures. Only the failed checks are inspected, so
+    annotations are fetched solely on the failure path."""
+    reasons: list[str] = []
+    for check in dedupe_check_runs(check_runs):
+        if check.get("status") != "completed":
+            continue
+        if check.get("conclusion") in ("success", "skipped", "neutral"):
+            continue
+        name = check.get("name", "unknown")
+        output = check.get("output") or {}
+        haystacks = [str(output.get("title") or ""), str(output.get("summary") or "")]
+        check_id = check.get("id")
+        if check_id is not None:
+            haystacks.extend(
+                str(ann.get("message") or "")
+                for ann in await get_check_annotations(check_id)
+            )
+        for text in haystacks:
+            if text and INFRA_BLOCK_RE.search(text):
+                reasons.append(f"{name}: {sanitize_terminal_output(text).strip()}")
+                break
+    return reasons
+
+
 def latest_review_request_at(comments: list[dict[str, Any]]) -> datetime | None:
     latest: datetime | None = None
     for comment in comments:
@@ -561,6 +620,16 @@ async def wait_for_checks(head_sha: str, checks_done: asyncio.Event) -> None:
         empty_seconds = 0
         pending, failed, failures = summarize_checks(check_runs)
         if failed:
+            infra_blocks = await detect_infra_blocks(check_runs)
+            if infra_blocks:
+                print(
+                    "CI cannot start (account/infrastructure block — NOT fixable "
+                    "by code changes). Do NOT commit/push/retry; escalate as a "
+                    "blocker and stop the land loop:",
+                )
+                for reason in infra_blocks:
+                    print(f"- {reason}")
+                raise SystemExit(6)
             print("Checks failed:")
             for failure in failures:
                 print(f"- {failure}")
