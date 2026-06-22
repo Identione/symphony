@@ -17,3 +17,9 @@ instances/
 # kept here so a pre-refactor checkout's residual files don't pollute
 # `git status`.
 /run/
+
+# Python bytecode caches, e.g. from running the repo-local `.codex/skills`
+# helper scripts (land_watch.py). The elixir/ sidecar has its own narrower
+# rule; this catches __pycache__ anywhere else in the tree.
+__pycache__/
+*.py[cod]

@@ -110,11 +110,28 @@ python3 .codex/skills/land/land_watch.py
 Exit codes:
 
 - 2: Review comments detected (address feedback)
-- 3: CI checks failed
+- 3: CI checks failed — genuine, fixable failure (fix, commit, push, re-watch)
 - 4: PR head updated (autofix commit detected)
+- 5: Merge conflicts (rebase/merge `main`, resolve, push, re-watch)
+- 6: CI cannot start — account/infrastructure block (failed billing, exceeded
+  spending limit, Actions disabled). NOT fixable by code. Do NOT commit, push,
+  or retry — re-pushing only re-triggers the identical failure and burns
+  tokens. Treat as a true external blocker: stop the land loop, record it in
+  the workpad, post a `[codex]` blocker comment, and move the issue out of
+  `Merging` per the blocked-access escape hatch so the orchestrator stops
+  re-dispatching.
 
 ## Failure Handling
 
+- **CI cannot start (account/infrastructure block):** if `land_watch.py` exits
+  `6`, or `gh pr checks` shows jobs that failed without running carrying a
+  "job was not started", billing, or spending-limit message, CI is blocked at
+  the account level. This is NOT a code problem — committing, pushing, or
+  re-running only re-triggers the identical failure and burns tokens. Stop the
+  land loop immediately: record the blocker in the workpad, post a `[codex]`
+  blocker comment, and follow the blocked-access escape hatch to move the issue
+  out of the active `Merging` state. Do not resume until the account billing /
+  Actions setting is fixed by a human.
 - If checks fail, pull details with `gh pr checks` and `gh run view --log`, then
   fix locally, commit with the `commit` skill, push with the `push` skill, and
   re-run the watch.
