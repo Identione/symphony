@@ -459,4 +459,73 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert response["success"] == true
     assert response["output"] == ":ok"
   end
+
+  test "linear_graphql logs each call as an op-shape telemetry line with context" do
+    log =
+      capture_log(fn ->
+        DynamicTool.execute(
+          "linear_graphql",
+          %{
+            "query" => "mutation IssueUpdate($id: String!, $input: IssueUpdateInput!) { issueUpdate(id: $id, input: $input) { success } }",
+            "variables" => %{"id" => "iss_1", "input" => %{"stateId" => "done"}}
+          },
+          linear_client: fn _q, _v, _o -> {:ok, %{"data" => %{"issueUpdate" => %{"success" => true}}}} end,
+          log_context: %{issue: %{id: "uuid-1", identifier: "IDE-200"}, session_id: "thr_1-turn_1"}
+        )
+      end)
+
+    assert log =~ "linear_graphql_call"
+    assert log =~ "op_type=mutation"
+    assert log =~ "root_field=issueUpdate"
+    assert log =~ "var_keys=id,input"
+    assert log =~ "status=ok"
+    assert log =~ "issue_id=uuid-1 issue_identifier=IDE-200"
+    assert log =~ "session_id=thr_1-turn_1"
+  end
+
+  test "linear_graphql telemetry never leaks the document body or variable values" do
+    log =
+      capture_log(fn ->
+        DynamicTool.execute(
+          "linear_graphql",
+          %{
+            "query" => "mutation CommentCreate($input: CommentCreateInput!) { commentCreate(input: $input) { success } }",
+            "variables" => %{"input" => %{"body" => "SECRET ISSUE CONTENT"}}
+          },
+          linear_client: fn _q, _v, _o -> {:ok, %{"data" => %{}}} end
+        )
+      end)
+
+    assert log =~ "root_field=commentCreate"
+    assert log =~ "var_keys=input"
+    refute log =~ "SECRET ISSUE CONTENT"
+    refute log =~ "commentCreate(input:"
+  end
+
+  test "linear_graphql telemetry records validation errors with their Linear code" do
+    log =
+      capture_log(fn ->
+        DynamicTool.execute(
+          "linear_graphql",
+          %{"query" => "mutation { issueUpdate { bogusField } }"},
+          linear_client: fn _q, _v, _o ->
+            {:error, {:linear_api_status, 400, %{"errors" => [%{"extensions" => %{"code" => "GRAPHQL_VALIDATION_FAILED"}}]}}}
+          end
+        )
+      end)
+
+    assert log =~ "root_field=issueUpdate"
+    assert log =~ "status=error http=400"
+  end
+
+  test "linear_graphql telemetry records calls rejected before reaching Linear" do
+    log =
+      capture_log(fn ->
+        DynamicTool.execute("linear_graphql", %{"query" => "   "})
+      end)
+
+    assert log =~ "linear_graphql_call"
+    assert log =~ "status=rejected"
+    assert log =~ "reason=missing_query"
+  end
 end
