@@ -81,7 +81,7 @@ defmodule SymphonyElixir.Claude.AppServer do
 
     tool_executor =
       Keyword.get(opts, :tool_executor, fn name, input ->
-        DynamicTool.execute(name, input)
+        DynamicTool.execute(name, input, log_context: %{issue: issue, session_id: session.session_id})
       end)
 
     permission_handler =
