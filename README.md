@@ -83,6 +83,25 @@ It also does **not** upgrade the agent toolchain (codex, claude-agent-sdk). That
 deliberate action — `cd elixir && make upgrade-tools` — which refreshes `mise.lock` and the
 sidecar's `uv.lock`. See [elixir/README.md](elixir/README.md#upgrading-the-agent-toolchain).
 
+## Utility scripts
+
+### Scanning token waste
+
+`scripts/scan_token_waste.py` analyzes Claude Agent SDK session transcripts to quantify rate-limit waste per issue. It outputs CSV statistics on rate-limiting impact and session efficiency, useful for diagnosing and tracking API quota issues.
+
+Usage:
+
+```bash
+python3 scripts/scan_token_waste.py [BASE_DIR] > token_waste.csv
+ssh orchestrator-host 'python3 -' < scripts/scan_token_waste.py > token_waste.csv  # pipe over SSH
+```
+
+Output columns: `issue`, `sessions`, `ratelimit_sessions`, `assistant_turns`, `ratelimit_turns`, `ratelimit_share`, `turns_in_rl_sessions`, `rl_session_share`.
+
+Base directory defaults to `~/.jai/default.changes/.claude-identione/projects` (where orchestrator transcripts live). Two waste measures are reported: turn-level (`ratelimit_share`) and session-level (`rl_session_share`).
+
+---
+
 - Full flag list and operator notes: [elixir/README.md](elixir/README.md)
 - Codex permissions profile setup: [SETUP.md](SETUP.md)
 - Building your own from scratch: [SPEC.md](SPEC.md)
