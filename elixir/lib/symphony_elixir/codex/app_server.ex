@@ -582,7 +582,8 @@ defmodule SymphonyElixir.Codex.AppServer do
     {:context_window_exhausted, 413, ["context_length", "context window", "token_limit"]},
     {:overloaded, 503, ["overload"]},
     {:quota_exceeded, 402, ["quota", "credit"]},
-    {:invalid_request, 400, ["invalid_request", "invalid request"]}
+    {:invalid_request, 400, ["invalid_request", "invalid request"]},
+    {:invalid_request, 401, ["authentication", "invalid_api_key", "unauthorized"]}
   ]
 
   defp classify_codex_error_code(%{"error" => error}) when is_map(error) do
