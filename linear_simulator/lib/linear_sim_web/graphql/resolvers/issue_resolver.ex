@@ -60,7 +60,10 @@ defmodule LinearSimWeb.GraphQL.Resolvers.IssueResolver do
   @spec comments(map(), map(), Absinthe.Resolution.t()) :: {:ok, map()}
   def comments(issue, args, _resolution) do
     order = Map.get(args, :order_by, :created_at)
-    {:ok, Connection.from_nodes(Linear.list_comments(issue.id, order), args)}
+    # Carry the already-loaded parent issue onto each comment so `Comment.url`
+    # can build its permalink without an extra per-comment query.
+    comments = issue.id |> Linear.list_comments(order) |> Enum.map(&%{&1 | issue: issue})
+    {:ok, Connection.from_nodes(comments, args)}
   end
 
   @doc "Resolves the `issueCreate` mutation."

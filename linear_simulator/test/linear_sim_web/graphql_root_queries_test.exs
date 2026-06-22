@@ -80,6 +80,31 @@ defmodule LinearSimWeb.GraphQLRootQueriesTest do
 
       assert nodes == [%{"name" => "In Progress"}]
     end
+
+    test "exposes each state's position (real Linear WorkflowState.position)", %{conn: conn} do
+      query = ~s|{ workflowStates(filter: { name: { eq: "Todo" } }) { nodes { name position } } }|
+      body = gql(conn, query)
+
+      assert get_in(body, ["data", "workflowStates", "nodes"]) ==
+               [%{"name" => "Todo", "position" => 2.0}]
+    end
+  end
+
+  describe "issues filter by number" do
+    test "filters issues by number.eq (real Linear IssueFilter.number)", %{conn: conn} do
+      body = gql(conn, ~s|{ issues(filter: { number: { eq: 1 } }) { nodes { identifier } } }|)
+
+      assert get_in(body, ["data", "issues", "nodes"]) == [%{"identifier" => "ENG-1"}]
+    end
+  end
+
+  describe "viewer assignedIssues" do
+    test "lists the viewer's assigned issues (real Linear User.assignedIssues)", %{conn: conn} do
+      body = gql(conn, ~s|{ viewer { assignedIssues(first: 10) { nodes { identifier } } } }|)
+      nodes = get_in(body, ["data", "viewer", "assignedIssues", "nodes"])
+
+      assert %{"identifier" => "ENG-1"} in nodes
+    end
   end
 
   describe "Comment.user" do
@@ -97,6 +122,43 @@ defmodule LinearSimWeb.GraphQLRootQueriesTest do
       comment = Enum.find(nodes, &(&1["body"] == "Looks good"))
 
       assert comment["user"] == %{"id" => "user_hakan", "name" => "Håkan Niska"}
+    end
+  end
+
+  describe "Comment.url" do
+    # Regression for the ENG-10 fidelity gap: `Comment.url` is a real Linear field
+    # (schema_reference.graphql), so an agent querying it is correct — the simulator
+    # just hadn't implemented it. The permalink mirrors the parent issue's url.
+    test "resolves to the issue permalink with a comment fragment", %{conn: conn} do
+      Repo.insert!(%Comment{
+        id: "comment_url_1",
+        issue_id: "issue_eng_1",
+        user_id: "user_hakan",
+        body: "With a url"
+      })
+
+      query = ~s|{ issue(id: "ENG-1") { comments { nodes { id body url } } } }|
+      body = gql(conn, query)
+      nodes = get_in(body, ["data", "issue", "comments", "nodes"])
+      comment = Enum.find(nodes, &(&1["id"] == "comment_url_1"))
+
+      assert comment["url"] == "https://linear.app/acme/issue/ENG-1#comment-comment_url_1"
+    end
+
+    test "commentCreate returns the new comment's url", %{conn: conn} do
+      mutation = """
+      mutation($issueId: String!, $body: String!) {
+        commentCreate(input: { issueId: $issueId, body: $body }) {
+          success
+          comment { id url }
+        }
+      }
+      """
+
+      body = gql(conn, mutation, %{"issueId" => "issue_eng_1", "body" => "hello"})
+      comment = get_in(body, ["data", "commentCreate", "comment"])
+
+      assert comment["url"] == "https://linear.app/acme/issue/ENG-1#comment-#{comment["id"]}"
     end
   end
 end

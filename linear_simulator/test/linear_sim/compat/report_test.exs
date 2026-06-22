@@ -14,7 +14,9 @@ defmodule LinearSim.Compat.ReportTest do
       ],
       replay: %{total: 12, ok: 11},
       missing_simulator_fields: ["Issue.branchName used by symphony_linear_poll"],
+      unimplemented_reference_fields: ["Comment.url"],
       stale_simulator_fields: ["RootQueryType.apiVersion"],
+      observed_unsupported: [~s|Cannot query field "url" on type "Comment".|],
       behavioral_gaps: ["symphony_linear_poll: hasNextPage is computed from scenario data"]
     }
   end
@@ -42,6 +44,10 @@ defmodule LinearSim.Compat.ReportTest do
       assert text =~ "Linear Simulator Compatibility Report"
       assert text =~ "Missing simulator fields:"
       assert text =~ "Issue.branchName used by symphony_linear_poll"
+      assert text =~ "Unimplemented reference fields (on implemented types):"
+      assert text =~ "Comment.url"
+      assert text =~ "Observed unsupported operations:"
+      assert text =~ ~s|Cannot query field "url" on type "Comment".|
       assert text =~ "Behavioral gaps:"
       assert text =~ "hasNextPage"
     end
@@ -55,6 +61,8 @@ defmodule LinearSim.Compat.ReportTest do
       assert decoded["curatedCount"] == 12
       assert decoded["validateAgainstSimulator"] == "2/3"
       assert decoded["replaySuccessful"] == "11/12"
+      assert decoded["unimplementedReferenceFields"] == ["Comment.url"]
+      assert decoded["observedUnsupported"] == [~s|Cannot query field "url" on type "Comment".|]
     end
   end
 end

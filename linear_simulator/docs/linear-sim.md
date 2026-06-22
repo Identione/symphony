@@ -2236,7 +2236,12 @@ The report should include:
 - Missing arguments.
 - Missing input fields.
 - Missing enum values.
+- Unimplemented reference fields: real Linear fields absent from simulator types
+  that *are* implemented — the proactive counterpart to the curated-operation
+  signal above, and the class the ENG-10 `Comment.url` gap belonged to.
 - Stale simulator fields not present in Linear reference schema.
+- Observed unsupported operations: distinct schema-validation errors real clients
+  already hit, surfaced from `UnsupportedRecorder` (the reactive signal).
 - Behavioral gaps documented in metadata.
 ```
 
@@ -2260,9 +2265,16 @@ Missing simulator fields:
 - Issue.url used by issue_details
 - ProjectMilestone.name used by project_overview
 
-Missing simulator input fields:
-- IssueFilter.archived used by archived_issues
-- IssueUpdateInput.priorityLabel used by issue_update
+Unimplemented reference fields (on implemented types):
+- Comment.editedAt
+- Comment.reactions
+- Issue.subscribers
+
+Stale simulator fields:
+- RootQueryType.apiVersion
+
+Observed unsupported operations:
+- Cannot query field "url" on type "Comment".
 
 Behavioral gaps:
 - issues pagination currently returns hasNextPage=false always
@@ -2296,6 +2308,7 @@ Advisory checks:
 ```text
 - Simulator schema diff versus Linear reference.
 - Stale simulator fields.
+- Unimplemented reference fields on implemented types.
 - Missing unused Linear fields.
 - Behavior gaps marked as TODO.
 ```

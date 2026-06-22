@@ -41,6 +41,12 @@ defmodule LinearSimWeb.GraphQL.Types.CommonTypes do
     field :in, list_of(non_null(:id))
   end
 
+  @desc "Number comparator subset used by symphony filters (Linear's NumberComparator)."
+  input_object :number_comparator do
+    field :eq, :integer
+    field :in, list_of(non_null(:integer))
+  end
+
   @desc "commentCreate / commentUpdate payload."
   object :comment_payload do
     field :success, non_null(:boolean)

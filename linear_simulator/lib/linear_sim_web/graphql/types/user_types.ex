@@ -11,6 +11,12 @@ defmodule LinearSimWeb.GraphQL.Types.UserTypes do
     field :name, :string
     field :email, :string
     field :display_name, :string, resolve: &UserResolver.display_name/3
+
+    field :assigned_issues, :issue_connection do
+      arg(:first, :integer)
+      arg(:after, :string)
+      resolve(&UserResolver.assigned_issues/3)
+    end
   end
 
   object :user_edge do

@@ -28,6 +28,10 @@ defmodule LinearSimWeb.GraphQL.Resolvers.TeamResolver do
   def state_team(%{team: %Ecto.Association.NotLoaded{}}, _args, _resolution), do: {:ok, nil}
   def state_team(%{team: team}, _args, _resolution), do: {:ok, team}
 
+  @doc "Resolves `WorkflowState.position`, coercing the stored integer to Linear's `Float!`."
+  @spec state_position(map(), map(), Absinthe.Resolution.t()) :: {:ok, float() | nil}
+  def state_position(%{position: position}, _args, _resolution), do: {:ok, position && position / 1}
+
   @doc "Resolves the root `workflowStates(filter:)` query into a connection."
   @spec workflow_states(map(), map(), Absinthe.Resolution.t()) :: {:ok, map()}
   def workflow_states(_parent, args, resolution) do

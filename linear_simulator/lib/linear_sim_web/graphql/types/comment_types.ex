@@ -14,6 +14,7 @@ defmodule LinearSimWeb.GraphQL.Types.CommentTypes do
     field :user, :user, resolve: &CommentResolver.user/3
     field :created_at, :datetime, resolve: &CommentResolver.created_at/3
     field :updated_at, :datetime
+    field :url, :string, resolve: &CommentResolver.url/3
   end
 
   object :comment_edge do

@@ -13,6 +13,7 @@ defmodule LinearSimWeb.GraphQL.Types.IssueTypes do
     field :name, non_null(:string)
     field :type, :string
     field :color, :string
+    field :position, :float, resolve: &TeamResolver.state_position/3
     field :team, :team, resolve: &TeamResolver.state_team/3
   end
 
@@ -169,6 +170,7 @@ defmodule LinearSimWeb.GraphQL.Types.IssueTypes do
 
   input_object :issue_filter do
     field :id, :id_comparator
+    field :number, :number_comparator
     field :project, :project_filter
     field :state, :workflow_state_filter
   end

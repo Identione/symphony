@@ -203,12 +203,35 @@ defmodule LinearSim.Linear do
   def list_issues(nil, _filter), do: []
 
   def list_issues(%Organization{} = org, filter) do
+    org
+    |> issue_base_query()
+    |> apply_issue_filter(filter)
+    |> Repo.all()
+  end
+
+  # Org-scoped, archived-excluded, deterministically-ordered issue query with the
+  # standard nested preloads — the shared base for `list_issues/2` and
+  # `list_issues_for_assignee/2`.
+  defp issue_base_query(%Organization{} = org) do
     Issue
     |> where([i], i.organization_id == ^org.id)
     |> where([i], is_nil(i.archived_at))
-    |> apply_issue_filter(filter)
     |> order_by([i], asc: i.inserted_at, asc: i.id)
     |> preload(^@issue_preloads)
+  end
+
+  @doc """
+  Lists issues assigned to a user within the org (archived excluded), ordered and
+  preloaded like `list_issues/2` so nested GraphQL fields resolve. Backs
+  `User.assignedIssues`.
+  """
+  @spec list_issues_for_assignee(Organization.t() | nil, String.t()) :: [Issue.t()]
+  def list_issues_for_assignee(nil, _user_id), do: []
+
+  def list_issues_for_assignee(%Organization{} = org, user_id) do
+    org
+    |> issue_base_query()
+    |> where([i], i.assignee_id == ^user_id)
     |> Repo.all()
   end
 
@@ -314,6 +337,7 @@ defmodule LinearSim.Linear do
     |> Comment.changeset(attrs)
     |> validate_issue_exists()
     |> Repo.insert()
+    |> preload_comment_issue()
   end
 
   defp validate_issue_exists(changeset) do
@@ -332,9 +356,15 @@ defmodule LinearSim.Linear do
   def update_comment(id, attrs) do
     case Repo.get(Comment, id) do
       nil -> {:error, :not_found}
-      comment -> comment |> Comment.changeset(attrs) |> Repo.update()
+      comment -> comment |> Comment.changeset(attrs) |> Repo.update() |> preload_comment_issue()
     end
   end
+
+  # Preloads `:issue` on a mutation's returned comment so `Comment.url` can build
+  # its permalink (read paths attach the parent issue directly; mutation payloads
+  # don't, so without this `commentCreate { comment { url } }` would resolve nil).
+  defp preload_comment_issue({:ok, comment}), do: {:ok, Repo.preload(comment, :issue)}
+  defp preload_comment_issue(other), do: other
 
   @doc """
   Updates an issue (by internal id or identifier). Accepts scalar/FK fields
@@ -773,6 +803,7 @@ defmodule LinearSim.Linear do
   defp apply_issue_filter(query, filter) when is_map(filter) do
     query
     |> filter_by_ids(get_in(filter, [:id, :in]))
+    |> filter_by_number(get_in(filter, [:number, :eq]) || get_in(filter, [:number, :in]))
     |> filter_by_project_slug(get_in(filter, [:project, :slug_id, :eq]))
     |> filter_by_state_names(get_in(filter, [:state, :name, :in]))
   end
@@ -781,6 +812,10 @@ defmodule LinearSim.Linear do
 
   defp filter_by_ids(query, nil), do: query
   defp filter_by_ids(query, ids) when is_list(ids), do: where(query, [i], i.id in ^ids)
+
+  defp filter_by_number(query, nil), do: query
+  defp filter_by_number(query, eq) when is_integer(eq), do: where(query, [i], i.number == ^eq)
+  defp filter_by_number(query, ns) when is_list(ns), do: where(query, [i], i.number in ^ns)
 
   defp filter_by_project_slug(query, nil), do: query
 

@@ -14,6 +14,12 @@ defmodule LinearSimWeb.GraphQL.Resolvers.UserResolver do
   @spec display_name(map(), map(), Absinthe.Resolution.t()) :: {:ok, String.t() | nil}
   def display_name(%{name: name}, _args, _resolution), do: {:ok, name}
 
+  @doc "Resolves `User.assignedIssues` into a connection of the user's assigned issues."
+  @spec assigned_issues(map(), map(), Absinthe.Resolution.t()) :: {:ok, map()}
+  def assigned_issues(%{id: user_id}, args, resolution) do
+    {:ok, Connection.from_nodes(Linear.list_issues_for_assignee(org(resolution), user_id), args)}
+  end
+
   defp org(%{context: %{current_organization: org}}), do: org
   defp org(_), do: nil
 end
