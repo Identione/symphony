@@ -146,6 +146,19 @@ defmodule SymphonyElixir.Config do
     end
   end
 
+  @doc """
+  Human-readable label for the active coding agent, based on `agent.kind`
+  (SPEC.md §10.1). Used in prompts that name the agent to itself. Defaults to
+  `"Codex"`.
+  """
+  @spec agent_label() :: String.t()
+  def agent_label do
+    case settings!().agent.kind do
+      "claude" -> "Claude"
+      _ -> "Codex"
+    end
+  end
+
   @doc "Per-turn timeout (ms) for the active adapter."
   @spec active_turn_timeout_ms(Schema.t()) :: pos_integer()
   def active_turn_timeout_ms(%Schema{} = settings) do
