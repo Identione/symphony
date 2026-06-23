@@ -71,7 +71,7 @@ Work only in the provided repository copy. Do not touch any other path.
 
 ## Linear access
 
-All Linear access goes through Symphony's injected `linear_graphql` tool (exposed as `mcp__symphony__linear_graphql`). Use it for every Linear read and write. Do **not** call `mcp__plugin_linear_linear__*` or any other "Linear MCP" plugin tools — they are not available in this session and will be denied; reaching for them only wastes a turn. If `linear_graphql` is not present, stop and ask the user to configure Linear. See the `linear` skill for query/mutation recipes.
+All Linear access goes through Symphony's injected `linear_graphql` tool (exposed as `mcp__symphony__linear_graphql`). Use it for every Linear read and write, **except** workpad comment syncs — those use the companion `sync_workpad` tool (`mcp__symphony__sync_workpad`), which reads the body from a local `workpad.md` so the multi-KB payload never enters the conversation context (and is not re-paid on every cache_read). Do **not** call `mcp__plugin_linear_linear__*` or any other "Linear MCP" plugin tools — they are not available in this session and will be denied; reaching for them only wastes a turn. If `linear_graphql` is not present, stop and ask the user to configure Linear. See the `linear` skill for query/mutation recipes and the `sync_workpad` lifecycle.
 
 ## Skills
 
@@ -114,7 +114,7 @@ Before reusing a branch, check its PR: if the branch's PR is `CLOSED` or `MERGED
 
 For `Todo` (already moved to `In Progress`) or `In Progress`:
 
-1. Open the workpad: search active/unresolved comments for `## Symphony Workpad`; reuse it if present, otherwise create exactly one. Persist its comment ID and write all progress only to that ID.
+1. Open the workpad: search active/unresolved comments for `## Symphony Workpad`; reuse it if present, otherwise create exactly one. Persist its comment ID and write all progress only to that ID. Edit a local `workpad.md` (absolute path required) and push it with the `sync_workpad` tool — first sync omits `comment_id` and returns `comment.id` (persist it); later syncs pass that id. Keep `## Symphony Workpad` as the first heading so the marker still resolves.
 2. Reconcile before new edits: check off done items, expand/fix the plan for current scope, and confirm `Acceptance Criteria` and `Validation` still fit.
 3. Write/refresh a hierarchical plan in the workpad, including:
    - a one-line **deliverable determination**: not every issue is resolved by code. Some are resolved by a documentation/decision record, by recording a deferral, or by closing as already-satisfied. Signals for a non-code resolution: markers like `(deferred)`, "defer", "spike/investigate/decide whether", "behind a flag", "out of scope", or work gated on a precondition that is not yet true; or a sibling issue resolved the same way. When the resolution is non-code, follow the repo's established pattern for it instead of forcing an implementation. If build-vs-defer intent is genuinely ambiguous, pick the safest interpretation, proceed without stalling, and record the assumption so the handoff surfaces it.

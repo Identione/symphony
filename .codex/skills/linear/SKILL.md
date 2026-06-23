@@ -2,7 +2,9 @@
 name: linear
 description: |
   Use Symphony's `linear_graphql` client tool for raw Linear GraphQL
-  operations such as comment editing and upload flows.
+  operations such as comment editing and upload flows. Use the companion
+  `sync_workpad` tool for workpad comment syncs so the multi-KB body stays
+  out of the conversation context.
 ---
 
 # Linear GraphQL
@@ -14,7 +16,14 @@ Use this skill for raw Linear GraphQL work during Symphony app-server sessions.
 Use the `linear_graphql` client tool exposed by Symphony's app-server session.
 It reuses Symphony's configured Linear auth for the session. Do **not** use
 `mcp__plugin_linear_linear__*` or any other "Linear MCP" plugin tools — they are
-denied in Symphony sessions; `linear_graphql` is the only supported Linear path.
+denied in Symphony sessions; `linear_graphql` is the only supported raw Linear
+path.
+
+For the persistent `## Symphony Workpad` comment specifically, prefer the
+`sync_workpad` companion tool described in
+[Workpad syncs via `sync_workpad`](#workpad-syncs-via-sync_workpad). It funnels
+through `linear_graphql` under the hood, so all the recipes below still apply
+to every other Linear operation.
 
 Tool input:
 
@@ -383,6 +392,48 @@ mutation FileUpload(
   }
 }
 ```
+
+## Workpad syncs via `sync_workpad`
+
+`sync_workpad` is the second client-side tool Symphony exposes. It exists to
+keep the `## Symphony Workpad` comment body out of the conversation context:
+the agent edits a local `workpad.md` for free, and the tool reads the body on
+the Elixir side (via `File.read/1`) before forwarding `commentCreate` /
+`commentUpdate` through the same `linear_graphql` transport (so telemetry and
+`symphony_hint` enrichment still apply).
+
+Tool input:
+
+```json
+{
+  "issue_id": "ENG-42",
+  "file_path": "/abs/path/to/workpad.md",
+  "comment_id": "optional-existing-comment-id"
+}
+```
+
+Lifecycle:
+
+- **First sync** — omit `comment_id`. The tool calls `commentCreate` and the
+  response includes `commentCreate.comment.id`. Persist that id locally (e.g.
+  alongside the `workpad.md`) — you will need it for every later sync.
+- **Later syncs** — pass the persisted `comment_id`. The tool calls
+  `commentUpdate` against that comment so a single workpad is reused instead of
+  spawning duplicates.
+
+Rules:
+
+- `file_path` **must be absolute**. The tool reads the file in the daemon
+  process whose cwd is the instance dir (not your workspace), so a relative
+  path will resolve against the wrong root.
+- The local file must be non-empty; empty files are rejected before any Linear
+  call is made.
+- Keep `## Symphony Workpad` as the very first heading of `workpad.md`. The
+  in-process `Workpad.find/1` resolver (used by deterministic-failure and
+  overseer flows) looks for that exact marker text.
+- Use `linear_graphql` directly for everything else (issue lookups, state
+  moves, attachments, ad-hoc reads/writes) — `sync_workpad` only handles the
+  one workpad comment.
 
 ## Usage rules
 

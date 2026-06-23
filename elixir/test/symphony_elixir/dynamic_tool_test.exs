@@ -3,23 +3,45 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
   alias SymphonyElixir.Codex.DynamicTool
 
-  test "tool_specs advertises the linear_graphql input contract" do
-    assert [
-             %{
-               "description" => description,
-               "inputSchema" => %{
-                 "properties" => %{
-                   "query" => _,
-                   "variables" => _
-                 },
-                 "required" => ["query"],
-                 "type" => "object"
-               },
-               "name" => "linear_graphql"
-             }
-           ] = DynamicTool.tool_specs()
+  test "tool_specs advertises the linear_graphql and sync_workpad input contracts" do
+    specs = DynamicTool.tool_specs()
+    names = Enum.map(specs, & &1["name"])
 
-    assert description =~ "Linear"
+    assert "linear_graphql" in names
+    assert "sync_workpad" in names
+
+    linear_spec = Enum.find(specs, &(&1["name"] == "linear_graphql"))
+
+    assert %{
+             "description" => linear_description,
+             "inputSchema" => %{
+               "properties" => %{
+                 "query" => _,
+                 "variables" => _
+               },
+               "required" => ["query"],
+               "type" => "object"
+             }
+           } = linear_spec
+
+    assert linear_description =~ "Linear"
+
+    workpad_spec = Enum.find(specs, &(&1["name"] == "sync_workpad"))
+
+    assert %{
+             "description" => workpad_description,
+             "inputSchema" => %{
+               "properties" => %{
+                 "issue_id" => _,
+                 "file_path" => _,
+                 "comment_id" => _
+               },
+               "required" => ["issue_id", "file_path"],
+               "type" => "object"
+             }
+           } = workpad_spec
+
+    assert workpad_description =~ "workpad"
   end
 
   test "unsupported tools return a failure payload with the supported tool list" do
@@ -30,7 +52,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert Jason.decode!(response["output"]) == %{
              "error" => %{
                "message" => ~s(Unsupported dynamic tool: "not_a_real_tool".),
-               "supportedTools" => ["linear_graphql"]
+               "supportedTools" => ["linear_graphql", "sync_workpad"]
              }
            }
 
@@ -527,5 +549,111 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert log =~ "linear_graphql_call"
     assert log =~ "status=rejected"
     assert log =~ "reason=missing_query"
+  end
+
+  # ── sync_workpad ───────────────────────────────────────────────────
+
+  defp write_tmp_workpad(content) do
+    path = Path.join(System.tmp_dir!(), "test_workpad_#{:erlang.unique_integer([:positive])}.md")
+    File.write!(path, content)
+    path
+  end
+
+  test "sync_workpad creates a comment from file when no comment_id given" do
+    test_pid = self()
+    path = write_tmp_workpad("## Codex Workpad\n\nProgress.")
+
+    response =
+      DynamicTool.execute(
+        "sync_workpad",
+        %{"issue_id" => "ENG-42", "file_path" => path},
+        linear_client: fn query, variables, _opts ->
+          send(test_pid, {:graphql, query, variables})
+          {:ok, %{"data" => %{"commentCreate" => %{"success" => true, "comment" => %{"id" => "c1", "url" => "https://linear.app/c1"}}}}}
+        end
+      )
+
+    assert_received {:graphql, query, %{"issueId" => "ENG-42", "body" => "## Codex Workpad\n\nProgress."}}
+    assert query =~ "commentCreate"
+    assert response["success"] == true
+  end
+
+  test "sync_workpad updates an existing comment when comment_id given" do
+    test_pid = self()
+    path = write_tmp_workpad("Updated.")
+
+    response =
+      DynamicTool.execute(
+        "sync_workpad",
+        %{"issue_id" => "ENG-42", "file_path" => path, "comment_id" => "c1"},
+        linear_client: fn query, variables, _opts ->
+          send(test_pid, {:graphql, query, variables})
+          {:ok, %{"data" => %{"commentUpdate" => %{"success" => true, "comment" => %{"id" => "c1", "url" => "https://linear.app/c1"}}}}}
+        end
+      )
+
+    assert_received {:graphql, query, %{"id" => "c1", "body" => "Updated."}}
+    assert query =~ "commentUpdate"
+    assert response["success"] == true
+  end
+
+  test "sync_workpad validates required arguments before calling Linear" do
+    no_issue =
+      DynamicTool.execute(
+        "sync_workpad",
+        %{"file_path" => "/tmp/x"},
+        linear_client: fn _query, _variables, _opts ->
+          flunk("linear client should not be called when arguments are invalid")
+        end
+      )
+
+    assert no_issue["success"] == false
+    assert [%{"text" => no_issue_text}] = no_issue["contentItems"]
+    assert Jason.decode!(no_issue_text)["error"]["message"] =~ "issue_id"
+
+    no_path =
+      DynamicTool.execute(
+        "sync_workpad",
+        %{"issue_id" => "ENG-42"},
+        linear_client: fn _query, _variables, _opts ->
+          flunk("linear client should not be called when arguments are invalid")
+        end
+      )
+
+    assert no_path["success"] == false
+    assert [%{"text" => no_path_text}] = no_path["contentItems"]
+    assert Jason.decode!(no_path_text)["error"]["message"] =~ "file_path"
+  end
+
+  test "sync_workpad rejects an empty workpad file" do
+    path = write_tmp_workpad("")
+
+    response =
+      DynamicTool.execute(
+        "sync_workpad",
+        %{"issue_id" => "ENG-42", "file_path" => path},
+        linear_client: fn _query, _variables, _opts ->
+          flunk("linear client should not be called when the file is empty")
+        end
+      )
+
+    assert response["success"] == false
+    assert [%{"text" => text}] = response["contentItems"]
+    assert Jason.decode!(text)["error"]["message"] =~ "file is empty"
+  end
+
+  test "sync_workpad reports unreadable file paths" do
+    response =
+      DynamicTool.execute(
+        "sync_workpad",
+        %{"issue_id" => "ENG-42", "file_path" => "/tmp/does_not_exist_#{:erlang.unique_integer([:positive])}.md"},
+        linear_client: fn _query, _variables, _opts ->
+          flunk("linear client should not be called when the file cannot be read")
+        end
+      )
+
+    assert response["success"] == false
+    assert [%{"text" => text}] = response["contentItems"]
+    assert Jason.decode!(text)["error"]["message"] =~ "cannot read"
   end
 end

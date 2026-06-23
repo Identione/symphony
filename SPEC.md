@@ -1473,10 +1473,10 @@ Unsupported dynamic tool calls:
 Optional client-side tool extension:
 
 - An adapter MAY expose a limited set of client-side tools to its session.
-- Current standardized optional tool: `linear_graphql`.
+- Current standardized optional tools: `linear_graphql` and `sync_workpad`.
 - If implemented, supported tools SHOULD be advertised to the session during startup using the
   mechanism the adapter exposes (Codex app-server tool advertisement; Claude Agent SDK in-process
-  MCP `@tool`/`tool()` registration). The contract below is adapter-agnostic.
+  MCP `@tool`/`tool()` registration). The contracts below are adapter-agnostic.
 - Unsupported tool names SHOULD still return a failure result and continue the session.
 
 `linear_graphql` extension contract (adapter-agnostic):
@@ -1518,6 +1518,37 @@ Optional client-side tool extension:
   the `IssueRelationType` enum has only `blocks`; `blocked_by` is rejected at variable coercion, so
   the hint explains that direction is encoded by operand order and the agent must swap
   `issueId`/`relatedIssueId` rather than change the type value.)
+
+`sync_workpad` extension contract (adapter-agnostic):
+
+- Purpose: create or update a single workpad comment on a Linear issue without paying the
+  multi-KB body cost on every tool-call replay. The agent edits a local markdown file; the tool
+  reads the body on the implementation side and forwards a narrow `commentCreate` /
+  `commentUpdate` mutation through the same `linear_graphql` transport (so telemetry and
+  corrective hints from the `linear_graphql` contract above continue to apply).
+- Availability: only meaningful when `tracker.kind == "linear"` and valid Linear auth is
+  configured (same preconditions as `linear_graphql`).
+- Input shape:
+
+  ```json
+  {
+    "issue_id": "Linear issue identifier or internal UUID",
+    "file_path": "absolute path to a local markdown file",
+    "comment_id": "optional existing comment id to update"
+  }
+  ```
+
+- `issue_id` MUST be a non-empty string.
+- `file_path` MUST be a non-empty string and is REQUIRED to be absolute; implementations resolve
+  it in the daemon process whose cwd is not the agent workspace.
+- When `comment_id` is absent, the tool MUST call `commentCreate` and return the new comment id
+  so the agent can persist it for subsequent syncs.
+- When `comment_id` is present and non-empty, the tool MUST call `commentUpdate` against that id.
+- Implementations MUST reject empty files and unreadable paths before contacting Linear, and
+  surface those as `success=false` tool results that name the cause (`file is empty`,
+  `cannot read`).
+- The tool MUST NOT echo the file contents back into the tool-call arguments — that is the whole
+  point of routing through a local read.
 
 User-input-required policy:
 
@@ -1638,8 +1669,8 @@ Approval/sandbox: use the Codex `AskForApproval` / `SandboxMode` / `SandboxPolic
 from `agent.codex.approval_policy` / `agent.codex.thread_sandbox` / `agent.codex.turn_sandbox_policy`.
 The §15.2 workspace-cwd safety invariants MUST hold.
 
-Tool advertisement: when implemented, `linear_graphql` is advertised through the Codex app-server
-tool mechanism for the targeted version.
+Tool advertisement: when implemented, `linear_graphql` and `sync_workpad` are advertised
+through the Codex app-server tool mechanism for the targeted version.
 
 ### 10.8 Claude Agent SDK Adapter (Implementation)
 
@@ -1782,11 +1813,11 @@ Approval / sandbox mapping:
 
 Tool advertisement:
 
-- `linear_graphql` (when implemented) is registered as an in-process SDK tool through
-  `create_sdk_mcp_server` + `@tool`, not as a separate stdio MCP shim; the SDK's tool-call
+- `linear_graphql` and `sync_workpad` (when implemented) are registered as in-process SDK tools
+  through `create_sdk_mcp_server` + `@tool`, not as separate stdio MCP shims; the SDK's tool-call
   control protocol delivers invocations to the sidecar, which forwards them to Symphony as
-  `tool_call` events. The tool MUST appear in `agent.claude.allowed_tools` (under its
-  `mcp__<server>__linear_graphql` SDK name) for `dontAsk` mode to permit invocation.
+  `tool_call` events. Each tool MUST appear in `agent.claude.allowed_tools` (under its
+  `mcp__<server>__<tool_name>` SDK name) for `dontAsk` mode to permit invocation.
 - Custom tool errors SHOULD be returned as `is_error=True` tool responses so the agent loop
   continues and Claude can recover, rather than raising exceptions that tear down the session.
 
@@ -3089,6 +3120,9 @@ Use the same validation profiles as Section 17:
   exposes the baseline endpoints/error semantics in Section 13.7 if shipped.
 - `linear_graphql` client-side tool extension exposes raw Linear GraphQL access through the active
   adapter's session using configured Symphony auth (per §10.4).
+- `sync_workpad` client-side tool extension (per §10.4) keeps the persistent workpad comment body
+  out of the conversation context by reading it from a local file before forwarding through the
+  same Linear transport as `linear_graphql`.
 - Claude Agent SDK adapter (per §10.8) exposes Symphony orchestration through `claude-agent-sdk`
   as an additional `agent.kind` option.
 - TODO: Persist retry queue and session metadata across process restarts.

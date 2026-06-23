@@ -589,6 +589,7 @@ defmodule SymphonyElixir.CLI.Init do
         #  - TodoWrite
         #  - NotebookEdit
         #  - mcp__symphony__linear_graphql   # in-process Linear tool (auth stays in Symphony)
+        #  - mcp__symphony__sync_workpad     # in-process workpad sync (reads body from local file)
         #  #- mcp__lsp                        # project .mcp.json servers need mcp__<server> here
         # setting_sources unset → loads the target repo's .claude/settings.json,
         # .mcp.json servers, and CLAUDE.md (contained by jai). Set [] to isolate.
