@@ -21,6 +21,13 @@ config :linear_sim, LinearSimWeb.Endpoint,
   secret_key_base: "pgMrDsbLUJ1mgQVAK+JduwFcuVrRMcf3c7AVJTdb6FOoQ3PUrOMPf2Q6f6bKW7PD",
   server: false
 
+# Keep unsupported-operation recording out of priv/ during tests — its own test
+# overrides this path per-run; everything else writes to a throwaway temp file.
+config :linear_sim, :unsupported_operations,
+  enabled: true,
+  path: Path.join(System.tmp_dir!(), "linear_sim_unsupported_test.jsonl"),
+  redact_variables: ["accessToken", "apiKey", "password", "token"]
+
 # Print only warnings and errors during test
 config :logger, level: :warning
 

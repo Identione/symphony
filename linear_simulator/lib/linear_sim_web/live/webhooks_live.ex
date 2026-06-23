@@ -65,7 +65,7 @@ defmodule LinearSimWeb.WebhooksLive do
     assigns = assign(assigns, :event_types, @event_types)
 
     ~H"""
-    <.shell active={@active} scenario={@scenario} mode={@mode} capturing={@capturing}>
+    <.shell active={@active} scenario={@scenario} mode={@mode} capturing={@capturing} unsupported_count={@unsupported_count} show_unsupported={@show_unsupported} unsupported_entries={@unsupported_entries}>
       <h2 class="text-xl font-bold mb-4">Webhooks</h2>
 
       <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">

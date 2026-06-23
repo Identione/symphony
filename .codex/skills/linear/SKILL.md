@@ -12,7 +12,9 @@ Use this skill for raw Linear GraphQL work during Symphony app-server sessions.
 ## Primary tool
 
 Use the `linear_graphql` client tool exposed by Symphony's app-server session.
-It reuses Symphony's configured Linear auth for the session.
+It reuses Symphony's configured Linear auth for the session. Do **not** use
+`mcp__plugin_linear_linear__*` or any other "Linear MCP" plugin tools — they are
+denied in Symphony sessions; `linear_graphql` is the only supported Linear path.
 
 Tool input:
 

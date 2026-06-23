@@ -49,18 +49,24 @@ defmodule LinearSim.Scenarios.Common do
         name: "Engineering"
       })
 
-    # The full set of workflow states symphony's default workflow references
-    # (active: Todo/In Progress/Merging/Rework; terminal: Canceled/Duplicate/Done),
-    # plus In Review. Keeps `make preflight` state-coverage green out of the box.
+    # Mirrors the real Linear IDE team's workflow states exactly — same names,
+    # types, and colors (colors fetched live from the Linear API). Symphony's
+    # default workflow references the active states (Todo/In Progress/Merging/
+    # Rework/Human Review) and terminal ones (Done/Canceled/Duplicate); Backlog
+    # and In Review round out the board. Keeps `make preflight` green out of the box.
     states = %{
-      todo: insert_state!(team, "state_todo", "Todo", "unstarted", 1),
-      in_progress: insert_state!(team, "state_in_progress", "In Progress", "started", 2),
-      in_review: insert_state!(team, "state_in_review", "In Review", "started", 3),
-      merging: insert_state!(team, "state_merging", "Merging", "started", 4),
-      rework: insert_state!(team, "state_rework", "Rework", "started", 5),
-      done: insert_state!(team, "state_done", "Done", "completed", 6),
-      canceled: insert_state!(team, "state_canceled", "Canceled", "canceled", 7),
-      duplicate: insert_state!(team, "state_duplicate", "Duplicate", "canceled", 8)
+      backlog: insert_state!(team, "state_backlog", "Backlog", "backlog", "#bec2c8", 1),
+      todo: insert_state!(team, "state_todo", "Todo", "unstarted", "#e2e2e2", 2),
+      in_progress:
+        insert_state!(team, "state_in_progress", "In Progress", "started", "#f2c94c", 3),
+      in_review: insert_state!(team, "state_in_review", "In Review", "started", "#0f783c", 4),
+      human_review:
+        insert_state!(team, "state_human_review", "Human Review", "started", "#4cb782", 5),
+      rework: insert_state!(team, "state_rework", "Rework", "started", "#4cb782", 6),
+      merging: insert_state!(team, "state_merging", "Merging", "started", "#4cb782", 7),
+      done: insert_state!(team, "state_done", "Done", "completed", "#5e6ad2", 8),
+      canceled: insert_state!(team, "state_canceled", "Canceled", "canceled", "#95a2b3", 9),
+      duplicate: insert_state!(team, "state_duplicate", "Duplicate", "duplicate", "#95a2b3", 10)
     }
 
     project =
@@ -89,13 +95,15 @@ defmodule LinearSim.Scenarios.Common do
   end
 
   @doc "Inserts a workflow state for the given team."
-  @spec insert_state!(struct(), String.t(), String.t(), String.t(), integer()) :: struct()
-  def insert_state!(team, id, name, type, position) do
+  @spec insert_state!(struct(), String.t(), String.t(), String.t(), String.t(), integer()) ::
+          struct()
+  def insert_state!(team, id, name, type, color, position) do
     Repo.insert!(%WorkflowState{
       id: id,
       team_id: team.id,
       name: name,
       type: type,
+      color: color,
       position: position
     })
   end

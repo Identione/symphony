@@ -12,7 +12,7 @@
   "expected": {
     "allowErrors": false,
     "paths": {
-      "data.projects.nodes.0.teams.nodes.0.states.nodes.0.name": "Todo"
+      "data.projects.nodes.0.teams.nodes.0.states.nodes.0.name": "Backlog"
     }
   }
 }

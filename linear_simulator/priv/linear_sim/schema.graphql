@@ -7,28 +7,149 @@ type RootQueryType {
   "The currently authenticated user, resolved from the bearer token."
   viewer: User
 
+  "List the organization's users."
+  users(first: Int, after: String): UserConnection
+
   "List issues, filtered Linear-style by project\/state\/id."
   issues(filter: IssueFilter, first: Int, after: String, last: Int, before: String): IssueConnection
 
   "Fetch a single issue by internal id or ticket identifier."
   issue(id: String!): Issue
 
+  "List the workspace's labels."
+  issueLabels(first: Int, after: String): LabelConnection
+
+  "List the organization's teams."
+  teams(first: Int, after: String): TeamConnection
+
+  "Fetch a single team by internal id or team key (e.g. `ENG`)."
+  team(id: String!): Team
+
+  "List workflow states across the organization's teams, optionally filtered."
+  workflowStates(filter: WorkflowStateFilter, first: Int, after: String): WorkflowStateConnection
+
   "List projects, filtered Linear-style by slug."
   projects(filter: ProjectFilter, first: Int, after: String): ProjectConnection
+
+  "Fetch a single project by internal id or slug."
+  project(id: String!): Project
+
+  "Fetch a single attachment by id."
+  attachment(id: String!): Attachment
+
+  "List attachments matching a url (Linear's attachmentsForURL)."
+  attachmentsForUrl(url: String!, first: Int, after: String): AttachmentConnection
 
   "Simulator API version. Placeholder query used by skeleton smoke tests."
   apiVersion: String!
 }
 
 type RootMutationType {
-  "Update an issue (e.g. transition its workflow state)."
+  "Create an issue. Auto-assigns the identifier\/number\/url\/branchName."
+  issueCreate(input: IssueCreateInput!): IssuePayload
+
+  "Update an issue (state transition and\/or title\/description\/assignee\/priority\/project)."
   issueUpdate(id: String!, input: IssueUpdateInput!): IssuePayload
+
+  "Soft-archive an issue (sets archivedAt; drops it from the issues query)."
+  issueArchive(id: String!): IssueArchivePayload
+
+  "Permanently delete an issue. Comments\/relations cascade."
+  issueDelete(id: String!): IssueArchivePayload
+
+  "Attach a label to an issue."
+  issueAddLabel(id: String!, labelId: String!): IssuePayload
+
+  "Detach a label from an issue."
+  issueRemoveLabel(id: String!, labelId: String!): IssuePayload
+
+  "Create a workspace label."
+  issueLabelCreate(input: IssueLabelCreateInput!): IssueLabelPayload
+
+  "Create a directed relation between two issues."
+  issueRelationCreate(input: IssueRelationCreateInput!): IssueRelationPayload
+
+  "Delete an issue relation by id."
+  issueRelationDelete(id: String!): DeletePayload
 
   "Create a comment on an issue."
   commentCreate(input: CommentCreateInput!): CommentPayload
 
   "Update a comment's body."
   commentUpdate(id: String!, input: CommentUpdateInput!): CommentPayload
+
+  "Link a URL to an issue. Errors if the URL is already linked to the issue."
+  attachmentLinkUrl(
+    url: String!, issueId: String!, title: String, createAsUser: String, displayIconUrl: String, id: String
+  ): AttachmentPayload
+
+  "Link a GitHub PR to an issue. Errors if the URL is already linked."
+  attachmentLinkGitHubPr(
+    url: String!, issueId: String!, title: String, linkKind: GitLinkKind, createAsUser: String, displayIconUrl: String, id: String
+  ): AttachmentPayload
+
+  "Link a GitHub issue to a Linear issue. Errors if the URL is already linked."
+  attachmentLinkGitHubIssue(
+    url: String!, issueId: String!, title: String, createAsUser: String, displayIconUrl: String, id: String
+  ): AttachmentPayload
+
+  "Create an attachment. Upserts on (issue, url)."
+  attachmentCreate(input: AttachmentCreateInput!): AttachmentPayload
+
+  "Update an attachment's title\/subtitle."
+  attachmentUpdate(id: String!, input: AttachmentUpdateInput!): AttachmentPayload
+
+  "Delete an attachment by id."
+  attachmentDelete(id: String!): DeletePayload
+}
+
+"Git link kind for attachmentLinkGitHubPR (Linear's GitLinkKind)."
+enum GitLinkKind {
+  closes
+  contributes
+  links
+}
+
+"A link recorded on an issue (Linear's Attachment)."
+type Attachment {
+  id: ID!
+  title: String!
+  subtitle: String
+  url: String!
+  sourceType: String
+  source: JSONObject
+  metadata: JSONObject!
+  archivedAt: DateTime
+  createdAt: DateTime
+  updatedAt: DateTime
+  creator: User
+  issue: Issue
+}
+
+type AttachmentEdge {
+  cursor: String!
+  node: Attachment
+}
+
+type AttachmentConnection {
+  nodes: [Attachment]
+  edges: [AttachmentEdge]
+  pageInfo: PageInfo!
+}
+
+"Fields for creating an attachment (Linear's AttachmentCreateInput subset)."
+input AttachmentCreateInput {
+  id: String
+  issueId: String!
+  url: String!
+  title: String!
+  subtitle: String
+}
+
+"Fields for updating an attachment (Linear's AttachmentUpdateInput subset)."
+input AttachmentUpdateInput {
+  title: String
+  subtitle: String
 }
 
 "A Linear issue comment."
@@ -36,6 +157,7 @@ type Comment {
   id: ID!
   body: String!
   resolvedAt: DateTime
+  user: User
   createdAt: DateTime
   updatedAt: DateTime
 }
@@ -62,6 +184,51 @@ input CommentUpdateInput {
 
 input IssueUpdateInput {
   stateId: String
+  title: String
+  description: String
+  assigneeId: String
+  projectId: String
+  parentId: String
+  cycleId: String
+  priority: Int
+  labelIds: [String!]
+  addedLabelIds: [String!]
+  removedLabelIds: [String!]
+}
+
+"Fields for creating an issue. `teamId` drives the auto-assigned identifier."
+input IssueCreateInput {
+  teamId: String!
+  title: String!
+  description: String
+  stateId: String
+  assigneeId: String
+  projectId: String
+  parentId: String
+  cycleId: String
+  priority: Int
+  labelIds: [String!]
+}
+
+"Fields for creating a workspace label (Linear's IssueLabelCreateInput subset)."
+input IssueLabelCreateInput {
+  name: String!
+  color: String
+}
+
+"Directed relationship between two issues (Linear's IssueRelationType)."
+enum IssueRelationType {
+  blocks
+  duplicate
+  related
+  similar
+}
+
+"Fields for creating an issue relation (Linear's IssueRelationCreateInput)."
+input IssueRelationCreateInput {
+  type: IssueRelationType!
+  issueId: String!
+  relatedIssueId: String!
 }
 
 "A Linear project."
@@ -70,6 +237,7 @@ type Project {
   name: String
   slugId: String
   teams(first: Int, after: String): TeamConnection
+  issues(first: Int, after: String): IssueConnection
 }
 
 type TeamEdge {
@@ -99,6 +267,8 @@ type WorkflowState {
   id: ID!
   name: String!
   type: String
+  color: String
+  team: Team
 }
 
 "An issue label."
@@ -108,10 +278,12 @@ type Label {
   color: String
 }
 
-"A directed relation; `issue` is the source (e.g. the blocker)."
+"A directed relation; `issue` is the source, `relatedIssue` the target."
 type IssueRelation {
+  id: ID!
   type: String!
   issue: Issue
+  relatedIssue: Issue
 }
 
 "A Linear team."
@@ -136,10 +308,15 @@ type Issue {
   team: Team
   createdAt: DateTime
   updatedAt: DateTime
+  archivedAt: DateTime
   labels(first: Int, after: String): LabelConnection
   children(first: Int, after: String): IssueConnection
+  parent: Issue
+  project: Project
+  relations(first: Int, after: String): IssueRelationConnection
   inverseRelations(first: Int, after: String): IssueRelationConnection
   comments(first: Int, after: String, orderBy: PaginationOrderBy): CommentConnection
+  attachments(first: Int, after: String): AttachmentConnection
 }
 
 type IssueEdge {
@@ -190,8 +367,14 @@ input ProjectFilter {
   slugId: StringComparator
 }
 
+input WorkflowStateTeamFilter {
+  id: IdComparator
+  key: StringComparator
+}
+
 input WorkflowStateFilter {
   name: StringComparator
+  team: WorkflowStateTeamFilter
 }
 
 input IssueFilter {
@@ -205,7 +388,22 @@ type User {
   id: ID!
   name: String
   email: String
+  displayName: String
 }
+
+type UserEdge {
+  cursor: String!
+  node: User
+}
+
+type UserConnection {
+  nodes: [User]
+  edges: [UserEdge]
+  pageInfo: PageInfo!
+}
+
+"Arbitrary JSON object (Linear's JSONObject). Output-only in the simulator."
+scalar JSONObject
 
 "Relay page info."
 type PageInfo {
@@ -239,10 +437,40 @@ type CommentPayload {
   comment: Comment
 }
 
-"issueUpdate payload."
+"issueCreate \/ issueUpdate payload."
 type IssuePayload {
   success: Boolean!
   issue: Issue
+}
+
+"issueArchive \/ issueDelete payload (Linear's IssueArchivePayload)."
+type IssueArchivePayload {
+  success: Boolean!
+  entity: Issue
+}
+
+"issueLabelCreate payload (Linear's IssueLabelPayload)."
+type IssueLabelPayload {
+  success: Boolean!
+  issueLabel: Label
+}
+
+"issueRelationCreate payload (Linear's IssueRelationPayload)."
+type IssueRelationPayload {
+  success: Boolean!
+  issueRelation: IssueRelation
+}
+
+"Generic delete payload (Linear's DeletePayload)."
+type DeletePayload {
+  success: Boolean!
+  entityId: ID
+}
+
+"attachmentLink*\/attachmentCreate\/attachmentUpdate payload (Linear's AttachmentPayload)."
+type AttachmentPayload {
+  success: Boolean!
+  attachment: Attachment!
 }
 
 """

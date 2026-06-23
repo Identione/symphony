@@ -59,7 +59,11 @@ defmodule LinearSimWeb.EntitiesLive do
 
       issue ->
         {:noreply,
-         assign(socket, form_action: :edit, form_issue: issue_to_form(issue), form_errors: %{})}
+         assign(socket,
+           form_action: :edit,
+           form_issue: issue_to_form(issue, socket.assigns.users),
+           form_errors: %{}
+         )}
     end
   end
 
@@ -198,7 +202,7 @@ defmodule LinearSimWeb.EntitiesLive do
     }
   end
 
-  defp issue_to_form(issue) do
+  defp issue_to_form(issue, users) do
     %{
       "id" => issue.id,
       "identifier" => issue.identifier,
@@ -211,7 +215,8 @@ defmodule LinearSimWeb.EntitiesLive do
       "parent_id" => issue.parent_id || "",
       "priority" => (issue.priority && to_string(issue.priority)) || "",
       "label_ids" => Enum.map(issue.labels, & &1.id),
-      "relations" => relation_rows(issue)
+      "relations" => relation_rows(issue),
+      "activities" => activity_rows(issue, users)
     }
   end
 
@@ -219,6 +224,26 @@ defmodule LinearSimWeb.EntitiesLive do
     Enum.map(issue.relations, fn r ->
       %{"id" => r.id, "type" => r.type, "target" => r.related_issue && r.related_issue.identifier}
     end)
+  end
+
+  # An issue's activity feed. Comments are the only per-issue activity record in
+  # the simulator; newest-first for display.
+  defp activity_rows(issue, users) do
+    issue.id
+    |> Linear.list_comments()
+    |> Enum.sort_by(& &1.inserted_at, {:desc, DateTime})
+    |> Enum.map(fn c ->
+      %{"body" => c.body, "author" => author_name(c.user_id, users), "at" => c.inserted_at}
+    end)
+  end
+
+  defp author_name(nil, _users), do: "—"
+
+  defp author_name(user_id, users) do
+    case Enum.find(users, &(&1.id == user_id)) do
+      nil -> "—"
+      user -> user.name
+    end
   end
 
   # After a live relation add/remove, re-read the editing issue so the modal's
@@ -283,7 +308,7 @@ defmodule LinearSimWeb.EntitiesLive do
       |> assign(:relation_types, @relation_types)
 
     ~H"""
-    <.shell active={@active} scenario={@scenario} mode={@mode} capturing={@capturing}>
+    <.shell active={@active} scenario={@scenario} mode={@mode} capturing={@capturing} unsupported_count={@unsupported_count} show_unsupported={@show_unsupported} unsupported_entries={@unsupported_entries}>
       <div class="flex items-center justify-between mb-4">
         <h2 class="text-xl font-bold">Entities Browser</h2>
         <button
@@ -361,14 +386,25 @@ defmodule LinearSimWeb.EntitiesLive do
     <table :if={@rows != []} class="w-full text-left">
       <thead class="bg-surface-container-lowest">
         <tr class="border-b border-outline-variant">
-          <.th>Identifier</.th><.th>Title</.th><.th>State</.th><.th>Assignee</.th><.th>Labels</.th><.th>Branch</.th><.th>Updated</.th><.th>Actions</.th>
+          <.th>Identifier</.th><.th>Title</.th><.th>State</.th><.th>Project</.th><.th>Blocking</.th><.th>Assignee</.th><.th>Labels</.th><.th>Branch</.th><.th>Updated</.th><.th>Actions</.th>
         </tr>
       </thead>
       <tbody class="divide-y divide-outline-variant">
         <tr :for={issue <- @rows} class="hover:bg-surface-variant/20 transition-colors">
-          <td class="px-4 py-3 font-mono text-[13px] text-primary">{issue.identifier}</td>
+          <td class="px-4 py-3 font-mono text-[13px]">
+            <button
+              phx-click="edit_issue"
+              phx-value-id={issue.id}
+              title="Edit issue"
+              class="text-primary hover:underline"
+            >
+              {issue.identifier}
+            </button>
+          </td>
           <td class="px-4 py-3 text-[14px]">{issue.title}</td>
           <td class="px-4 py-3"><.state_pill state={issue.state} /></td>
+          <td class="px-4 py-3 text-[13px] text-on-surface-variant">{(issue.project && issue.project.name) || "—"}</td>
+          <td class="px-4 py-3"><.relation_pills issue={issue} /></td>
           <td class="px-4 py-3 text-[13px] text-on-surface-variant">{assignee_name(issue.assignee)}</td>
           <td class="px-4 py-3"><.label_pills labels={issue.labels} /></td>
           <td class="px-4 py-3 font-mono text-xs text-on-surface-variant">{issue.branch_name || "-"}</td>
@@ -610,6 +646,24 @@ defmodule LinearSimWeb.EntitiesLive do
             </button>
           </form>
         </div>
+
+        <%!-- Read-only activity feed (comments) for the issue being edited. --%>
+        <div :if={@action == :edit} class="px-5 pb-5 pt-1 border-t border-outline-variant">
+          <.field_label>Activity</.field_label>
+          <ul :if={@issue["activities"] != []} class="space-y-2">
+            <li
+              :for={act <- @issue["activities"]}
+              class="bg-surface-container-lowest border border-outline-variant rounded px-3 py-2 text-[13px]"
+            >
+              <div class="flex items-center justify-between text-[11px] text-on-surface-variant mb-1">
+                <span class="font-semibold text-on-surface">{act["author"]}</span>
+                <span>{format_time(act["at"])}</span>
+              </div>
+              <p class="whitespace-pre-wrap text-on-surface-variant">{act["body"]}</p>
+            </li>
+          </ul>
+          <p :if={@issue["activities"] == []} class="text-[12px] text-on-surface-variant">No activity yet.</p>
+        </div>
       </div>
     </div>
     """
@@ -629,6 +683,36 @@ defmodule LinearSimWeb.EntitiesLive do
   defp field_error(assigns) do
     ~H"""
     <p :for={msg <- Map.get(@errors, @field, [])} class="mt-1 text-[11px] text-red-400">{msg}</p>
+    """
+  end
+
+  attr :issue, :map, required: true
+
+  defp relation_pills(assigns) do
+    blocked_by =
+      for r <- assigns.issue.inverse_relations, r.type == "blocks", do: r.issue.identifier
+
+    blocks =
+      for r <- assigns.issue.relations, r.type == "blocks", do: r.related_issue.identifier
+
+    assigns = assign(assigns, blocked_by: blocked_by, blocks: blocks)
+
+    ~H"""
+    <div :if={@blocked_by != [] or @blocks != []} class="flex flex-wrap gap-1">
+      <span
+        :for={id <- @blocked_by}
+        class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border border-red-400/40 text-red-300 bg-red-400/10"
+      >
+        blocked by {id}
+      </span>
+      <span
+        :for={id <- @blocks}
+        class="inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold border border-amber-400/40 text-amber-300 bg-amber-400/10"
+      >
+        blocks {id}
+      </span>
+    </div>
+    <span :if={@blocked_by == [] and @blocks == []} class="text-on-surface-variant text-xs">—</span>
     """
   end
 
@@ -739,30 +823,20 @@ defmodule LinearSimWeb.EntitiesLive do
   end
 
   defp state_pill(assigns) do
-    {dot, text} = state_colors(assigns.state.type)
-    assigns = assign(assigns, dot: dot, text: text)
+    # Use the state's real Linear color (hex). The 8-digit suffixes give a faint
+    # tinted chip (~10% bg, ~33% border) around a solid dot in the full color.
+    assigns = assign(assigns, :color, assigns.state.color || "#8a8f98")
 
     ~H"""
-    <span class={["inline-flex items-center gap-2 px-2 py-0.5 rounded-full w-fit border", @text]}>
-      <span class={["w-1.5 h-1.5 rounded-full", @dot]}></span>
-      <span class="text-[10px] font-bold uppercase">{@state.name}</span>
+    <span
+      class="inline-flex items-center gap-2 px-2 py-0.5 rounded-full w-fit border"
+      style={"border-color: #{@color}55; background-color: #{@color}1a"}
+    >
+      <span class="w-1.5 h-1.5 rounded-full" style={"background-color: #{@color}"}></span>
+      <span class="text-[10px] font-bold uppercase" style={"color: #{@color}"}>{@state.name}</span>
     </span>
     """
   end
-
-  defp state_colors("completed"),
-    do: {"bg-emerald-500", "bg-emerald-500/10 text-emerald-400 border-emerald-500/20"}
-
-  defp state_colors("started"),
-    do: {"bg-amber-500", "bg-amber-500/10 text-amber-400 border-amber-500/20"}
-
-  defp state_colors("canceled"),
-    do: {"bg-red-500", "bg-red-500/10 text-red-400 border-red-500/20"}
-
-  defp state_colors(_),
-    do:
-      {"bg-on-surface-variant",
-       "bg-on-surface-variant/10 text-on-surface-variant border-on-surface-variant/20"}
 
   defp assignee_name(nil), do: "Unassigned"
   defp assignee_name(%{name: name}), do: name

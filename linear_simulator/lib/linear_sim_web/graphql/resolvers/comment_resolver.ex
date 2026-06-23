@@ -2,11 +2,33 @@ defmodule LinearSimWeb.GraphQL.Resolvers.CommentResolver do
   @moduledoc "Resolvers for comment fields and the comment mutations."
 
   alias LinearSim.Linear
+  alias LinearSim.Linear.Issue
   alias LinearSimWeb.GraphQL.Errors
 
   @doc "Maps the comment's insertion timestamp to Linear's `createdAt`."
   @spec created_at(map(), map(), Absinthe.Resolution.t()) :: {:ok, DateTime.t() | nil}
   def created_at(%{inserted_at: ts}, _args, _resolution), do: {:ok, ts}
+
+  @doc """
+  Builds the comment's Linear permalink from its parent issue's url.
+
+  `Comment.url` is a real Linear field; the simulator synthesizes it as
+  `<issue.url>#comment-<id>`. The parent issue is attached upstream
+  (`IssueResolver.comments/3`), so this needs no extra query. Returns `nil` only
+  when the comment was loaded without its issue (e.g. a mutation payload), which
+  no Symphony read path exercises.
+  """
+  @spec url(map(), map(), Absinthe.Resolution.t()) :: {:ok, String.t() | nil}
+  def url(%{id: id, issue: %Issue{url: issue_url}}, _args, _resolution)
+      when is_binary(issue_url),
+      do: {:ok, "#{issue_url}#comment-#{id}"}
+
+  def url(_comment, _args, _resolution), do: {:ok, nil}
+
+  @doc "Resolves a comment's author (nil for system/unattributed comments)."
+  @spec user(map(), map(), Absinthe.Resolution.t()) :: {:ok, struct() | nil}
+  def user(%{user: %Ecto.Association.NotLoaded{}}, _args, _resolution), do: {:ok, nil}
+  def user(%{user: user}, _args, _resolution), do: {:ok, user}
 
   @doc "Resolves the `commentCreate` mutation."
   @spec create(map(), map(), Absinthe.Resolution.t()) :: {:ok, map()} | {:error, term()}

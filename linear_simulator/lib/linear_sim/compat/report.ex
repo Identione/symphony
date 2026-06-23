@@ -15,7 +15,9 @@ defmodule LinearSim.Compat.Report do
             validate_sim: "0/0",
             replay: "0/0",
             missing_simulator_fields: [],
+            unimplemented_reference_fields: [],
             stale_simulator_fields: [],
+            observed_unsupported: [],
             behavioral_gaps: []
 
   @type t :: %__MODULE__{
@@ -24,7 +26,9 @@ defmodule LinearSim.Compat.Report do
           validate_sim: String.t(),
           replay: String.t(),
           missing_simulator_fields: [String.t()],
+          unimplemented_reference_fields: [String.t()],
           stale_simulator_fields: [String.t()],
+          observed_unsupported: [String.t()],
           behavioral_gaps: [String.t()]
         }
 
@@ -34,7 +38,9 @@ defmodule LinearSim.Compat.Report do
           required(:validate_results) => [%{sim_ok?: boolean(), linear_ok?: boolean()}],
           required(:replay) => %{total: non_neg_integer(), ok: non_neg_integer()},
           optional(:missing_simulator_fields) => [String.t()],
+          optional(:unimplemented_reference_fields) => [String.t()],
           optional(:stale_simulator_fields) => [String.t()],
+          optional(:observed_unsupported) => [String.t()],
           optional(:behavioral_gaps) => [String.t()]
         }
 
@@ -52,7 +58,9 @@ defmodule LinearSim.Compat.Report do
         if(inputs.reference == :skipped, do: "skipped", else: "#{linear_ok}/#{total}"),
       replay: "#{inputs.replay.ok}/#{inputs.replay.total}",
       missing_simulator_fields: Map.get(inputs, :missing_simulator_fields, []),
+      unimplemented_reference_fields: Map.get(inputs, :unimplemented_reference_fields, []),
       stale_simulator_fields: Map.get(inputs, :stale_simulator_fields, []),
+      observed_unsupported: Map.get(inputs, :observed_unsupported, []),
       behavioral_gaps: Map.get(inputs, :behavioral_gaps, [])
     }
   end
@@ -74,7 +82,9 @@ defmodule LinearSim.Compat.Report do
     - Replay successfully: #{r.replay}
 
     #{section("Missing simulator fields:", r.missing_simulator_fields)}
+    #{section("Unimplemented reference fields (on implemented types):", r.unimplemented_reference_fields)}
     #{section("Stale simulator fields:", r.stale_simulator_fields)}
+    #{section("Observed unsupported operations:", r.observed_unsupported)}
     #{section("Behavioral gaps:", r.behavioral_gaps)}
     """
   end
@@ -89,7 +99,9 @@ defmodule LinearSim.Compat.Report do
         "validateAgainstSimulator" => r.validate_sim,
         "replaySuccessful" => r.replay,
         "missingSimulatorFields" => r.missing_simulator_fields,
+        "unimplementedReferenceFields" => r.unimplemented_reference_fields,
         "staleSimulatorFields" => r.stale_simulator_fields,
+        "observedUnsupported" => r.observed_unsupported,
         "behavioralGaps" => r.behavioral_gaps
       },
       pretty: true

@@ -2,6 +2,7 @@ defmodule LinearSimWeb.GraphQL.Types.IssueTypes do
   @moduledoc "GraphQL types and queries for issues, teams, states, labels, relations."
   use Absinthe.Schema.Notation
 
+  alias LinearSimWeb.GraphQL.Resolvers.AttachmentResolver
   alias LinearSimWeb.GraphQL.Resolvers.IssueResolver
   alias LinearSimWeb.GraphQL.Resolvers.LabelResolver
   alias LinearSimWeb.GraphQL.Resolvers.TeamResolver
@@ -11,6 +12,9 @@ defmodule LinearSimWeb.GraphQL.Types.IssueTypes do
     field :id, non_null(:id)
     field :name, non_null(:string)
     field :type, :string
+    field :color, :string
+    field :position, :float, resolve: &TeamResolver.state_position/3
+    field :team, :team, resolve: &TeamResolver.state_team/3
   end
 
   @desc "An issue label."
@@ -72,6 +76,7 @@ defmodule LinearSimWeb.GraphQL.Types.IssueTypes do
     end
 
     field :parent, :issue, resolve: &IssueResolver.parent/3
+    field :project, :project, resolve: &IssueResolver.project/3
 
     field :relations, :issue_relation_connection do
       arg(:first, :integer)
@@ -90,6 +95,12 @@ defmodule LinearSimWeb.GraphQL.Types.IssueTypes do
       arg(:after, :string)
       arg(:order_by, :pagination_order_by)
       resolve(&IssueResolver.comments/3)
+    end
+
+    field :attachments, :attachment_connection do
+      arg(:first, :integer)
+      arg(:after, :string)
+      resolve(&AttachmentResolver.attachments/3)
     end
   end
 
@@ -128,6 +139,8 @@ defmodule LinearSimWeb.GraphQL.Types.IssueTypes do
     field :page_info, non_null(:page_info)
   end
 
+  # NOTE: `team_connection` / `team_edge` are defined in ProjectTypes (project.teams).
+
   object :issue_relation_edge do
     field :cursor, non_null(:string)
     field :node, :issue_relation
@@ -145,12 +158,19 @@ defmodule LinearSimWeb.GraphQL.Types.IssueTypes do
     field :slug_id, :string_comparator
   end
 
+  input_object :workflow_state_team_filter do
+    field :id, :id_comparator
+    field :key, :string_comparator
+  end
+
   input_object :workflow_state_filter do
     field :name, :string_comparator
+    field :team, :workflow_state_team_filter
   end
 
   input_object :issue_filter do
     field :id, :id_comparator
+    field :number, :number_comparator
     field :project, :project_filter
     field :state, :workflow_state_filter
   end
@@ -179,6 +199,29 @@ defmodule LinearSimWeb.GraphQL.Types.IssueTypes do
       arg(:first, :integer)
       arg(:after, :string)
       resolve(&LabelResolver.list/3)
+    end
+  end
+
+  object :team_queries do
+    @desc "List the organization's teams."
+    field :teams, :team_connection do
+      arg(:first, :integer)
+      arg(:after, :string)
+      resolve(&TeamResolver.list/3)
+    end
+
+    @desc "Fetch a single team by internal id or team key (e.g. `ENG`)."
+    field :team, :team do
+      arg(:id, non_null(:string))
+      resolve(&TeamResolver.get/3)
+    end
+
+    @desc "List workflow states across the organization's teams, optionally filtered."
+    field :workflow_states, :workflow_state_connection do
+      arg(:filter, :workflow_state_filter)
+      arg(:first, :integer)
+      arg(:after, :string)
+      resolve(&TeamResolver.workflow_states/3)
     end
   end
 end

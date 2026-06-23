@@ -14,6 +14,7 @@ defmodule Mix.Tasks.LinearSim.CompatibilityReport do
   use Mix.Task
 
   alias LinearSim.Compat.{OperationValidator, ReferenceSchema, Report}
+  alias LinearSimWeb.GraphQL.UnsupportedRecorder
   alias Mix.Tasks.LinearSim.{ReplayOperations, ValidateOperations}
 
   @schema LinearSimWeb.GraphQL.Schema
@@ -62,7 +63,9 @@ defmodule Mix.Tasks.LinearSim.CompatibilityReport do
         end),
       replay: %{total: replay.total, ok: replay.ok},
       missing_simulator_fields: missing_simulator_fields(dirs(opts), simulator),
+      unimplemented_reference_fields: unimplemented_reference_fields(simulator, reference),
       stale_simulator_fields: stale_simulator_fields(simulator, reference),
+      observed_unsupported: observed_unsupported(),
       behavioral_gaps: behavioral_gaps(dirs(opts))
     })
   end
@@ -117,29 +120,61 @@ defmodule Mix.Tasks.LinearSim.CompatibilityReport do
 
   defp describe_finding(_other, _op), do: []
 
-  # Simulator object/input fields absent from the Linear reference (advisory drift).
-  defp stale_simulator_fields(_simulator, nil), do: []
+  # Reference fields the simulator LACKS, but only for types it already implements
+  # — the inverse of `stale_simulator_fields`, and the class the ENG-10 `Comment.url`
+  # gap belongs to. Scoping to types present in the live schema keeps this actionable:
+  # it surfaces "a type we model is missing a real Linear field a client may query"
+  # without flagging the hundreds of types/fields the simulator intentionally omits.
+  defp unimplemented_reference_fields(simulator, reference),
+    do: type_member_diff(simulator, reference, &reference_only_members/3)
 
-  defp stale_simulator_fields(simulator, reference) do
+  # Simulator object/input fields absent from the Linear reference (advisory drift).
+  defp stale_simulator_fields(simulator, reference),
+    do: type_member_diff(simulator, reference, &simulator_only_members/3)
+
+  # Distinct schema-validation errors real clients have already hit (recorded by
+  # the `:before_send` UnsupportedRecorder hook). Reactive counterpart to the
+  # static reference diff: "gaps that were hit" vs "gaps that could be hit".
+  defp observed_unsupported do
+    UnsupportedRecorder.list()
+    |> Enum.flat_map(&Map.get(&1, "errors", []))
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  # Walks every type the simulator implements (skipping introspection types),
+  # pairs it with its Linear reference type, and collects `member_diff.(...)` —
+  # the single traversal shared by the unimplemented- and stale-field reports.
+  defp type_member_diff(_simulator, nil, _member_diff), do: []
+
+  defp type_member_diff(simulator, reference, member_diff) do
     simulator.types
     |> Enum.reject(fn {type_name, _} -> String.starts_with?(type_name, "__") end)
     |> Enum.flat_map(fn {type_name, sim_type} ->
       case ReferenceSchema.lookup_type(reference, type_name) do
         nil -> []
-        ref_type -> stale_members(type_name, sim_type, ref_type)
+        ref_type -> member_diff.(type_name, sim_type, ref_type)
       end
     end)
     |> Enum.sort()
   end
 
-  defp stale_members(type_name, sim_type, ref_type) do
-    sim_members = Map.keys(sim_type.fields) ++ Map.keys(sim_type.input_fields)
-    ref_members = MapSet.new(Map.keys(ref_type.fields) ++ Map.keys(ref_type.input_fields))
+  defp reference_only_members(type_name, sim_type, ref_type),
+    do: missing_members(type_name, members(ref_type), members(sim_type))
 
-    sim_members
-    |> Enum.reject(&MapSet.member?(ref_members, &1))
+  defp simulator_only_members(type_name, sim_type, ref_type),
+    do: missing_members(type_name, members(sim_type), members(ref_type))
+
+  # `candidate` member names (a type's object + input fields) absent from `present`.
+  defp missing_members(type_name, candidate, present) do
+    present_set = MapSet.new(present)
+
+    candidate
+    |> Enum.reject(&MapSet.member?(present_set, &1))
     |> Enum.map(&"#{type_name}.#{&1}")
   end
+
+  defp members(type), do: Map.keys(type.fields) ++ Map.keys(type.input_fields)
 
   defp behavioral_gaps(dirs) do
     Enum.flat_map(dirs, fn dir ->

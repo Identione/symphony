@@ -9,7 +9,7 @@ defmodule LinearSimWeb.DashboardLiveTest do
       {:ok, _view, html} = live(conn, "/")
 
       assert html =~ "Overview"
-      # basic_workspace seeds exactly 8 workflow states.
+      # basic_workspace seeds the full IDE-team workflow states (10).
       assert html =~ "States"
       assert html =~ "BASIC_WORKSPACE"
     end
@@ -89,6 +89,60 @@ defmodule LinearSimWeb.DashboardLiveTest do
     end
   end
 
+  describe "Issue browser enhancements" do
+    test "clicking the issue identifier opens the edit modal", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/entities")
+
+      html =
+        view
+        |> element("button[phx-click='edit_issue']", "ENG-1")
+        |> render_click()
+
+      assert html =~ "Edit ENG-1"
+    end
+
+    test "the issues table shows the project an issue is on", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/entities")
+
+      # basic_workspace puts ENG-1 on the "Roadmap" project.
+      assert html =~ "Roadmap"
+    end
+
+    test "the issues table shows blocking and blocked-by relations", %{conn: conn} do
+      org = LinearSim.Linear.default_organization()
+
+      {:ok, blocked} =
+        LinearSim.Linear.create_issue(org, %{"title" => "Blocked thing", "team_id" => "team_eng"})
+
+      {:ok, _rel} =
+        LinearSim.Linear.create_issue_relation(%{
+          "issue_id" => "issue_eng_1",
+          "type" => "blocks",
+          "related_issue_id" => blocked.id
+        })
+
+      {:ok, _view, html} = live(conn, "/entities")
+
+      # ENG-1 blocks the new issue; the new issue is blocked by ENG-1.
+      assert html =~ "blocks #{blocked.identifier}"
+      assert html =~ "blocked by ENG-1"
+    end
+
+    test "the edit modal shows the issue's activity (comments)", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/entities")
+
+      html =
+        view
+        |> element("button[phx-click='edit_issue']", "ENG-1")
+        |> render_click()
+
+      # ENG-1 carries a seeded "Symphony Workpad" comment authored by the seeded user.
+      assert html =~ "Activity"
+      assert html =~ "Symphony Workpad"
+      assert html =~ "Håkan Niska"
+    end
+  end
+
   describe "Issue editing" do
     test "creating an issue via the form adds it to the workspace", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/entities")
@@ -133,7 +187,7 @@ defmodule LinearSimWeb.DashboardLiveTest do
       {:ok, view, _html} = live(conn, "/entities")
 
       view
-      |> element("button[phx-value-id='issue_eng_1'][phx-click='edit_issue']")
+      |> element("button[phx-value-id='issue_eng_1'][phx-click='edit_issue']", "edit")
       |> render_click()
 
       html =
@@ -149,7 +203,7 @@ defmodule LinearSimWeb.DashboardLiveTest do
       {:ok, view, _html} = live(conn, "/entities")
 
       view
-      |> element("button[phx-value-id='issue_eng_1'][phx-click='edit_issue']")
+      |> element("button[phx-value-id='issue_eng_1'][phx-click='edit_issue']", "edit")
       |> render_click()
 
       html =
@@ -192,7 +246,7 @@ defmodule LinearSimWeb.DashboardLiveTest do
       {:ok, view, _html} = live(conn, "/entities")
 
       view
-      |> element("button[phx-value-id='#{child.id}'][phx-click='edit_issue']")
+      |> element("button[phx-value-id='#{child.id}'][phx-click='edit_issue']", "edit")
       |> render_click()
 
       view
@@ -213,7 +267,7 @@ defmodule LinearSimWeb.DashboardLiveTest do
       {:ok, view, _html} = live(conn, "/entities")
 
       view
-      |> element("button[phx-value-id='issue_eng_1'][phx-click='edit_issue']")
+      |> element("button[phx-value-id='issue_eng_1'][phx-click='edit_issue']", "edit")
       |> render_click()
 
       html =
@@ -261,6 +315,106 @@ defmodule LinearSimWeb.DashboardLiveTest do
       LinearSim.OperationCapture.clear()
       {:ok, _view, html} = live(conn, "/captured")
       assert html =~ "No operations captured yet"
+    end
+  end
+
+  describe "Unsupported operations counter" do
+    setup do
+      path =
+        Path.join(
+          System.tmp_dir!(),
+          "linear_sim_unsupported_dash_#{System.unique_integer([:positive])}.jsonl"
+        )
+
+      File.rm(path)
+      previous = Application.get_env(:linear_sim, :unsupported_operations)
+      Application.put_env(:linear_sim, :unsupported_operations, enabled: true, path: path)
+
+      on_exit(fn ->
+        File.rm(path)
+
+        if previous,
+          do: Application.put_env(:linear_sim, :unsupported_operations, previous),
+          else: Application.delete_env(:linear_sim, :unsupported_operations)
+      end)
+
+      {:ok, path: path}
+    end
+
+    defp write_gaps(path, names) do
+      contents =
+        Enum.map_join(names, "", fn name ->
+          Jason.encode!(%{operationName: name, errors: ["e"], query: "q", capturedAt: "t"}) <>
+            "\n"
+        end)
+
+      File.write!(path, contents)
+    end
+
+    test "shows a badge with the count when there are unsupported operations", %{
+      conn: conn,
+      path: path
+    } do
+      write_gaps(path, ["A", "B"])
+
+      {:ok, view, _html} = live(conn, "/")
+
+      assert has_element?(view, "#unsupported-badge")
+      assert render(view) =~ "2"
+    end
+
+    test "hides the badge when there are none", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/")
+      refute has_element?(view, "#unsupported-badge")
+    end
+
+    test "overview Current state lists the unsupported count", %{conn: conn, path: path} do
+      write_gaps(path, ["A", "B", "C"])
+
+      {:ok, _view, html} = live(conn, "/")
+      assert html =~ "Unsupported ops"
+      assert html =~ "3"
+    end
+
+    test "clicking the badge opens a modal listing the calls as pretty JSON", %{
+      conn: conn,
+      path: path
+    } do
+      write_gaps(path, ["GetCycles"])
+
+      {:ok, view, _html} = live(conn, "/")
+      refute has_element?(view, "#unsupported-modal")
+
+      html = view |> element("#unsupported-badge") |> render_click()
+
+      assert has_element?(view, "#unsupported-modal")
+      assert html =~ "GetCycles"
+      # Pretty-printed JSON: indented keys on their own lines.
+      assert html =~ "&quot;operationName&quot;: &quot;GetCycles&quot;"
+
+      # Closing hides it again.
+      view
+      |> element("#unsupported-modal button[phx-click='shell:hide_unsupported']")
+      |> render_click()
+
+      refute has_element?(view, "#unsupported-modal")
+    end
+
+    test "the count auto-updates when a new unsupported call arrives (no refresh)", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/")
+      refute has_element?(view, "#unsupported-badge")
+
+      # A brand-new unsupported operation hits the GraphQL endpoint over a
+      # separate connection; the recorder broadcasts and the open view updates.
+      Phoenix.ConnTest.build_conn()
+      |> put_req_header("content-type", "application/json")
+      |> put_req_header("authorization", "Bearer user_hakan")
+      |> post("/graphql", %{"query" => "query Live { viewer { id ghostField } }"})
+
+      assert render(view) =~ "1 unsupported"
+      assert has_element?(view, "#unsupported-badge")
     end
   end
 

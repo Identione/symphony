@@ -9,6 +9,7 @@ defmodule LinearSim.Linear do
 
   alias LinearSim.Linear.{
     ApiToken,
+    Attachment,
     Comment,
     Cycle,
     Issue,
@@ -73,15 +74,46 @@ defmodule LinearSim.Linear do
 
   @doc "Lists every workflow state across an organization's teams (with team preloaded)."
   @spec list_workflow_states(Organization.t() | nil) :: [WorkflowState.t()]
-  def list_workflow_states(nil), do: []
+  def list_workflow_states(org), do: list_workflow_states(org, %{})
 
-  def list_workflow_states(%Organization{} = org) do
+  @doc """
+  Lists workflow states across an organization's teams, applying a Linear-style
+  `WorkflowStateFilter` (`team.key.eq`, `team.id.eq`, `name.eq`). Team is preloaded.
+  """
+  @spec list_workflow_states(Organization.t() | nil, map()) :: [WorkflowState.t()]
+  def list_workflow_states(nil, _filter), do: []
+
+  def list_workflow_states(%Organization{} = org, filter) do
     WorkflowState
     |> join(:inner, [s], t in assoc(s, :team))
     |> where([_s, t], t.organization_id == ^org.id)
+    |> filter_states_by_team(
+      get_in(filter, [:team, :key, :eq]),
+      get_in(filter, [:team, :id, :eq])
+    )
+    |> maybe_filter_name(get_in(filter, [:name, :eq]))
     |> order_by([s], asc: s.position, asc: s.id)
     |> preload([:team])
     |> Repo.all()
+  end
+
+  defp filter_states_by_team(query, nil, nil), do: query
+
+  defp filter_states_by_team(query, key, _id) when is_binary(key),
+    do: where(query, [_s, t], t.key == ^key)
+
+  defp filter_states_by_team(query, _key, id) when is_binary(id),
+    do: where(query, [s, _t], s.team_id == ^id)
+
+  @doc "Fetches a team within an organization by internal id or team key (e.g. `ENG`)."
+  @spec get_team(Organization.t() | nil, String.t()) :: Team.t() | nil
+  def get_team(nil, _id_or_key), do: nil
+
+  def get_team(%Organization{} = org, id_or_key) when is_binary(id_or_key) do
+    Team
+    |> where([t], t.organization_id == ^org.id)
+    |> where([t], t.id == ^id_or_key or t.key == ^id_or_key)
+    |> Repo.one()
   end
 
   @doc "Lists recorded webhook delivery attempts, most recent first."
@@ -153,6 +185,7 @@ defmodule LinearSim.Linear do
     :state,
     :assignee,
     :team,
+    :project,
     :labels,
     {:children, @child_preloads},
     {:parent, [:state, :assignee, :labels, {:children, @child_preloads}]},
@@ -170,12 +203,35 @@ defmodule LinearSim.Linear do
   def list_issues(nil, _filter), do: []
 
   def list_issues(%Organization{} = org, filter) do
+    org
+    |> issue_base_query()
+    |> apply_issue_filter(filter)
+    |> Repo.all()
+  end
+
+  # Org-scoped, archived-excluded, deterministically-ordered issue query with the
+  # standard nested preloads — the shared base for `list_issues/2` and
+  # `list_issues_for_assignee/2`.
+  defp issue_base_query(%Organization{} = org) do
     Issue
     |> where([i], i.organization_id == ^org.id)
     |> where([i], is_nil(i.archived_at))
-    |> apply_issue_filter(filter)
     |> order_by([i], asc: i.inserted_at, asc: i.id)
     |> preload(^@issue_preloads)
+  end
+
+  @doc """
+  Lists issues assigned to a user within the org (archived excluded), ordered and
+  preloaded like `list_issues/2` so nested GraphQL fields resolve. Backs
+  `User.assignedIssues`.
+  """
+  @spec list_issues_for_assignee(Organization.t() | nil, String.t()) :: [Issue.t()]
+  def list_issues_for_assignee(nil, _user_id), do: []
+
+  def list_issues_for_assignee(%Organization{} = org, user_id) do
+    org
+    |> issue_base_query()
+    |> where([i], i.assignee_id == ^user_id)
     |> Repo.all()
   end
 
@@ -209,6 +265,35 @@ defmodule LinearSim.Linear do
   end
 
   @doc """
+  Fetches a single project by internal id or slug, scoped to the organization.
+  Mirrors Linear's `project(id:)`; lenient on slug for the simulator's stable
+  string ids. Returns nil when not found.
+  """
+  @spec get_project_by_id_or_slug(Organization.t() | nil, String.t()) :: Project.t() | nil
+  def get_project_by_id_or_slug(nil, _id), do: nil
+
+  def get_project_by_id_or_slug(%Organization{} = org, id) do
+    Project
+    |> where([p], p.organization_id == ^org.id)
+    |> where([p], p.id == ^id or p.slug_id == ^id)
+    |> Repo.one()
+  end
+
+  @doc """
+  Lists a project's issues (deterministically ordered, archived excluded, with
+  the same preloads as `list_issues` so nested GraphQL fields resolve).
+  """
+  @spec list_project_issues(Project.t()) :: [Issue.t()]
+  def list_project_issues(%Project{} = project) do
+    Issue
+    |> where([i], i.project_id == ^project.id)
+    |> where([i], is_nil(i.archived_at))
+    |> order_by([i], asc: i.inserted_at, asc: i.id)
+    |> preload(^@issue_preloads)
+    |> Repo.all()
+  end
+
+  @doc """
   Lists the teams associated with a project. The simulator does not model
   project↔team membership, so this returns every team in the project's
   organization (sufficient for symphony's preflight state-coverage walk).
@@ -237,6 +322,7 @@ defmodule LinearSim.Linear do
     Comment
     |> where([c], c.issue_id == ^issue_id)
     |> order_comments(order_by)
+    |> preload([:user])
     |> Repo.all()
   end
 
@@ -251,6 +337,7 @@ defmodule LinearSim.Linear do
     |> Comment.changeset(attrs)
     |> validate_issue_exists()
     |> Repo.insert()
+    |> preload_comment_issue()
   end
 
   defp validate_issue_exists(changeset) do
@@ -269,9 +356,15 @@ defmodule LinearSim.Linear do
   def update_comment(id, attrs) do
     case Repo.get(Comment, id) do
       nil -> {:error, :not_found}
-      comment -> comment |> Comment.changeset(attrs) |> Repo.update()
+      comment -> comment |> Comment.changeset(attrs) |> Repo.update() |> preload_comment_issue()
     end
   end
+
+  # Preloads `:issue` on a mutation's returned comment so `Comment.url` can build
+  # its permalink (read paths attach the parent issue directly; mutation payloads
+  # don't, so without this `commentCreate { comment { url } }` would resolve nil).
+  defp preload_comment_issue({:ok, comment}), do: {:ok, Repo.preload(comment, :issue)}
+  defp preload_comment_issue(other), do: other
 
   @doc """
   Updates an issue (by internal id or identifier). Accepts scalar/FK fields
@@ -456,6 +549,142 @@ defmodule LinearSim.Linear do
     end
   end
 
+  ## Attachments ------------------------------------------------------------
+
+  @attachment_preloads [:issue, :creator]
+
+  @doc "Lists an issue's attachments (by internal issue id), deterministically ordered."
+  @spec list_attachments(String.t()) :: [Attachment.t()]
+  def list_attachments(issue_id) do
+    Attachment
+    |> where([a], a.issue_id == ^issue_id)
+    |> order_by([a], asc: a.inserted_at, asc: a.id)
+    |> preload(^@attachment_preloads)
+    |> Repo.all()
+  end
+
+  @doc "Fetches an attachment by id (with issue/creator preloaded). Nil when absent."
+  @spec get_attachment(String.t()) :: Attachment.t() | nil
+  def get_attachment(id) do
+    Attachment
+    |> where([a], a.id == ^id)
+    |> preload(^@attachment_preloads)
+    |> Repo.one()
+  end
+
+  @doc """
+  Lists an organization's attachments matching a url (Linear's `attachmentsForURL`).
+  Scoped to the org via the owning issue.
+  """
+  @spec list_attachments_for_url(Organization.t() | nil, String.t()) :: [Attachment.t()]
+  def list_attachments_for_url(nil, _url), do: []
+
+  def list_attachments_for_url(%Organization{} = org, url) do
+    Attachment
+    |> join(:inner, [a], i in assoc(a, :issue))
+    |> where([_a, i], i.organization_id == ^org.id)
+    |> where([a], a.url == ^url)
+    |> order_by([a], asc: a.inserted_at, asc: a.id)
+    |> preload(^@attachment_preloads)
+    |> Repo.all()
+  end
+
+  @doc """
+  Creates an attachment, **upserting** on `(issue_id, url)` — a second call with
+  the same pair updates the existing row's title/subtitle in place (matching
+  Linear's `attachmentCreate`). `issue_id` accepts an internal id or identifier.
+  """
+  @spec create_attachment(map()) ::
+          {:ok, Attachment.t()} | {:error, Ecto.Changeset.t() | :issue_not_found}
+  def create_attachment(attrs) do
+    attrs = normalize_attrs(attrs)
+
+    case fetch_issue(attrs["issue_id"]) do
+      nil ->
+        {:error, :issue_not_found}
+
+      %Issue{} = issue ->
+        case existing_attachment(issue.id, attrs["url"]) do
+          %Attachment{} = existing ->
+            existing
+            |> Attachment.changeset(Map.take(attrs, ["title", "subtitle", "source_type"]))
+            |> Repo.update()
+            |> preload_attachment()
+
+          nil ->
+            insert_attachment(issue.id, attrs)
+        end
+    end
+  end
+
+  @doc """
+  Records a link on an issue (backs `attachmentLinkURL` / `attachmentLinkGitHubPR`
+  / `attachmentLinkGitHubIssue`). **Errors** on a duplicate `(issue, url)` with
+  `{:error, {:already_linked, identifier}}` rather than upserting — matching
+  live Linear's "This URL has already been linked with <ID>." `issue_id` accepts
+  an internal id or identifier.
+  """
+  @spec link_url(map()) ::
+          {:ok, Attachment.t()}
+          | {:error, Ecto.Changeset.t() | :issue_not_found | {:already_linked, String.t()}}
+  def link_url(attrs) do
+    attrs = normalize_attrs(attrs)
+
+    case fetch_issue(attrs["issue_id"]) do
+      nil ->
+        {:error, :issue_not_found}
+
+      %Issue{} = issue ->
+        case existing_attachment(issue.id, attrs["url"]) do
+          %Attachment{} -> {:error, {:already_linked, issue.identifier}}
+          nil -> insert_attachment(issue.id, attrs)
+        end
+    end
+  end
+
+  @doc "Updates an attachment's title/subtitle (Linear's `attachmentUpdate`)."
+  @spec update_attachment(String.t(), map()) ::
+          {:ok, Attachment.t()} | {:error, Ecto.Changeset.t() | :not_found}
+  def update_attachment(id, attrs) do
+    case Repo.get(Attachment, id) do
+      nil ->
+        {:error, :not_found}
+
+      attachment ->
+        attachment
+        |> Attachment.changeset(normalize_attrs(attrs))
+        |> Repo.update()
+        |> preload_attachment()
+    end
+  end
+
+  @doc "Deletes an attachment by id (Linear's `attachmentDelete`)."
+  @spec delete_attachment(String.t()) :: {:ok, Attachment.t()} | {:error, :not_found}
+  def delete_attachment(id) do
+    case Repo.get(Attachment, id) do
+      nil -> {:error, :not_found}
+      attachment -> Repo.delete(attachment)
+    end
+  end
+
+  defp existing_attachment(issue_id, url) when is_binary(url),
+    do: Repo.get_by(Attachment, issue_id: issue_id, url: url)
+
+  defp existing_attachment(_issue_id, _url), do: nil
+
+  defp insert_attachment(issue_id, attrs) do
+    attrs
+    |> Map.merge(%{"id" => "att_" <> Ecto.UUID.generate(), "issue_id" => issue_id})
+    |> then(&Attachment.changeset(%Attachment{}, &1))
+    |> Repo.insert()
+    |> preload_attachment()
+  end
+
+  defp preload_attachment({:ok, attachment}),
+    do: {:ok, Repo.preload(attachment, @attachment_preloads)}
+
+  defp preload_attachment({:error, _} = error), do: error
+
   # Applies label_ids (full replace) and added/removed_label_ids (incremental)
   # from a normalized attrs map. Unknown label ids are skipped, not errors.
   defp apply_label_ops(issue_id, attrs) do
@@ -574,6 +803,7 @@ defmodule LinearSim.Linear do
   defp apply_issue_filter(query, filter) when is_map(filter) do
     query
     |> filter_by_ids(get_in(filter, [:id, :in]))
+    |> filter_by_number(get_in(filter, [:number, :eq]) || get_in(filter, [:number, :in]))
     |> filter_by_project_slug(get_in(filter, [:project, :slug_id, :eq]))
     |> filter_by_state_names(get_in(filter, [:state, :name, :in]))
   end
@@ -582,6 +812,10 @@ defmodule LinearSim.Linear do
 
   defp filter_by_ids(query, nil), do: query
   defp filter_by_ids(query, ids) when is_list(ids), do: where(query, [i], i.id in ^ids)
+
+  defp filter_by_number(query, nil), do: query
+  defp filter_by_number(query, eq) when is_integer(eq), do: where(query, [i], i.number == ^eq)
+  defp filter_by_number(query, ns) when is_list(ns), do: where(query, [i], i.number in ^ns)
 
   defp filter_by_project_slug(query, nil), do: query
 

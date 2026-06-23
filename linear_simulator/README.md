@@ -155,6 +155,13 @@ for discovering **agent ad-hoc operations** (e.g. a `MoveIssue` mutation a codin
 agent issues via symphony's `linear_graphql` tool). Promote useful captures into
 the curated corpus.
 
+**Unsupported-operation recording** (on by default,
+`config :linear_sim, :unsupported_operations`) appends any operation the schema
+can't handle (unknown field/argument/enum) to `priv/linear/operations/unsupported.jsonl`,
+deduplicated by signature — a running to-do list of gaps to implement. The
+dashboard shows the count as a red badge in the top bar and on the Overview panel.
+See [docs/linear-sim.md §11](docs/linear-sim.md).
+
 ## Pointing Symphony at the simulator
 
 Symphony's Linear endpoint is configurable via `tracker.endpoint`. In an instance

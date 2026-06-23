@@ -41,6 +41,11 @@ defmodule LinearSimWeb.GraphQL.Resolvers.IssueResolver do
   def parent(%{parent: %Ecto.Association.NotLoaded{}}, _args, _resolution), do: {:ok, nil}
   def parent(%{parent: parent}, _args, _resolution), do: {:ok, parent}
 
+  @doc "Resolves an issue's project (nil for issues with no project)."
+  @spec project(map(), map(), Absinthe.Resolution.t()) :: {:ok, struct() | nil}
+  def project(%{project: %Ecto.Association.NotLoaded{}}, _args, _resolution), do: {:ok, nil}
+  def project(%{project: project}, _args, _resolution), do: {:ok, project}
+
   @doc "Resolves an issue's outgoing relations (where it is the source)."
   @spec relations(map(), map(), Absinthe.Resolution.t()) :: {:ok, map()}
   def relations(issue, args, _resolution),
@@ -55,7 +60,10 @@ defmodule LinearSimWeb.GraphQL.Resolvers.IssueResolver do
   @spec comments(map(), map(), Absinthe.Resolution.t()) :: {:ok, map()}
   def comments(issue, args, _resolution) do
     order = Map.get(args, :order_by, :created_at)
-    {:ok, Connection.from_nodes(Linear.list_comments(issue.id, order), args)}
+    # Carry the already-loaded parent issue onto each comment so `Comment.url`
+    # can build its permalink without an extra per-comment query.
+    comments = issue.id |> Linear.list_comments(order) |> Enum.map(&%{&1 | issue: issue})
+    {:ok, Connection.from_nodes(comments, args)}
   end
 
   @doc "Resolves the `issueCreate` mutation."

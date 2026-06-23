@@ -53,7 +53,7 @@ defmodule LinearSimWeb.ScenariosLive do
     assigns = assign(assigns, scenarios: @scenarios, modes: @modes)
 
     ~H"""
-    <.shell active={@active} scenario={@scenario} mode={@mode} capturing={@capturing}>
+    <.shell active={@active} scenario={@scenario} mode={@mode} capturing={@capturing} unsupported_count={@unsupported_count} show_unsupported={@show_unsupported} unsupported_entries={@unsupported_entries}>
       <h2 class="text-xl font-bold mb-4">Scenario Control Panel</h2>
 
       <div class="bg-surface-container-low border border-outline-variant rounded-lg p-4 mb-4">

@@ -17,14 +17,6 @@ defmodule LinearSimWeb.GraphQLBehaviorTest do
           ])
         )
 
-  defp gql(conn, query, variables) do
-    conn
-    |> put_req_header("content-type", "application/json")
-    |> put_req_header("authorization", "Bearer user_hakan")
-    |> post("/graphql", %{"query" => query, "variables" => variables})
-    |> json_response(200)
-  end
-
   describe "inverseRelations blocker extraction" do
     test "exposes a blocking issue as inverseRelations.node.issue with type blocks", %{conn: conn} do
       # Seed a blocker: ENG-2 blocks ENG-1.
@@ -469,6 +461,87 @@ defmodule LinearSimWeb.GraphQLBehaviorTest do
     end
   end
 
+  describe "workflow state color" do
+    test "Issue.state exposes the Linear color hex", %{conn: conn} do
+      body = gql(conn, ~s|query { issue(id: "ENG-1") { state { name type color } } }|, %{})
+      assert body["errors"] in [nil, []], "errors: #{inspect(body["errors"])}"
+      state = get_in(body, ["data", "issue", "state"])
+      # ENG-1 is seeded in Todo, whose real Linear color is #e2e2e2.
+      assert state == %{"name" => "Todo", "type" => "unstarted", "color" => "#e2e2e2"}
+    end
+  end
+
+  describe "project relationships" do
+    test "Issue.project is queryable", %{conn: conn} do
+      query = """
+      query { issue(id: "ENG-1") { project { id name slugId } } }
+      """
+
+      body = gql(conn, query, %{})
+      assert body["errors"] in [nil, []], "errors: #{inspect(body["errors"])}"
+      project = get_in(body, ["data", "issue", "project"])
+      assert project["id"] == "project_roadmap"
+      assert project["slugId"] == "roadmap"
+      assert is_binary(project["name"])
+    end
+
+    test "Issue.project is null for an issue with no project", %{conn: conn} do
+      create = """
+      mutation { issueCreate(input: {teamId: "team_eng", title: "No project"}) {
+        issue { identifier project { id } }
+      } }
+      """
+
+      body = gql(conn, create, %{})
+      issue = get_in(body, ["data", "issueCreate", "issue"])
+      assert issue["identifier"] == "ENG-2"
+      assert issue["project"] == nil
+    end
+
+    test "Project.issues connection lists the project's issues", %{conn: conn} do
+      query = """
+      query { projects { nodes { id slugId issues { nodes { identifier } } } } }
+      """
+
+      body = gql(conn, query, %{})
+      assert body["errors"] in [nil, []], "errors: #{inspect(body["errors"])}"
+
+      roadmap =
+        body
+        |> get_in(["data", "projects", "nodes"])
+        |> Enum.find(&(&1["slugId"] == "roadmap"))
+
+      ids = roadmap |> get_in(["issues", "nodes"]) |> Enum.map(& &1["identifier"])
+      assert "ENG-1" in ids
+    end
+
+    test "root project(id:) fetches a single project by id or slug, with issues", %{conn: conn} do
+      query = """
+      query($id: String!) {
+        project(id: $id) { id name slugId issues { nodes { identifier } } }
+      }
+      """
+
+      for id <- ["project_roadmap", "roadmap"] do
+        body = gql(conn, query, %{"id" => id})
+        assert body["errors"] in [nil, []], "errors for #{id}: #{inspect(body["errors"])}"
+        project = get_in(body, ["data", "project"])
+        assert project["id"] == "project_roadmap"
+        assert project["slugId"] == "roadmap"
+
+        ids = project |> get_in(["issues", "nodes"]) |> Enum.map(& &1["identifier"])
+        assert "ENG-1" in ids
+      end
+    end
+
+    test "root project(id:) returns null for an unknown id", %{conn: conn} do
+      query = "query { project(id: \"project_ghost\") { id } }"
+      body = gql(conn, query, %{})
+      assert body["errors"] in [nil, []], "errors: #{inspect(body["errors"])}"
+      assert get_in(body, ["data", "project"]) == nil
+    end
+  end
+
   describe "validation errors" do
     test "commentCreate against a missing issue returns a structured error", %{conn: conn} do
       mutation = """
@@ -480,6 +553,136 @@ defmodule LinearSimWeb.GraphQLBehaviorTest do
       body = gql(conn, mutation, %{"issueId" => "issue_missing", "body" => "x"})
       assert [error | _] = body["errors"]
       assert get_in(error, ["extensions", "code"]) == "VALIDATION_ERROR"
+    end
+  end
+
+  describe "attachments" do
+    @link_gh """
+    mutation($issueId: String!, $url: String!, $title: String) {
+      attachmentLinkGitHubPR(issueId: $issueId, url: $url, title: $title, linkKind: links) {
+        success
+        attachment { id url title sourceType issue { identifier } }
+      }
+    }
+    """
+
+    @link_url """
+    mutation($issueId: String!, $url: String!, $title: String) {
+      attachmentLinkURL(issueId: $issueId, url: $url, title: $title) {
+        success
+        attachment { id url title }
+      }
+    }
+    """
+
+    @create """
+    mutation($issueId: String!, $url: String!, $title: String!) {
+      attachmentCreate(input: {issueId: $issueId, url: $url, title: $title}) {
+        success
+        attachment { id url title }
+      }
+    }
+    """
+
+    @issue_attachments """
+    query($id: String!) {
+      issue(id: $id) { attachments { nodes { id url title } } }
+    }
+    """
+
+    defp issue_attachment_nodes(conn, id),
+      do:
+        get_in(gql(conn, @issue_attachments, %{"id" => id}), [
+          "data",
+          "issue",
+          "attachments",
+          "nodes"
+        ])
+
+    test "attachmentLinkGitHubPR links a PR (issueId by identifier) and reads back", %{conn: conn} do
+      url = "https://github.com/acme/repo/pull/82"
+
+      body =
+        gql(conn, @link_gh, %{"issueId" => "ENG-1", "url" => url, "title" => "Fix the thing"})
+
+      assert body["errors"] in [nil, []], "errors: #{inspect(body["errors"])}"
+      att = get_in(body, ["data", "attachmentLinkGitHubPR", "attachment"])
+      assert att["url"] == url
+      assert att["title"] == "Fix the thing"
+      assert att["sourceType"] == "github"
+      assert att["issue"]["identifier"] == "ENG-1"
+
+      nodes = issue_attachment_nodes(conn, "ENG-1")
+      assert Enum.any?(nodes, &(&1["url"] == url))
+    end
+
+    test "re-linking the same url via link* errors like prod and does not duplicate", %{
+      conn: conn
+    } do
+      url = "https://github.com/acme/repo/pull/83"
+
+      assert gql(conn, @link_url, %{"issueId" => "ENG-1", "url" => url, "title" => "first"})[
+               "errors"
+             ] in [nil, []]
+
+      body = gql(conn, @link_url, %{"issueId" => "ENG-1", "url" => url, "title" => "second"})
+      assert [error | _] = body["errors"]
+      assert error["message"] =~ "already been linked"
+
+      assert Enum.count(issue_attachment_nodes(conn, "ENG-1"), &(&1["url"] == url)) == 1
+    end
+
+    test "attachmentCreate upserts on duplicate url: success, updated title, single node", %{
+      conn: conn
+    } do
+      url = "https://github.com/acme/repo/pull/84"
+      first = gql(conn, @create, %{"issueId" => "ENG-1", "url" => url, "title" => "v1"})
+      assert first["errors"] in [nil, []], "errors: #{inspect(first["errors"])}"
+      id1 = get_in(first, ["data", "attachmentCreate", "attachment", "id"])
+
+      second = gql(conn, @create, %{"issueId" => "ENG-1", "url" => url, "title" => "v2"})
+      assert second["errors"] in [nil, []], "errors: #{inspect(second["errors"])}"
+      att2 = get_in(second, ["data", "attachmentCreate", "attachment"])
+
+      assert att2["id"] == id1
+      assert att2["title"] == "v2"
+      assert Enum.count(issue_attachment_nodes(conn, "ENG-1"), &(&1["url"] == url)) == 1
+    end
+
+    test "attachment(id:) and attachmentsForURL(url:) return the link; update + delete work", %{
+      conn: conn
+    } do
+      url = "https://github.com/acme/repo/pull/85"
+      created = gql(conn, @link_url, %{"issueId" => "ENG-1", "url" => url, "title" => "orig"})
+      id = get_in(created, ["data", "attachmentLinkURL", "attachment", "id"])
+
+      by_id = gql(conn, "query($id: String!) { attachment(id: $id) { id url } }", %{"id" => id})
+      assert get_in(by_id, ["data", "attachment", "url"]) == url
+
+      by_url =
+        gql(conn, "query($url: String!) { attachmentsForURL(url: $url) { nodes { id } } }", %{
+          "url" => url
+        })
+
+      assert get_in(by_url, ["data", "attachmentsForURL", "nodes"])
+             |> Enum.any?(&(&1["id"] == id))
+
+      updated =
+        gql(
+          conn,
+          "mutation($id: String!) { attachmentUpdate(id: $id, input: {title: \"renamed\"}) { success attachment { title } } }",
+          %{"id" => id}
+        )
+
+      assert get_in(updated, ["data", "attachmentUpdate", "attachment", "title"]) == "renamed"
+
+      deleted =
+        gql(conn, "mutation($id: String!) { attachmentDelete(id: $id) { success } }", %{
+          "id" => id
+        })
+
+      assert get_in(deleted, ["data", "attachmentDelete", "success"]) == true
+      refute Enum.any?(issue_attachment_nodes(conn, "ENG-1"), &(&1["id"] == id))
     end
   end
 end
