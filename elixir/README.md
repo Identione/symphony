@@ -14,8 +14,10 @@ The Elixir/OTP reference implementation of Symphony, based on
 Symphony polls Linear for candidate work, creates a workspace per issue, and
 launches a coding agent (Codex by default, Claude SDK optional) against it.
 The agent keeps running until the issue reaches a terminal state. During the
-session, agents get a client-side `linear_graphql` tool for raw Linear API
-access.
+session, agents get two client-side dynamic tools: `linear_graphql` for raw
+Linear API access and `sync_workpad` for pushing the persistent workpad
+comment (it reads the body from a local file so the multi-KB markdown never
+enters the conversation context).
 
 When the agent reports that it needs operator input — a `turn/*` input
 request, an approval prompt, or an MCP elicitation — Symphony stops retrying
@@ -65,7 +67,7 @@ workflow and the instance Makefile are regenerated together.
   same issue identifier — then set distinct `--workspace-root` per instance.
 - **Optional repo skills** (`commit`, `push`, `pull`, `land`, `linear`)
   can be copied into your repo; the `linear` skill uses Symphony's
-  `linear_graphql` app-server tool.
+  `linear_graphql` and `sync_workpad` app-server tools.
 
 ## Toolchain
 

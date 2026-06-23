@@ -231,6 +231,7 @@ defmodule SymphonyElixir.CLI.InitTest do
     assert contents =~ "permission_mode: bypassPermissions"
     refute contents =~ ~r/^\s*permission_mode: dontAsk/m
     assert contents =~ "#  - mcp__symphony__linear_graphql"
+    assert contents =~ "#  - mcp__symphony__sync_workpad"
     # `setting_sources` ships commented-out: the default (unset) loads the
     # repo's Claude settings/.mcp.json/CLAUDE.md like an interactive run, and
     # the line is offered as a swap-ready isolation opt-out.
