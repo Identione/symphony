@@ -35,6 +35,15 @@ defmodule SymphonyElixirWeb.StaticAssetController do
   @spec cytoscape_dagre_js(Conn.t(), map()) :: Conn.t()
   def cytoscape_dagre_js(conn, _params), do: serve(conn, "/vendor/cytoscape-dagre/cytoscape-dagre.js")
 
+  @spec layout_base_js(Conn.t(), map()) :: Conn.t()
+  def layout_base_js(conn, _params), do: serve(conn, "/vendor/layout-base/layout-base.js")
+
+  @spec cose_base_js(Conn.t(), map()) :: Conn.t()
+  def cose_base_js(conn, _params), do: serve(conn, "/vendor/cose-base/cose-base.js")
+
+  @spec cytoscape_fcose_js(Conn.t(), map()) :: Conn.t()
+  def cytoscape_fcose_js(conn, _params), do: serve(conn, "/vendor/cytoscape-fcose/cytoscape-fcose.js")
+
   defp serve(conn, path) do
     case StaticAssets.fetch(path) do
       {:ok, content_type, body} ->
