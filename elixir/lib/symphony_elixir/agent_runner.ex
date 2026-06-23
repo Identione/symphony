@@ -612,7 +612,7 @@ defmodule SymphonyElixir.AgentRunner do
       is_integer(last) and turn_number - last < config.min_turns_between ->
         "cooldown_active (turn=#{turn_number} - last_call_turn=#{last} < min_turns_between=#{config.min_turns_between})"
 
-      config.engine != "api" ->
+      config.engine not in ~w(api sidecar) ->
         "engine_unsupported (engine=#{inspect(config.engine)})"
 
       true ->
@@ -679,7 +679,10 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_overseer_call(context, issue, turn_number, config) do
     evidence = assemble_evidence(context, issue, turn_number, config)
 
-    case Overseer.run(evidence, config) do
+    # `cwd` is consumed only by the `sidecar` engine (the SDK needs a real
+    # directory for its tool-less classification turn); the `api` engine ignores
+    # it. The issue workspace is already PathSafety-canonical here.
+    case Overseer.run(evidence, config, cwd: context.workspace) do
       {:ok, verdict} ->
         action = Overseer.decide_action(verdict, config)
 

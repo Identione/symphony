@@ -71,18 +71,46 @@ defmodule SymphonyElixir.Overseer.PromptBuilder do
           optional(:transcript) => [map()]
         }
 
+  # Closing instruction for the `:json` output mode (the sidecar engine, IDE-230
+  # Path B). The Claude Agent SDK sidecar runs under the subscription OAuth and
+  # has no forced-tool `tool_choice`, so we ask for a bare JSON object and parse
+  # it back into the same verdict map `Overseer.parse/1` validates. Mirrors the
+  # `emit_verdict` tool schema in `Overseer.Client` exactly.
+  @json_closing """
+  Respond with ONLY a single JSON object — no prose, no markdown code fences, no
+  tool calls — with exactly these keys:
+
+    - "verdict": one of "converging" | "thrashing" | "blocked"
+    - "confidence": number 0..1
+    - "recommended_action": one of "continue" | "nudge" |
+      "recommend_extend_budget" | "escalate" | "abort"
+    - "steering_message": string (non-null IFF recommended_action is "nudge", else null)
+    - "findings": object {"summary": string|null, "blockers": [string],
+      "next_steps_for_human": [string]} when giving up (escalate/abort), else null
+    - "rationale": one short paragraph citing the concrete evidence
+
+  Output the JSON object and nothing else.
+  """
+
   @doc "The fixed system prompt. Exposed for tests/docs."
   @spec system_prompt() :: String.t()
   def system_prompt, do: @system_prompt
 
-  @doc "Render `%{system: ..., user: ...}` from the evidence bundle."
-  @spec build(evidence()) :: %{system: String.t(), user: String.t()}
-  def build(evidence) when is_map(evidence) do
-    %{system: @system_prompt, user: render_user(evidence)}
+  @doc """
+  Render `%{system: ..., user: ...}` from the evidence bundle.
+
+  `:output_mode` selects the closing instruction: `:tool` (default) asks the
+  model to call the forced `emit_verdict` tool (the `api` engine); `:json` asks
+  for a bare JSON object (the `sidecar` engine, which has no forced tool).
+  """
+  @spec build(evidence(), keyword()) :: %{system: String.t(), user: String.t()}
+  def build(evidence, opts \\ []) when is_map(evidence) do
+    mode = Keyword.get(opts, :output_mode, :tool)
+    %{system: @system_prompt, user: render_user(evidence, mode)}
   end
 
-  @spec render_user(evidence()) :: String.t()
-  defp render_user(evidence) do
+  @spec render_user(evidence(), :tool | :json) :: String.t()
+  defp render_user(evidence, mode) do
     [
       section("ISSUE", render_issue(evidence)),
       section("PLAN / WORKPAD", present(evidence[:workpad])),
@@ -90,11 +118,15 @@ defmodule SymphonyElixir.Overseer.PromptBuilder do
       section("GIT DIFF (HEAD)", present(evidence[:git_diff])),
       section("BUILD / TEST LOGS", render_logs(evidence[:logs])),
       section("RECENT TRANSCRIPT", render_transcript(evidence[:transcript] || [])),
-      "Emit your verdict by calling the emit_verdict tool exactly once."
+      closing_instruction(mode)
     ]
     |> Enum.reject(&is_nil/1)
     |> Enum.join("\n\n")
   end
+
+  @spec closing_instruction(:tool | :json) :: String.t()
+  defp closing_instruction(:json), do: String.trim_trailing(@json_closing)
+  defp closing_instruction(_tool), do: "Emit your verdict by calling the emit_verdict tool exactly once."
 
   @spec section(String.t(), String.t() | nil) :: String.t() | nil
   defp section(_label, nil), do: nil

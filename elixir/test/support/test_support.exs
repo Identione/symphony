@@ -109,6 +109,7 @@ defmodule SymphonyElixir.TestSupport do
           max_concurrent_agents: 10,
           max_turns: 20,
           overseer_enabled: false,
+          overseer_engine: nil,
           overseer_api_key: nil,
           overseer_model: nil,
           overseer_budget_threshold_k: nil,
@@ -302,6 +303,7 @@ defmodule SymphonyElixir.TestSupport do
       [
         "  overseer:",
         "    enabled: true",
+        overseer_line("engine", Keyword.get(config, :overseer_engine)),
         overseer_line("api_key", Keyword.get(config, :overseer_api_key)),
         overseer_line("model", Keyword.get(config, :overseer_model)),
         overseer_line("budget_threshold_k", Keyword.get(config, :overseer_budget_threshold_k)),
