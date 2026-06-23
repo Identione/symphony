@@ -1026,6 +1026,9 @@ defmodule SymphonyElixir.ExtensionsTest do
     assert html =~ "/vendor/cytoscape/cytoscape.min.js"
     assert html =~ "/vendor/dagre/dagre.min.js"
     assert html =~ "/vendor/cytoscape-dagre/cytoscape-dagre.js"
+    assert html =~ "/vendor/layout-base/layout-base.js"
+    assert html =~ "/vendor/cose-base/cose-base.js"
+    assert html =~ "/vendor/cytoscape-fcose/cytoscape-fcose.js"
     refute html =~ "/assets/app.js"
     refute html =~ "<style>"
 
@@ -1056,7 +1059,10 @@ defmodule SymphonyElixir.ExtensionsTest do
           "/dashboard.js",
           "/vendor/cytoscape/cytoscape.min.js",
           "/vendor/dagre/dagre.min.js",
-          "/vendor/cytoscape-dagre/cytoscape-dagre.js"
+          "/vendor/cytoscape-dagre/cytoscape-dagre.js",
+          "/vendor/layout-base/layout-base.js",
+          "/vendor/cose-base/cose-base.js",
+          "/vendor/cytoscape-fcose/cytoscape-fcose.js"
         ] do
       conn = get(build_conn(), path)
       assert conn.status == 200, "expected 200 for #{path}, got #{conn.status}"

@@ -24,6 +24,9 @@ defmodule SymphonyElixirWeb.Router do
     get("/vendor/cytoscape/cytoscape.min.js", StaticAssetController, :cytoscape_js)
     get("/vendor/dagre/dagre.min.js", StaticAssetController, :dagre_js)
     get("/vendor/cytoscape-dagre/cytoscape-dagre.js", StaticAssetController, :cytoscape_dagre_js)
+    get("/vendor/layout-base/layout-base.js", StaticAssetController, :layout_base_js)
+    get("/vendor/cose-base/cose-base.js", StaticAssetController, :cose_base_js)
+    get("/vendor/cytoscape-fcose/cytoscape-fcose.js", StaticAssetController, :cytoscape_fcose_js)
   end
 
   scope "/", SymphonyElixirWeb do
