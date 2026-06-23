@@ -117,6 +117,7 @@ For `Todo` (already moved to `In Progress`) or `In Progress`:
 1. Open the workpad: search active/unresolved comments for `## Symphony Workpad`; reuse it if present, otherwise create exactly one. Persist its comment ID and write all progress only to that ID.
 2. Reconcile before new edits: check off done items, expand/fix the plan for current scope, and confirm `Acceptance Criteria` and `Validation` still fit.
 3. Write/refresh a hierarchical plan in the workpad, including:
+   - a one-line **deliverable determination**: not every issue is resolved by code. Some are resolved by a documentation/decision record, by recording a deferral, or by closing as already-satisfied. Signals for a non-code resolution: markers like `(deferred)`, "defer", "spike/investigate/decide whether", "behind a flag", "out of scope", or work gated on a precondition that is not yet true; or a sibling issue resolved the same way. When the resolution is non-code, follow the repo's established pattern for it instead of forcing an implementation. If build-vs-defer intent is genuinely ambiguous, pick the safest interpretation, proceed without stalling, and record the assumption so the handoff surfaces it.
    - a compact environment stamp as a code-fence line at the top — `<host>:<abs-workdir>@<short-sha>` (e.g. `devbox-01:/home/dev-user/code/workspaces/MT-32@7bdde33bc`); omit fields already in Linear (issue ID, status, branch, PR link);
    - acceptance criteria and TODOs as checkboxes; for user-facing changes add a UI-walkthrough criterion describing the end-to-end path to validate;
    - any ticket-provided `Validation`/`Test Plan`/`Testing` items, copied in as required checkboxes.
@@ -129,7 +130,7 @@ For `Todo` (already moved to `In Progress`) or `In Progress`:
    {%- endif %}
 7. Validation gate (local): run the project's full local quality gate — not just the tests for the lines you touched — plus every ticket-provided `Validation`/`Test Plan`/`Testing` item; treat unmet items as incomplete. Add a targeted proof that directly demonstrates the changed behavior, but the full gate must also pass. Re-check all acceptance criteria and close gaps. The `push` skill runs this gate and the PR-body check before pushing; run the gate before every `git push`, and if anything fails, fix and rerun until green, then commit (`commit` skill) and push (`push` skill).
 8. Publish: ensure the PR is linked on the issue (prefer attachment over a workpad note) and carries the `symphony` label. Merge latest `origin/main` into the branch and rerun the gate if that pulled in changes.
-9. Finalize the workpad: mark plan/acceptance/validation items checked; add handoff notes (commit + validation summary); keep the PR URL on the issue (attachment/link fields), not in the workpad; add a short `### Confusions` section only when something was genuinely unclear. Do not post a separate completion comment.
+9. Finalize the workpad: mark plan/acceptance/validation items checked; add handoff notes (commit + validation summary); when the delivered work diverges from a literal reading of the issue — a non-code resolution, a deferred/partial scope, or work that turned out already done — also state an explicit **Next step for the reviewer**: what shipped, how it relates to the issue's literal ask, and the concrete next action and why (e.g. "this PR records the deferral — merging it closes the issue as deferred; the feature is intentionally not built"), kept in the workpad and PR body, never the issue description; keep the PR URL on the issue (attachment/link fields), not in the workpad; add a short `### Confusions` section only when something was genuinely unclear. Do not post a separate completion comment.
 10. Hand off when the **Completion bar** is met: move the issue to `Human Review` and end the turn. Exception: if waiting on an unresolved `blockedBy` dependency, keep the issue active (do not move to `Human Review`) so Symphony resumes when the blocker clears.
 
 ## PR feedback sweep protocol (required)
@@ -166,6 +167,7 @@ Blocked-access escape hatch — only when completion is blocked by a missing req
 - Acceptance criteria and all ticket-provided validation items are done, and the local validation gate is green for the latest commit.
 - The PR feedback sweep is complete with no actionable items remaining.
 - The branch is pushed, the PR is linked on the issue, and it carries the `symphony` label.
+- When the delivered work diverges from the issue's literal ask, the workpad states an explicit reviewer next-step (what shipped, how it maps to the ask, and the concrete next action).
 
 ## Rework
 
@@ -203,6 +205,10 @@ Use this exact structure for the persistent workpad comment and keep it updated 
 ### Validation
 
 - [ ] targeted tests: `<command>`
+
+### Handoff
+
+- <what shipped + the reviewer's concrete next step; if it diverges from the issue's literal ask, say so and why>
 
 ### Notes
 
