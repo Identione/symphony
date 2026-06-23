@@ -59,24 +59,27 @@ agent:
   # progress_trigger_min_turns: 4
   # AI overseer (SPEC.md §13.6): gated Anthropic call that approves continued
   # extension (to absolute_max_turns) or gives up → Human Review. On by default
-  # but dormant without a resolved api_key. Full keys/defaults in config/schema.ex.
+  # but dormant without a usable credential for its engine. Full keys/defaults in config/schema.ex.
   # overseer:
-  #   enabled: true
-  #   engine: api
+  #   enabled: true                  # on by default; needs a usable credential to act
+  #   engine: api                    # "api" = direct x-api-key Messages call (needs api_key);
+  #                                   # "sidecar" = one read-only turn via the Claude SDK sidecar,
+  #                                   #   reusing the Claude adapter's subscription OAuth (no api_key)
   #   model: claude-sonnet-4-6
-  #   api_key: $ANTHROPIC_API_KEY
-  #   streak_to_llm: 5
-  #   mandatory_llm_every: 40
-  #   absolute_max_turns: 500
-  #   winddown_timeout_ms: 120000
-  #   min_turns_between: 3
-  #   max_calls_per_session: 25
-  #   transcript_window: 40
-  #   confidence_floor: 0.6
-  #   allow_abort: false
-  # Claude Agent SDK adapter (SPEC.md §10.8 / §5.3.5.2). Switch `kind: codex`
-  # to use the Codex adapter; the nested agent.codex block below is kept so the
-  # swap is one line.
+  #   api_key: $ANTHROPIC_API_KEY    # api engine only; resolved like tracker.api_key/$LINEAR_API_KEY.
+  #                                   # Ignored by engine: sidecar (auth comes from the Claude OAuth).
+  #   streak_to_llm: 5               # consult after 5 consecutive deterministic no-progress turns
+  #   mandatory_llm_every: 40        # also consult every N turns regardless (0 disables)
+  #   absolute_max_turns: 500        # hard per-session ceiling (max_turns is the keyless fallback)
+  #   winddown_timeout_ms: 120000    # bounded final commit + workpad-update turn before Human Review
+  #   min_turns_between: 3           # cooldown between calls
+  #   max_calls_per_session: 25      # per-run call cap (hitting it stops extension, never silent)
+  #   transcript_window: 40          # bounded transcript evidence window
+  #   confidence_floor: 0.6          # below this, downgrade to a (continue) approval
+  #   allow_abort: false             # when false, an abort verdict is treated as escalate
+  # Claude Agent SDK adapter (SPEC.md §10.8). Switch to `codex` to use the
+  # legacy Codex App-Server adapter — the nested `agent.codex` block below
+  # is preserved so the swap is one-line.
   kind: claude
   claude:
     # command: pick ONE. $SYMPHONY_CLAUDE_PRIV_DIR (injected by Claude.AppServer,

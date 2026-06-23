@@ -27,7 +27,9 @@ defmodule SymphonyElixir.Overseer do
   require Logger
 
   alias SymphonyElixir.Config.Schema.Overseer, as: OverseerConfig
-  alias SymphonyElixir.Overseer.{Client, PromptBuilder}
+  alias SymphonyElixir.Overseer.{Client, PromptBuilder, SidecarClient}
+
+  @engines ~w(api sidecar)
 
   @verdicts ~w(converging thrashing blocked)
   @actions ~w(continue nudge recommend_extend_budget escalate abort)
@@ -75,7 +77,7 @@ defmodule SymphonyElixir.Overseer do
   """
   @spec should_run?(trigger_ctx(), OverseerConfig.t()) :: boolean()
   def should_run?(%{turn: turn, calls: calls, last_call_turn: last, fail_streak: streak}, %OverseerConfig{} = config) do
-    config.engine == "api" and
+    config.engine in @engines and
       triggered?(turn, streak, config) and
       calls < config.max_calls_per_session and
       cooldown_ok?(turn, last, config.min_turns_between)
@@ -99,23 +101,40 @@ defmodule SymphonyElixir.Overseer do
   Assemble evidence → call the engine → parse + validate. Returns the parsed
   verdict or `{:error, reason}` (fail-open at the call site).
 
-  `opts[:engine]` overrides the engine fun (`(messages, config -> {:ok, map} |
-  {:error, term})`) for tests; it defaults to `Client.classify/2`.
+  The engine is selected by `config.engine`: `"api"` (direct `x-api-key` Messages
+  call, `Client`) or `"sidecar"` (Claude SDK sidecar reusing subscription OAuth,
+  `SidecarClient` — needs `opts[:cwd]`, the issue workspace). `opts[:engine]`
+  overrides the engine fun (`(messages, config) -> {:ok, map} | {:error, term}`)
+  for tests, bypassing the `config.engine` dispatch.
   """
   @spec run(PromptBuilder.evidence(), OverseerConfig.t(), keyword()) ::
           {:ok, verdict()} | {:error, term()}
   def run(evidence, %OverseerConfig{} = config, opts \\ []) when is_map(evidence) do
-    engine = Keyword.get(opts, :engine, &Client.classify/2)
+    case Keyword.get(opts, :engine) do
+      override when is_function(override, 2) ->
+        with {:ok, raw} <- override.(PromptBuilder.build(evidence), config), do: parse(raw)
 
-    if config.engine == "api" do
-      messages = PromptBuilder.build(evidence)
-
-      with {:ok, raw} <- engine.(messages, config) do
-        parse(raw)
-      end
-    else
-      {:error, {:engine_unsupported, config.engine}}
+      _ ->
+        run_engine(evidence, config, opts)
     end
+  end
+
+  @spec run_engine(PromptBuilder.evidence(), OverseerConfig.t(), keyword()) ::
+          {:ok, verdict()} | {:error, term()}
+  defp run_engine(evidence, %OverseerConfig{engine: "api"} = config, _opts) do
+    with {:ok, raw} <- Client.classify(PromptBuilder.build(evidence), config), do: parse(raw)
+  end
+
+  defp run_engine(evidence, %OverseerConfig{engine: "sidecar"} = config, opts) do
+    messages = PromptBuilder.build(evidence, output_mode: :json)
+
+    with {:ok, raw} <- SidecarClient.classify(messages, config, cwd: Keyword.get(opts, :cwd)) do
+      parse(raw)
+    end
+  end
+
+  defp run_engine(_evidence, %OverseerConfig{engine: other}, _opts) do
+    {:error, {:engine_unsupported, other}}
   end
 
   @doc """

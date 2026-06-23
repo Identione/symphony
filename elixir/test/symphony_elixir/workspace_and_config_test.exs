@@ -1475,6 +1475,23 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     refute Config.overseer_enabled?()
   end
 
+  test "the sidecar engine is enabled without an API key (OAuth reuse, IDE-230 Path B)" do
+    # Clear any ambient $ANTHROPIC_API_KEY so the only thing that could enable
+    # the overseer here is the sidecar engine's keyless path.
+    previous_anthropic = System.get_env("ANTHROPIC_API_KEY")
+    System.delete_env("ANTHROPIC_API_KEY")
+    on_exit(fn -> restore_env("ANTHROPIC_API_KEY", previous_anthropic) end)
+
+    write_workflow_file!(Workflow.workflow_file_path(),
+      overseer_enabled: true,
+      overseer_engine: "sidecar",
+      overseer_api_key: "$SYMP_DEFINITELY_MISSING_KEY"
+    )
+
+    assert Config.overseer().engine == "sidecar"
+    assert Config.overseer_enabled?()
+  end
+
   test "config no longer resolves legacy env: references" do
     workspace_env_var = "SYMP_WORKSPACE_ROOT_#{System.unique_integer([:positive])}"
     api_key_env_var = "SYMP_LINEAR_API_KEY_#{System.unique_integer([:positive])}"

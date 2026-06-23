@@ -77,8 +77,12 @@ defmodule SymphonyElixir.OverseerTest do
              )
     end
 
+    test "fires for the sidecar engine too" do
+      assert Overseer.should_run?(ctx(%{turn: 40}), config(%{engine: "sidecar"}))
+    end
+
     test "never fires for an unsupported engine" do
-      refute Overseer.should_run?(ctx(%{turn: 40}), config(%{engine: "sidecar"}))
+      refute Overseer.should_run?(ctx(%{turn: 40}), config(%{engine: "bogus"}))
     end
   end
 
@@ -240,9 +244,27 @@ defmodule SymphonyElixir.OverseerTest do
       assert {:error, {:overseer_missing_field, _}} = Overseer.run(%{}, config(), engine: engine)
     end
 
-    test "refuses an unsupported engine without calling out" do
-      assert {:error, {:engine_unsupported, "sidecar"}} =
-               Overseer.run(%{}, config(%{engine: "sidecar"}), engine: fn _, _ -> flunk("called") end)
+    test "refuses an unsupported engine" do
+      assert {:error, {:engine_unsupported, "bogus"}} =
+               Overseer.run(%{}, config(%{engine: "bogus"}))
+    end
+
+    test "an injected engine override wins over config.engine dispatch" do
+      engine = fn _messages, _config ->
+        {:ok,
+         %{
+           "verdict" => "converging",
+           "confidence" => 0.9,
+           "recommended_action" => "continue",
+           "steering_message" => nil,
+           "rationale" => "ok"
+         }}
+      end
+
+      # config.engine is "sidecar" but the override fun is used instead of
+      # spawning a real sidecar — the seam the agent_runner integration relies on.
+      assert {:ok, %{verdict: :converging}} =
+               Overseer.run(%{}, config(%{engine: "sidecar"}), engine: engine)
     end
   end
 end

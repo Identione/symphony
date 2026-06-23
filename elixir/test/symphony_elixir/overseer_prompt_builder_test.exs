@@ -17,6 +17,17 @@ defmodule SymphonyElixir.Overseer.PromptBuilderTest do
     assert user =~ "emit_verdict"
   end
 
+  test "output_mode: :json swaps the closing instruction to a bare-JSON ask" do
+    %{user: tool} = PromptBuilder.build(%{issue_title: "Ship it"})
+    %{user: json} = PromptBuilder.build(%{issue_title: "Ship it"}, output_mode: :json)
+
+    assert tool =~ "emit_verdict tool exactly once"
+    refute json =~ "emit_verdict tool exactly once"
+    assert json =~ "Respond with ONLY a single JSON object"
+    # Still renders the same evidence sections, just a different closer.
+    assert json =~ "## ISSUE"
+  end
+
   test "omits sections whose evidence is absent or blank" do
     %{user: user} = PromptBuilder.build(%{git_diff: "   ", logs: [], transcript: []})
     refute user =~ "## GIT DIFF"

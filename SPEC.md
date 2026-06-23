@@ -881,13 +881,14 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.progress_trigger_min_turns`: integer `>= 1`, default `4` — turn floor for the
   `at_risk_no_commits` arm of the Layer-2 trigger predicate
 - `agent.overseer`: object, OPTIONAL — the Layer-2 AI overseer (§13.6). On by default (IDE-230) but
-  dormant without a resolved `api_key`; the binding controller of the per-session turn budget; fails
-  open. Fields:
-  - `agent.overseer.enabled`: boolean, default `true` — master switch. An absent/empty resolved
-    `api_key` leaves it dormant regardless of this flag (the run caps at `agent.max_turns` and posts a
-    "could not judge" comment).
-  - `agent.overseer.engine`: enum (`api` | `sidecar`), default `api` — only `api` (read-only
-    Anthropic Messages call) is implemented; `sidecar` is reserved and fails open.
+  dormant without a usable credential for its engine; the binding controller of the per-session turn
+  budget; fails open. Fields:
+  - `agent.overseer.enabled`: boolean, default `true` — master switch. For the `api` engine, an
+    absent/empty resolved `api_key` leaves it dormant regardless of this flag (the run caps at
+    `agent.max_turns` and posts a "could not judge" comment); the `sidecar` engine needs no key.
+  - `agent.overseer.engine`: enum (`api` | `sidecar`), default `api`. `api` = direct read-only
+    Anthropic Messages call (needs `api_key`). `sidecar` = one read-only turn via the Claude SDK
+    sidecar, reusing the Claude adapter's subscription OAuth (IDE-230 Path B; no `api_key`).
   - `agent.overseer.model`: string, default `claude-sonnet-4-6`
   - `agent.overseer.effort`: string, default `low` — carried for adapter parity; not forwarded on
     the direct Messages API path today
@@ -2444,15 +2445,25 @@ Layer-1 progress signals in §13.5). IDE-212 introduced a gated, read-only advis
 promotes it to the **binding controller of the per-session turn budget**: a session extends
 turn-by-turn up to `agent.overseer.absolute_max_turns` (default 500) under overseer approval, and the
 overseer is the authority on whether to keep extending or hand the issue to a human. It is **on by
-default** (`agent.overseer.enabled: true`) but **dormant without a resolved `api_key`**. Every error
-path is **fail-open**, and a dormant or no-judgement run never silently balloons — it caps at
-`agent.max_turns` (the keyless-fallback ceiling) and posts a "could not judge" comment.
+default** (`agent.overseer.enabled: true`) but **dormant without a usable credential for its engine**
+(see Engine). Every error path is **fail-open**, and a dormant or no-judgement run never silently
+balloons — it caps at `agent.max_turns` (the keyless-fallback ceiling) and posts a "could not judge"
+comment.
 
-**Engine.** The implemented engine (`agent.overseer.engine: "api"`) is a single read-only call to
-the Anthropic Messages API per consultation. Read-only by construction: the only tool offered is
-`emit_verdict`, whose `input_schema` *is* the verdict contract, and `tool_choice` forces the model to
-call it — the model cannot read files, run commands, or touch the workspace. (`"sidecar"` is reserved
-for forward-compat and currently fails open / treated as disabled.)
+**Engine.** Two read-only engines are implemented, selected by `agent.overseer.engine`:
+
+- `"api"` (default) — a single read-only call to the Anthropic Messages API per consultation,
+  authenticated with `agent.overseer.api_key` (resolved from `$ANTHROPIC_API_KEY`). Read-only by
+  construction: the only tool offered is `emit_verdict`, whose `input_schema` *is* the verdict
+  contract, and `tool_choice` forces the model to call it. Dormant without a resolved key.
+- `"sidecar"` (IDE-230 Path B) — one read-only classification turn through the Claude Agent SDK
+  sidecar (§10.8), **reusing the Claude adapter's subscription OAuth** so no separate `api_key` is
+  required. The session is launched isolated (`setting_sources: []`, `allowed_tools: []`) for a single
+  turn, so the model cannot read files, run commands, or touch the workspace; the SDK has no forced
+  `tool_choice`, so the verdict is requested as a bare JSON object and parsed into the same verdict
+  contract. A missing OAuth credential is not gating — it surfaces at runtime as a fail-open
+  no-judgement (cap + "could not judge" comment). The sidecar runs independently of which coding-agent
+  adapter is active, provided `agent.claude.command` and the Claude OAuth are configured.
 
 **Control loop (worker-side).** At each turn boundary the worker runs the free Layer-1
 `ProgressSignal` deterministic check (reusing the §13.5 probe) and maintains a consecutive
