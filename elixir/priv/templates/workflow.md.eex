@@ -24,9 +24,11 @@ workspace:
   root: <%= @workspace_root %>
 repo:
   url: <%= @repo_url %>
-<%= @repo_path_line %>hooks:
+<%= @repo_path_line %><%= @repo_base_branch_line %>hooks:
   after_create: |
-    git clone --depth 1 <%= @repo_url_shell %> .
+    git clone --depth 1 <%= @repo_url_shell %> .<%= if @base_branch do %>
+    git fetch --depth 1 origin <%= @base_fetch_refspec %>
+    git config symphony.baseBranch <%= @base_branch_shell %><% end %>
 agent:
   kind: <%= @agent_kind %>
   # Override max_concurrent_agents / max_turns here to deviate from the
@@ -78,7 +80,7 @@ All Linear access goes through Symphony's injected `linear_graphql` tool (expose
 - `linear`: raw Linear GraphQL — reads, comment edits, state moves, attachments, uploads.
 - `commit`: produce clean, logical commits during implementation.
 - `push`: keep the remote branch current and create/update the PR (title, template body, `symphony` label).
-- `pull`: sync the branch with latest `origin/main` and resolve conflicts before handoff.
+- `pull`: sync the branch with latest `origin/<%= @base_branch || "main" %>` and resolve conflicts before handoff.
 - `land`: when the ticket reaches `Merging`, open and follow `.codex/skills/land/SKILL.md`, which includes the `land` loop.
 
 ## Operating rules
@@ -108,9 +110,19 @@ Fetch the issue by its explicit ticket ID, read its current state, and route. If
 | `Rework` | Run the **Rework** reset (below). |
 | `Done` | Terminal. Do nothing and shut down. |
 
-Before reusing a branch, check its PR: if the branch's PR is `CLOSED` or `MERGED`, do not reuse that branch or prior state — create a fresh branch from `origin/main` and restart from reproduction/planning as a new attempt.
+Before reusing a branch, check its PR: if the branch's PR is `CLOSED` or `MERGED`, do not reuse that branch or prior state — create a fresh branch from `origin/<%= @base_branch || "main" %>` and restart from reproduction/planning as a new attempt.
 
-## Execution flow
+<%= if @base_branch do %>## Work on a dedicated issue branch (never the base branch)
+
+All work for this ticket happens on a per-issue branch off `origin/<%= @base_branch %>`. Never commit or push directly to `<%= @base_branch %>` or any protected/default branch — the `push` skill refuses it.
+
+1. Use the deterministic branch name `symphony/{{ issue.identifier }}` so continuation turns reuse the same branch instead of branching again and losing work.
+2. If `git branch --show-current` is not `symphony/{{ issue.identifier }}`, fetch and switch to it from `origin/<%= @base_branch %>`:
+   - New branch: `git fetch origin <%= @base_branch %> && git switch -c symphony/{{ issue.identifier }} origin/<%= @base_branch %>`
+   - Already exists locally: `git switch symphony/{{ issue.identifier }}`
+3. When opening the PR, target base `<%= @base_branch %>` so the change merges into `<%= @base_branch %>`, never the repo default.
+
+<% end %>## Execution flow
 
 For `Todo` (already moved to `In Progress`) or `In Progress`:
 
@@ -123,13 +135,13 @@ For `Todo` (already moved to `In Progress`) or `In Progress`:
    - any ticket-provided `Validation`/`Test Plan`/`Testing` items, copied in as required checkboxes.
    Run a principal-style self-review of the plan and refine it.
 4. Capture a concrete reproduction signal (command/output or deterministic behavior) and record it in the workpad `Notes`.
-5. Run the `pull` skill to sync `origin/main` before any code edits, and record a `pull skill evidence` note (merge source(s); `clean` or `conflicts resolved`; resulting `HEAD` short SHA).
+5. Run the `pull` skill to sync `origin/<%= @base_branch || "main" %>` before any code edits, and record a `pull skill evidence` note (merge source(s); `clean` or `conflicts resolved`; resulting `HEAD` short SHA).
 6. Implement against the TODOs, keeping the workpad current after each meaningful milestone (reproduction done, change landed, validation run, feedback addressed). Never leave completed work unchecked. For a `Todo` ticket that already had a PR attached, run the **PR feedback sweep protocol** before new feature work.
    {%- if agent.kind == "claude" %}
    - Before the validation gate, check the change size with `git diff --stat`. Only run a code-review pass when the diff is non-trivial (more than one file changed, or roughly >60 changed lines). For a non-trivial diff, invoke `/code-review low` once (the effort level is a bare word, not a flag; this is the diff-scoped built-in skill — fewer, high-confidence findings, no PR needed) — NOT `/simplify`, which fans out whole-repo review subagents and is disproportionate here. For a small single-file diff, skip the review pass entirely. Route any resulting edits through the same validation gate.
    {%- endif %}
 7. Validation gate (local): run the project's full local quality gate — not just the tests for the lines you touched — plus every ticket-provided `Validation`/`Test Plan`/`Testing` item; treat unmet items as incomplete. Add a targeted proof that directly demonstrates the changed behavior, but the full gate must also pass. Re-check all acceptance criteria and close gaps. The `push` skill runs this gate and the PR-body check before pushing; run the gate before every `git push`, and if anything fails, fix and rerun until green, then commit (`commit` skill) and push (`push` skill).
-8. Publish: ensure the PR is linked on the issue (prefer attachment over a workpad note) and carries the `symphony` label. Merge latest `origin/main` into the branch and rerun the gate if that pulled in changes.
+8. Publish: ensure the PR is linked on the issue (prefer attachment over a workpad note) and carries the `symphony` label. Merge latest `origin/<%= @base_branch || "main" %>` into the branch and rerun the gate if that pulled in changes.
 9. Finalize the workpad: mark plan/acceptance/validation items checked; add handoff notes (commit + validation summary); when the delivered work diverges from a literal reading of the issue — a non-code resolution, a deferred/partial scope, or work that turned out already done — also state an explicit **Next step for the reviewer**: what shipped, how it relates to the issue's literal ask, and the concrete next action and why (e.g. "this PR records the deferral — merging it closes the issue as deferred; the feature is intentionally not built"), kept in the workpad and PR body, never the issue description; keep the PR URL on the issue (attachment/link fields), not in the workpad; add a short `### Confusions` section only when something was genuinely unclear. Do not post a separate completion comment.
 10. Hand off when the **Completion bar** is met: move the issue to `Human Review` and end the turn. Exception: if waiting on an unresolved `blockedBy` dependency, keep the issue active (do not move to `Human Review`) so Symphony resumes when the blocker clears.
 
@@ -176,7 +188,7 @@ Treat `Rework` as a full approach reset, not incremental patching:
 1. Re-read the full issue body and all human comments; explicitly decide what to do differently this attempt.
 2. Close the existing PR tied to the issue.
 3. Remove the existing `## Symphony Workpad` comment.
-4. Create a fresh branch from `origin/main`.
+4. Create a fresh branch from `origin/<%= @base_branch || "main" %>`.
 5. Restart the normal kickoff: if the issue is `Todo` move it to `In Progress` (otherwise keep its state), create a new `## Symphony Workpad` bootstrap comment, then run **Execution flow** end-to-end.
 
 ## Workpad template

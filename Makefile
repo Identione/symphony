@@ -32,7 +32,7 @@ RESET  := $(shell tput sgr0)
 endif
 
 .DEFAULT_GOAL := help
-.PHONY: help init init-all build clean upgrade upgrade-all start start-all stop stop-all check-built ensure-deps ensure-trust validate-instance
+.PHONY: help init init-all resync-bodies check-bodies build clean upgrade upgrade-all start start-all stop stop-all check-built ensure-deps ensure-trust validate-instance
 
 help: ## Show this help.
 	@printf '$(BOLD)Symphony$(RESET)  $(DIM)— Linear-driven Codex orchestrator$(RESET)\n'
@@ -97,6 +97,22 @@ init-all: ensure-trust check-built ## Generate every instance in instances.local
 		printf '$(BOLD)==> %s$(RESET)\n' "$$name"; \
 		$(MAKE) --no-print-directory init INSTANCE="$$name" ARGS="$$args $(if $(FORCE),--force,)" </dev/null; \
 	done < "$(INSTANCES_FILE)"
+
+# --- Sync ------------------------------------------------------------------
+##@ Sync
+# Instance WORKFLOW.md front matter is hand-tuned (jai command, ports, polling,
+# repo.base_branch + the after_create fetch hook), so `make init --force` — which
+# regenerates the whole file — is the wrong tool for picking up template/body
+# changes: it clobbers that front matter. These targets rewrite only the prompt
+# *body*, rendered from each instance's OWN repo.base_branch, so the baked
+# origin/<base> refs + dedicated-branch section can never disagree with the front
+# matter. See elixir/scripts/resync_instance_bodies.exs. Needs only Elixir stdlib
+# (EEx) — no deps/compile — so ensure-trust is enough.
+resync-bodies: ensure-trust ## Re-bake every instance WORKFLOW.md body from the template (front matter preserved).
+	@cd $(ELIXIR_DIR) && mise exec -- elixir scripts/resync_instance_bodies.exs
+
+check-bodies: ensure-trust ## Check each instance WORKFLOW.md body is in sync (no writes; non-zero on drift).
+	@cd $(ELIXIR_DIR) && mise exec -- elixir scripts/resync_instance_bodies.exs --check
 
 # --- Upgrade ---------------------------------------------------------------
 ##@ Upgrade

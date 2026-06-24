@@ -31,14 +31,16 @@ description:
    remote URL is already configured.
 4. If push is not clean/rejected:
    - If the failure is a non-fast-forward or sync problem, run the `pull`
-     skill to merge `origin/main`, resolve conflicts, and rerun validation.
+     skill to merge the base branch, resolve conflicts, and rerun validation.
    - Push again; use `--force-with-lease` only when history was rewritten.
    - If the failure is due to auth, permissions, or workflow restrictions on
      the configured remote, stop and surface the exact error instead of
      rewriting remotes or switching protocols as a workaround.
 
 5. Ensure a PR exists for the branch:
-   - If no PR exists, create one.
+   - If no PR exists, create one. When `git config symphony.baseBranch` is set,
+     the create command targets it via `--base` (see the Commands block) so the
+     PR merges into the configured base, not the repo default.
    - If a PR exists and is open, update it.
    - If branch is tied to a closed/merged PR, create a new branch + PR.
    - Write a proper PR title that clearly describes the change outcome
@@ -60,6 +62,22 @@ description:
 ```sh
 # Identify branch
 branch=$(git branch --show-current)
+
+# Resolve the configured base branch, if any (set by the workspace
+# `after_create` hook). Empty on default instances → every base-aware step
+# below no-ops and push behaves exactly as before.
+bb=$(git config --get symphony.baseBranch 2>/dev/null || true)
+
+# Protected-branch guard: never push the base/default/main/master directly.
+if [ -n "$bb" ]; then
+  def=$(git symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##' || true)
+  for protected in "$bb" "$def" main master; do
+    if [ -n "$protected" ] && [ "$branch" = "$protected" ]; then
+      echo "refusing to push protected branch '$branch'; create an issue branch first" >&2
+      exit 1
+    fi
+  done
+fi
 
 # Minimal validation gate
 make -C elixir all
@@ -86,8 +104,10 @@ fi
 
 # Write a clear, human-friendly title that summarizes the shipped change.
 pr_title="<clear PR title written for this change>"
+# Target the configured base branch when set; unset → bare create → repo default.
+base_args=(); [ -n "$bb" ] && base_args=(--base "$bb")
 if [ -z "$pr_state" ]; then
-  gh pr create --title "$pr_title"
+  gh pr create --title "$pr_title" "${base_args[@]}"
 else
   # Reconsider title on every branch update; edit if scope shifted.
   gh pr edit --title "$pr_title"
