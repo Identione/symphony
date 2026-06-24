@@ -315,6 +315,28 @@ _LINEAR_GRAPHQL_FALLBACK_SCHEMA: dict[str, Any] = {
     },
 }
 
+# Mirrors `@sync_workpad_input_schema` in dynamic_tool.ex. Used only when
+# `init.tool_specs` is absent (older Symphony / dry-run path).
+_SYNC_WORKPAD_FALLBACK_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["issue_id", "file_path"],
+    "properties": {
+        "issue_id": {
+            "type": "string",
+            "description": 'Linear issue identifier (e.g. "ENG-123") or internal UUID.',
+        },
+        "file_path": {
+            "type": "string",
+            "description": "Path to a local markdown file whose contents become the comment body.",
+        },
+        "comment_id": {
+            "type": "string",
+            "description": "Existing comment ID to update. Omit to create a new comment.",
+        },
+    },
+}
+
 
 def extract_tool_schemas(env: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Read `init.tool_specs` and index each spec's `inputSchema` by name."""
@@ -802,9 +824,8 @@ async def _drive(state: SessionState, env: dict[str, Any]) -> None:
 def _build_symphony_mcp_server(state: SessionState):  # pragma: no cover - SDK runtime
     """Register Symphony's exposed tools as in-process MCP entries.
 
-    Currently only `linear_graphql` is wired (per SPEC §10.4). Each tool
-    function emits a `tool_call` envelope and awaits Symphony's `tool_result`,
-    so all auth/transport stays on the Symphony side.
+    Each tool function emits a `tool_call` envelope and awaits Symphony's
+    `tool_result`, so all auth/transport stays on the Symphony side.
     """
 
     schema = state.tool_schemas.get("linear_graphql", _LINEAR_GRAPHQL_FALLBACK_SCHEMA)
@@ -824,7 +845,24 @@ def _build_symphony_mcp_server(state: SessionState):  # pragma: no cover - SDK r
 
         return translate_symphony_tool_result(result)
 
-    return create_sdk_mcp_server(name="symphony", version="0.1.0", tools=[linear_graphql])
+    sw_schema = state.tool_schemas.get("sync_workpad", _SYNC_WORKPAD_FALLBACK_SCHEMA)
+
+    @tool(
+        "sync_workpad",
+        "Create or update a workpad comment on a Linear issue. Reads the body "
+        "from a local file to keep the conversation context small.",
+        sw_schema,
+    )
+    async def sync_workpad(args: dict[str, Any]) -> dict[str, Any]:
+        result = await forward_tool_call_to_symphony(
+            state.pending_tool_calls,
+            name="sync_workpad",
+            input=args,
+        )
+
+        return translate_symphony_tool_result(result)
+
+    return create_sdk_mcp_server(name="symphony", version="0.1.0", tools=[linear_graphql, sync_workpad])
 
 
 async def _handle_init(state: SessionState, env: dict[str, Any]) -> None:
