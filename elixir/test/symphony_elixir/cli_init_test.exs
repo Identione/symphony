@@ -153,10 +153,120 @@ defmodule SymphonyElixir.CLI.InitTest do
              "symphony start --i-understand-that-this-will-be-running-without-the-usual-guardrails #{output}"
   end
 
+  test "--base-branch bakes the base into front matter, clone hook, and prompt body" do
+    deps = capture_deps()
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--base-branch",
+                 "develop",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:write, ^output, contents}
+
+    # Front matter: a `base_branch:` line nested under `repo:`.
+    assert contents =~ "base_branch: \"develop\""
+    # Clone hook fetches the base and records it for the base-aware skills.
+    assert contents =~ "git fetch --depth 1 origin 'develop:refs/remotes/origin/develop'"
+    assert contents =~ "git config symphony.baseBranch 'develop'"
+    # Body references the configured base, never origin/main.
+    assert contents =~ "origin/develop"
+    refute contents =~ "origin/main"
+    # The issue-branch isolation section is present.
+    assert contents =~ "symphony/{{ issue.identifier }}"
+
+    assert_received {:puts, output_message}
+    assert output_message =~ "Base branch 'develop'"
+  end
+
+  test "without --base-branch the clone hook is a bare clone and the body keeps origin/main" do
+    deps = capture_deps()
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:write, ^output, contents}
+
+    # No base_branch front-matter line, no base-aware clone-hook lines.
+    refute contents =~ "base_branch:"
+    refute contents =~ "git fetch --depth 1 origin"
+    refute contents =~ "git config symphony.baseBranch"
+    # Body keeps today's origin/main and emits no issue-branch isolation section.
+    assert contents =~ "origin/main"
+    refute contents =~ "symphony/{{ issue.identifier }}"
+
+    # after_create stays exactly the single clone line, with `agent:` on the very
+    # next line (no stray blank line from the nil-case EEx conditional). The
+    # clone hook lives in the front matter, which the byte-identity body test
+    # does not cover — this guards the nil render directly.
+    lines = String.split(contents, "\n")
+    clone_idx = Enum.find_index(lines, &String.contains?(&1, "git clone --depth 1"))
+    assert clone_idx
+    assert Enum.at(lines, clone_idx) == "    git clone --depth 1 'git@github.com:org/repo.git' ."
+    assert Enum.at(lines, clone_idx + 1) == "agent:"
+  end
+
+  test "rejects --base-branch values that are not safe git branch names" do
+    # Note: a leading-`-` value (e.g. "-x") is also rejected, but OptionParser
+    # intercepts it before validate_base_branch runs (a token starting with `-`
+    # is not consumed as the flag's argument), so it surfaces as "invalid flags"
+    # rather than this message — excluded here; the leading-`-` guard in
+    # validate_base_branch still defends non-CLI callers.
+    for bad <- ["bad branch", "has..dots", "ref@{0}", "trailing/", "x.lock", "a;b", "$(x)"] do
+      deps = capture_deps()
+
+      assert {:error, message} =
+               Init.run(
+                 [
+                   "--linear-project",
+                   "symphony-2e32f5d86d8c",
+                   "--repo-url",
+                   "git@github.com:org/repo.git",
+                   "--base-branch",
+                   bad
+                 ],
+                 deps
+               ),
+             "expected #{inspect(bad)} to be rejected"
+
+      assert message =~ "--base-branch must be a valid git branch name"
+      refute_received {:write, _path, _contents}
+    end
+  end
+
   test "template prompt body stays byte-identical to the canonical elixir/WORKFLOW.md body" do
     # Single-source guard: the init template inlines the canonical prompt body so
     # generated instances behave exactly like elixir/WORKFLOW.md. If either file's
     # body drifts from the other, this fails loudly and both must be updated together.
+    #
+    # The template body now carries optional base-branch EEx (`@base_branch` — the
+    # only assign the body references). We render it with `base_branch: nil` (the
+    # default-instance case), which reproduces the canonical hardcoded
+    # `origin/main` body and omits the issue-branch section. The base-branch
+    # render is exercised separately by the `--base-branch` init test.
     {:ok, template} =
       File.read(Application.app_dir(:symphony_elixir, "priv/templates/workflow.md.eex"))
 
@@ -169,7 +279,10 @@ defmodule SymphonyElixir.CLI.InitTest do
       String.trim(marker <> body)
     end
 
-    assert body_of.(template) == body_of.(canonical)
+    rendered_template_body =
+      EEx.eval_string(body_of.(template), assigns: [base_branch: nil])
+
+    assert rendered_template_body == body_of.(canonical)
   end
 
   test "prints next-step commands using whichever invocation form the operator used" do

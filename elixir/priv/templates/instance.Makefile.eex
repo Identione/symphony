@@ -156,8 +156,11 @@ logs: ## Tail the structured application log (rotating).
 	@touch $(STRUCT_LOG)
 	@tail -n 200 -f $(STRUCT_LOG)
 
-preflight: ensure-trust check-built check-workflow ## Validate WORKFLOW.md against the live environment.
+preflight: ensure-trust check-built check-workflow ## Validate WORKFLOW.md against the live env (incl. prompt-body sync).
 	@cd $(ELIXIR_DIR) && mise exec -- ./bin/symphony preflight "$(WORKFLOW)"
+	@# Fail if this instance's baked prompt body has drifted from the template /
+	@# its own repo.base_branch (re-bake with `cd $(ROOT) && make resync-bodies`).
+	@cd $(ELIXIR_DIR) && mise exec -- elixir scripts/resync_instance_bodies.exs --check "$(WORKFLOW)"
 
 clean: ## Remove run/ (PID + stdout capture). Leaves log/ intact.
 	@rm -rf $(RUN_DIR)

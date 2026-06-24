@@ -96,6 +96,16 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert message =~ "codex.quota.dispatch_pause_percent"
   end
 
+  test "schema parses repo.base_branch and defaults it to nil" do
+    assert {:ok, settings} =
+             Schema.parse(%{repo: %{url: "git@github.com:org/repo.git", base_branch: "develop"}})
+
+    assert settings.repo.base_branch == "develop"
+
+    assert {:ok, defaulted} = Schema.parse(%{repo: %{url: "git@github.com:org/repo.git"}})
+    assert defaulted.repo.base_branch == nil
+  end
+
   test "workspace bootstrap can be implemented in after_create hook" do
     test_root =
       Path.join(

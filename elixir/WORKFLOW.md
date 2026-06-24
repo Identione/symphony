@@ -21,6 +21,14 @@ workspace:
 # Declarative repo metadata (SPEC.md §5.3.6). `repo.url` feeds
 # `hooks.after_create` + `symphony preflight`; `repo.path` is optional and
 # operator-facing only (Symphony never reads/writes through it).
+# Optional `repo.base_branch` (set via `symphony init --base-branch <name>`)
+# points agents at a development branch instead of the repo default. It is NOT
+# self-contained: the cloned target repo must carry base-aware push/pull/land
+# skills (incl. land_watch.py) that read `git config symphony.baseBranch` (set
+# by the after_create hook, `main` fallback) to set the PR `--base`, merge the
+# right branch, and refuse pushing the protected/base branch. Symphony never
+# vendors them — without them PRs target the wrong base and the protected-branch
+# guard is absent. See SPEC.md §5.3.6 + elixir/README.md.
 repo:
   url: https://github.com/Identione/symphony.git
 hooks:

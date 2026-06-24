@@ -3,6 +3,7 @@ import asyncio
 import json
 import random
 import re
+import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
@@ -34,6 +35,22 @@ class RateLimitError(RuntimeError):
 
 def is_rate_limit_error(error: str) -> bool:
     return "HTTP 429" in error or "rate limit" in error.lower()
+
+
+def base_branch() -> str:
+    """Resolve the instance's base branch from `git config symphony.baseBranch`
+    (set by the workspace `after_create` hook), defaulting to `main` on default
+    instances where the config is unset."""
+    try:
+        result = subprocess.run(
+            ["git", "config", "--get", "symphony.baseBranch"],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return result.stdout.strip() or "main"
+    except OSError:
+        return "main"
 
 
 async def run_gh(*args: str) -> str:
@@ -645,8 +662,8 @@ async def watch_pr() -> None:
     pr = await get_pr_info()
     if is_merge_conflicting(pr):
         print(
-            "PR has merge conflicts. Resolve/rebase against main and push before "
-            "running land_watch again.",
+            f"PR has merge conflicts. Resolve/rebase against {base_branch()} and "
+            "push before running land_watch again.",
         )
         raise SystemExit(5)
     head_sha = pr.head_sha
@@ -659,8 +676,8 @@ async def watch_pr() -> None:
             current = await get_pr_info()
             if is_merge_conflicting(current):
                 print(
-                    "PR has merge conflicts. Resolve/rebase against main and push "
-                    "before running land_watch again.",
+                    f"PR has merge conflicts. Resolve/rebase against {base_branch()} "
+                    "and push before running land_watch again.",
                 )
                 raise SystemExit(5)
             if current.head_sha != head_sha:

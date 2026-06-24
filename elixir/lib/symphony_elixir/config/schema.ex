@@ -131,12 +131,20 @@ defmodule SymphonyElixir.Config.Schema do
       # need to inspect or modify project-local files outside the per-issue
       # workspace.
       field(:path, :string)
+      # `base_branch` is the git branch agents branch from, sync with, and
+      # squash-merge into. Optional: nil means "unset" — Symphony emits no
+      # base-aware machinery and PRs target the repo's own default branch
+      # (today's behavior). When set (via `symphony init --base-branch`), the
+      # generated workflow isolates work onto issue branches off this branch.
+      # Symphony performs no git operations with this value at runtime; it only
+      # shapes the generated WORKFLOW.md prompt at init time.
+      field(:base_branch, :string)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:url, :path], empty_values: [])
+      |> cast(attrs, [:url, :path, :base_branch], empty_values: [])
     end
   end
 
