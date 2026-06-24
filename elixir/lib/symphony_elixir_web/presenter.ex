@@ -115,17 +115,58 @@ defmodule SymphonyElixirWeb.Presenter do
 
   defp provider_quota_card(provider, snapshot, now_ms, now) do
     threshold = provider_threshold(provider)
+    buckets = quota_buckets(Map.get(snapshot, :buckets, %{}), threshold, now)
 
     %{
       provider: provider,
       source: Map.get(snapshot, :source),
       fetched_at: Map.get(snapshot, :fetched_at),
+      fetched_ago: relative_ago(Map.get(snapshot, :fetched_at), now),
       stale: ProviderQuota.stale?(snapshot, now_ms),
-      error: Map.get(snapshot, :error),
+      error: quota_error(snapshot, buckets, now),
       threshold: threshold,
-      buckets: quota_buckets(Map.get(snapshot, :buckets, %{}), threshold, now)
+      buckets: buckets
     }
   end
+
+  # Enriches a raw error snapshot for display: a human-readable message, a
+  # severity band (transient telemetry hiccups self-heal → :warn; auth/config
+  # errors need an operator → :danger), how long the failure streak has lasted,
+  # and whether the buckets shown are carried-forward last-known data. This
+  # distinguishes "we can't *read* the usage numbers right now" from "the
+  # account quota is actually exhausted" (which the buckets/threshold show).
+  defp quota_error(snapshot, buckets, now) do
+    case Map.get(snapshot, :error) do
+      %{} = error ->
+        code = to_string(error[:code] || error["code"] || "error")
+
+        %{
+          code: code,
+          detail: error[:detail] || error["detail"],
+          message: quota_error_message(code),
+          level: quota_error_level(code),
+          since: relative_ago(Map.get(snapshot, :error_since), now),
+          last_attempt: relative_ago(Map.get(snapshot, :last_attempt_at), now),
+          showing_last_known: buckets != []
+        }
+
+      _ ->
+        nil
+    end
+  end
+
+  defp quota_error_message("rate_limited"), do: "Usage telemetry rate-limited"
+  defp quota_error_message("auth_failed"), do: "Usage telemetry authentication failed"
+  defp quota_error_message("missing_oauth_token"), do: "No OAuth token available"
+  defp quota_error_message("network_error"), do: "Usage telemetry unreachable"
+  defp quota_error_message("http_error"), do: "Usage telemetry returned an HTTP error"
+  defp quota_error_message("decode_error"), do: "Usage telemetry returned an unreadable response"
+  defp quota_error_message("timeout"), do: "Usage telemetry timed out"
+  defp quota_error_message(code), do: "Usage telemetry error (#{code})"
+
+  # Transient/self-healing telemetry failures vs. ones that need operator action.
+  defp quota_error_level(code) when code in ~w(auth_failed missing_oauth_token), do: :danger
+  defp quota_error_level(_code), do: :warn
 
   defp quota_buckets(buckets, threshold, now) when is_map(buckets) do
     buckets
@@ -197,6 +238,21 @@ defmodule SymphonyElixirWeb.Presenter do
   end
 
   defp relative_reset(_resets_at, _now), do: nil
+
+  defp relative_ago(at, now) when is_binary(at) do
+    case DateTime.from_iso8601(at) do
+      {:ok, dt, _offset} ->
+        case DateTime.diff(now, dt, :second) do
+          seconds when seconds > 0 -> humanize_duration(seconds) <> " ago"
+          _ -> "just now"
+        end
+
+      _ ->
+        nil
+    end
+  end
+
+  defp relative_ago(_at, _now), do: nil
 
   defp humanize_duration(seconds) when is_integer(seconds) do
     days = div(seconds, 86_400)

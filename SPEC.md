@@ -640,7 +640,7 @@ protocol to Symphony shaped like the Codex app-server client.
 - `quota` (object, OPTIONAL)
   - Account-quota tracking + dispatch-pause config; see §5.3.5.3. For Claude, when `enabled` the
     runtime polls the OAuth usage endpoint (`endpoint`, `anthropic_beta`, `refresh_ms`,
-    `token_source`) to populate the snapshot.
+    `max_backoff_ms`, `token_source`) to populate the snapshot.
 
 Authentication note:
 
@@ -680,7 +680,15 @@ Fields:
 - `anthropic_beta` (string) — Claude only
   - Default: `oauth-2025-04-20`. Value sent in the `anthropic-beta` request header.
 - `refresh_ms` (integer > 0) — Claude only
-  - Default: `60000` (1 minute). Poll cadence for the OAuth usage endpoint.
+  - Default: `60000` (1 minute). Steady-state poll cadence for the OAuth usage endpoint.
+- `max_backoff_ms` (integer > 0) — Claude only
+  - Default: `900000` (15 minutes). After a failed or rate-limited poll the next attempt is delayed
+    by exponential backoff — `refresh_ms` doubled per consecutive failure, capped at this value,
+    with any `Retry-After` response header honored as a floor and small jitter applied — so a
+    rate-limited usage endpoint is given room to recover instead of being polled every `refresh_ms`.
+    The delay resets to `refresh_ms` on the first successful poll. While the poll is failing the
+    snapshot retains the *last successful* fetch's age (so it eventually goes stale and stops gating
+    dispatch) and records the failure as a quota-card error rather than discarding last-known usage.
 - `token_source` (enum) — Claude only
   - Allowed values: `credentials_file`, `claude_cli_refresh`. Default: `credentials_file`. The OAuth
     token is read from `$CLAUDE_CODE_OAUTH_TOKEN` when set, otherwise from
@@ -965,7 +973,8 @@ not require recognizing or validating extension fields unless that extension is 
   `permission_request`/`system_init` log lines). Off by default so normal
   operation stays quiet — see §10.8.
 - `agent.claude.quota`: object, OPTIONAL — see §5.3.5.3 (Claude additionally polls the OAuth usage
-  endpoint via `endpoint`, `anthropic_beta`, `refresh_ms`, `token_source` when `enabled`)
+  endpoint via `endpoint`, `anthropic_beta`, `refresh_ms`, `max_backoff_ms`, `token_source` when
+  `enabled`)
 
 ## 7. Orchestration State Machine
 

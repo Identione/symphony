@@ -11,6 +11,10 @@ defmodule SymphonyElixir.Claude.QuotaCollector do
   @default_endpoint "https://api.anthropic.com/api/oauth/usage"
   @default_beta "oauth-2025-04-20"
   @default_refresh_ms 60_000
+  @default_max_backoff_ms 900_000
+  # Cap the exponent so the bignum shift stays cheap; the cap is applied to the
+  # result anyway, so a higher exponent could never raise the delay further.
+  @max_backoff_exponent 20
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -22,7 +26,8 @@ defmodule SymphonyElixir.Claude.QuotaCollector do
     state = %{
       orchestrator: Keyword.get(opts, :orchestrator, Orchestrator),
       http_client: Keyword.get(opts, :http_client, {Req, :get}),
-      last_snapshot: nil
+      last_snapshot: nil,
+      consecutive_failures: 0
     }
 
     send(self(), :refresh)
@@ -148,42 +153,84 @@ defmodule SymphonyElixir.Claude.QuotaCollector do
 
   defp refresh_with_settings(state, settings) do
     quota = settings.agent.claude.quota
-    delay_ms = refresh_delay(quota)
 
     if settings.agent.kind == "claude" and quota.enabled == true do
-      state
-      |> fetch_quota_snapshot(settings, quota, delay_ms)
+      fetch_quota_snapshot(state, settings, quota)
     else
-      {delay_ms, state}
+      # Not polling this cycle — reset the failure streak so a later enable
+      # starts from the base interval rather than a stale backoff.
+      {next_delay(quota, 0, nil), %{state | consecutive_failures: 0}}
     end
   end
 
-  defp fetch_quota_snapshot(state, settings, quota, delay_ms) do
+  defp fetch_quota_snapshot(state, settings, quota) do
     case fetch_once(settings, http_client: state.http_client) do
       {:ok, snapshot} ->
         notify_orchestrator(state.orchestrator, snapshot)
-        {delay_ms, %{state | last_snapshot: snapshot}}
+        {next_delay(quota, 0, nil), %{state | last_snapshot: snapshot, consecutive_failures: 0}}
 
       {:error, reason, retry_after_ms} ->
-        notify_error_snapshot(state, quota, reason, retry_after_ms || delay_ms)
+        handle_fetch_error(state, quota, reason, retry_after_ms)
 
       {:error, reason} ->
-        notify_error_snapshot(state, quota, reason, delay_ms)
+        handle_fetch_error(state, quota, reason, nil)
     end
   end
 
-  defp notify_error_snapshot(state, quota, reason, delay_ms) do
+  defp handle_fetch_error(state, quota, reason, retry_after_ms) do
+    failures = state.consecutive_failures + 1
+    delay_ms = next_delay(quota, failures, retry_after_ms)
     snapshot = ProviderQuota.error_snapshot(:claude, reason, quota, state.last_snapshot)
     notify_orchestrator(state.orchestrator, snapshot)
-    {delay_ms, %{state | last_snapshot: snapshot}}
+
+    Logger.warning("Claude quota poll failed code=#{error_code(reason)} consecutive_failures=#{failures} retry_in_ms=#{delay_ms}")
+
+    {delay_ms, %{state | last_snapshot: snapshot, consecutive_failures: failures}}
   end
 
-  defp refresh_delay(%{} = quota) do
-    case Map.get(quota, :refresh_ms) do
+  defp error_code(reason) when is_atom(reason), do: reason
+  defp error_code({code, _detail}) when is_atom(code), do: code
+
+  @doc """
+  Computes the delay before the next poll.
+
+  `consecutive_failures == 0` (a success or a skipped cycle) returns the
+  steady-state `refresh_ms`. Otherwise the delay grows exponentially —
+  `refresh_ms` doubled per failure, capped at `max_backoff_ms` — with a
+  `Retry-After` value (ms) honored as a floor and a small upward jitter applied
+  to avoid synchronized retries. This keeps a rate-limited usage endpoint from
+  being polled every `refresh_ms` until it recovers.
+  """
+  @spec next_delay(map(), non_neg_integer(), non_neg_integer() | nil) :: non_neg_integer()
+  def next_delay(quota, 0, _retry_after_ms), do: base_refresh_ms(quota)
+
+  def next_delay(quota, failures, retry_after_ms) when is_integer(failures) and failures > 0 do
+    exponent = min(failures - 1, @max_backoff_exponent)
+    backoff = min(max_backoff_ms(quota), base_refresh_ms(quota) * Integer.pow(2, exponent))
+    floor_ms = max(backoff, retry_after_ms || 0)
+    floor_ms + jitter(floor_ms)
+  end
+
+  # Up to ~10% upward jitter; never reduces the floor.
+  defp jitter(0), do: 0
+  defp jitter(ms), do: :rand.uniform(max(1, div(ms, 10)))
+
+  defp base_refresh_ms(quota) do
+    case quota_value(quota, :refresh_ms) do
       value when is_integer(value) and value > 0 -> value
       _ -> @default_refresh_ms
     end
   end
+
+  defp max_backoff_ms(quota) do
+    case quota_value(quota, :max_backoff_ms) do
+      value when is_integer(value) and value > 0 -> value
+      _ -> @default_max_backoff_ms
+    end
+  end
+
+  defp quota_value(quota, key) when is_map(quota), do: Map.get(quota, key) || Map.get(quota, Atom.to_string(key))
+  defp quota_value(_quota, _key), do: nil
 
   defp notify_orchestrator(orchestrator, snapshot) do
     if Process.whereis(orchestrator) do

@@ -55,7 +55,6 @@ defmodule SymphonyElixir.ProviderQuota do
   def error_snapshot(provider, reason, quota_config, previous \\ nil, opts \\ [])
       when provider in [:codex, :claude] and is_map(quota_config) do
     now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
-    now_ms = Keyword.get_lazy(opts, :now_ms, fn -> System.monotonic_time(:millisecond) end)
     stale_after_ms = map_value(quota_config, [:stale_after_ms, "stale_after_ms"]) || 180_000
     source = if provider == :claude, do: "anthropic_oauth_usage", else: "codex_app_server"
 
@@ -69,11 +68,37 @@ defmodule SymphonyElixir.ProviderQuota do
           raw: nil
         }
 
+    now_iso = DateTime.to_iso8601(DateTime.truncate(now, :second))
+
+    # Preserve `fetched_at`/`fetched_at_ms` from the last *successful* fetch
+    # (carried verbatim through `base`, which is either the previous snapshot or,
+    # on a streak of failures, the previous error snapshot that already preserved
+    # it). This keeps the snapshot's age tied to when the data was actually read,
+    # so a telemetry outage eventually trips `stale?/2` — the card stops looking
+    # perpetually fresh and stale buckets stop gating dispatch. When there has
+    # never been a successful fetch, `base` carries no timestamp and the snapshot
+    # reads as stale, which is correct: we have no fresh data to show.
     base
-    |> Map.put(:fetched_at, DateTime.to_iso8601(DateTime.truncate(now, :second)))
-    |> Map.put(:fetched_at_ms, now_ms)
     |> Map.put(:stale_after_ms, stale_after_ms)
     |> Map.put(:error, sanitize_error(reason))
+    |> Map.put(:error_since, error_since(base, now_iso))
+    |> Map.put(:last_attempt_at, now_iso)
+  end
+
+  # First failure after a success (or ever): the streak starts now. On a
+  # continuing streak `base` is the prior error snapshot carrying an `:error`
+  # map, so preserve when the streak began.
+  defp error_since(base, now_iso) do
+    case map_value(base, [:error, "error"]) do
+      %{} ->
+        case map_value(base, [:error_since, "error_since"]) do
+          since when is_binary(since) -> since
+          _ -> now_iso
+        end
+
+      _ ->
+        now_iso
+    end
   end
 
   @spec active_quota_exhausted?(map() | nil, number(), integer()) :: boolean()

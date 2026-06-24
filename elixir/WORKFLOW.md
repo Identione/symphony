@@ -131,6 +131,7 @@ agent:
     #   enabled: true
     #   dispatch_pause_percent: 95.0
     #   refresh_ms: 60000
+    #   max_backoff_ms: 900000   # cap for exponential backoff after failed/rate-limited polls
     #   stale_after_ms: 180000
     #   token_source: claude_cli_refresh   # keeps the OAuth token alive on an idle daemon
     #   cli_refresh_margin_ms: 300000
