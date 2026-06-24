@@ -93,8 +93,36 @@ defmodule SymphonyElixirWeb.PresenterProviderQuotaTest do
     snapshot = ProviderQuota.error_snapshot(:claude, :timeout, %{})
     [card] = Presenter.provider_quota_cards(%{claude: snapshot})
 
-    assert card.error == %{code: "timeout"}
+    assert card.error.code == "timeout"
+    assert card.error.message == "Usage telemetry timed out"
     assert card.buckets == []
+  end
+
+  test "a rate-limited telemetry fetch reads as a transient warning, not a hard error" do
+    # A prior good fetch whose buckets are carried forward through the failure.
+    good = claude_snapshot(now_ms: 1_000)
+    snapshot = ProviderQuota.error_snapshot(:claude, :rate_limited, %{stale_after_ms: 180_000}, good)
+
+    [card] = Presenter.provider_quota_cards(%{claude: snapshot})
+
+    assert card.error.code == "rate_limited"
+    assert card.error.message == "Usage telemetry rate-limited"
+    assert card.error.level == :warn
+    # Buckets carried from the last good fetch are still shown as last-known.
+    assert card.error.showing_last_known
+    refute card.buckets == []
+    # The streak start ("error_since") is rendered as a relative age.
+    assert is_binary(card.error.since)
+  end
+
+  test "auth failures read as a hard error needing operator action" do
+    snapshot = ProviderQuota.error_snapshot(:claude, :auth_failed, %{})
+    [card] = Presenter.provider_quota_cards(%{claude: snapshot})
+
+    assert card.error.level == :danger
+    assert card.error.message == "Usage telemetry authentication failed"
+    # No prior buckets to show.
+    refute card.error.showing_last_known
   end
 
   test "missing or empty provider_quotas yields no cards" do

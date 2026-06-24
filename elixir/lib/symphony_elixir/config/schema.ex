@@ -166,9 +166,16 @@ defmodule SymphonyElixir.Config.Schema do
 
     `enabled`/`stale_after_ms`/`dispatch_pause_percent` apply to both providers.
     The remaining fields (`endpoint`, `anthropic_beta`, `refresh_ms`,
-    `token_source`, `cli_refresh_command`, `cli_refresh_margin_ms`) drive the
-    Claude OAuth usage poller only — Codex quota is derived from the app-server
-    rate-limit stream, so those fields are ignored for `agent.codex.quota`.
+    `max_backoff_ms`, `token_source`, `cli_refresh_command`,
+    `cli_refresh_margin_ms`) drive the Claude OAuth usage poller only — Codex
+    quota is derived from the app-server rate-limit stream, so those fields are
+    ignored for `agent.codex.quota`.
+
+    `refresh_ms` is the steady-state poll interval. On a failed poll the next
+    attempt is delayed by exponential backoff (`refresh_ms` doubled per
+    consecutive failure, capped at `max_backoff_ms`, honoring a `Retry-After`
+    header as a floor), so a rate-limited usage endpoint is given room to
+    recover instead of being hammered every `refresh_ms`.
 
     `token_source` controls how the Claude OAuth access token is obtained:
     `credentials_file` reads it read-only; `claude_cli_refresh` additionally
@@ -188,6 +195,7 @@ defmodule SymphonyElixir.Config.Schema do
       field(:endpoint, :string, default: "https://api.anthropic.com/api/oauth/usage")
       field(:anthropic_beta, :string, default: "oauth-2025-04-20")
       field(:refresh_ms, :integer, default: 60_000)
+      field(:max_backoff_ms, :integer, default: 900_000)
       field(:stale_after_ms, :integer, default: 180_000)
       field(:dispatch_pause_percent, :float, default: 95.0)
       field(:token_source, :string, default: "credentials_file")
@@ -208,6 +216,7 @@ defmodule SymphonyElixir.Config.Schema do
           :endpoint,
           :anthropic_beta,
           :refresh_ms,
+          :max_backoff_ms,
           :stale_after_ms,
           :dispatch_pause_percent,
           :token_source,
@@ -218,6 +227,7 @@ defmodule SymphonyElixir.Config.Schema do
       )
       |> validate_required([:endpoint, :anthropic_beta, :token_source, :cli_refresh_command])
       |> validate_number(:refresh_ms, greater_than: 0)
+      |> validate_number(:max_backoff_ms, greater_than: 0)
       |> validate_number(:stale_after_ms, greater_than: 0)
       |> validate_number(:dispatch_pause_percent, greater_than_or_equal_to: 0, less_than_or_equal_to: 100)
       |> validate_number(:cli_refresh_margin_ms, greater_than: 0)

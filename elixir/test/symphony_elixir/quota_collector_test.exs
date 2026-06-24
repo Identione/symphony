@@ -133,4 +133,48 @@ defmodule SymphonyElixir.Claude.QuotaCollectorTest do
     refute_received {:cmd, _, _, _}
     assert_received {:http_auth, {"authorization", "Bearer env-token"}}
   end
+
+  describe "next_delay/3 backoff" do
+    @quota %{refresh_ms: 60_000, max_backoff_ms: 900_000}
+
+    test "no failures polls at the steady-state interval" do
+      assert QuotaCollector.next_delay(@quota, 0, nil) == 60_000
+      # A Retry-After on the success path is irrelevant.
+      assert QuotaCollector.next_delay(@quota, 0, 300_000) == 60_000
+    end
+
+    test "delay grows exponentially per consecutive failure (with <=10% jitter)" do
+      assert_within(QuotaCollector.next_delay(@quota, 1, nil), 60_000)
+      assert_within(QuotaCollector.next_delay(@quota, 2, nil), 120_000)
+      assert_within(QuotaCollector.next_delay(@quota, 3, nil), 240_000)
+      assert_within(QuotaCollector.next_delay(@quota, 4, nil), 480_000)
+    end
+
+    test "backoff is capped at max_backoff_ms" do
+      # 60_000 * 2^4 = 960_000 > 900_000 cap.
+      assert_within(QuotaCollector.next_delay(@quota, 5, nil), 900_000)
+      # A large failure count never exceeds the cap (exponent is bounded).
+      assert_within(QuotaCollector.next_delay(@quota, 1_000, nil), 900_000)
+    end
+
+    test "Retry-After acts as a floor over the computed backoff" do
+      # First failure backoff is 60_000, but the server asked for 300_000.
+      assert_within(QuotaCollector.next_delay(@quota, 1, 300_000), 300_000)
+      # When backoff already exceeds Retry-After, backoff wins.
+      assert_within(QuotaCollector.next_delay(@quota, 4, 300_000), 480_000)
+    end
+
+    test "falls back to defaults when the quota map omits the knobs" do
+      assert QuotaCollector.next_delay(%{}, 0, nil) == 60_000
+      assert_within(QuotaCollector.next_delay(%{}, 1, nil), 60_000)
+      # Default cap is 900_000.
+      assert_within(QuotaCollector.next_delay(%{}, 100, nil), 900_000)
+    end
+
+    # The delay floors at `expected` and adds at most ~10% upward jitter.
+    defp assert_within(actual, expected) do
+      assert actual >= expected
+      assert actual <= expected + div(expected, 10) + 1
+    end
+  end
 end

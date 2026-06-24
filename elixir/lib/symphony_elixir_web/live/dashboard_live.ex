@@ -176,10 +176,20 @@ defmodule SymphonyElixirWeb.DashboardLive do
                 </div>
 
                 <%= if card.error do %>
-                  <p class="quota-error">
-                    <strong><%= card.error[:code] || card.error["code"] %></strong>
-                    <%= card.error[:detail] || card.error["detail"] %>
-                  </p>
+                  <div class={"quota-error quota-error-#{card.error.level}"}>
+                    <p class="quota-error-message">
+                      <strong><%= card.error.message %></strong>
+                      <%= if card.error.since do %>
+                        <span class="quota-error-meta">· failing for <%= card.error.since %></span>
+                      <% end %>
+                    </p>
+                    <%= if card.error.showing_last_known and card.fetched_ago do %>
+                      <p class="quota-error-meta">Showing last-known usage from <%= card.fetched_ago %>.</p>
+                    <% end %>
+                    <%= if card.error.detail do %>
+                      <p class="quota-error-meta"><%= card.error.code %>: <%= card.error.detail %></p>
+                    <% end %>
+                  </div>
                 <% end %>
 
                 <%= if card.buckets == [] do %>

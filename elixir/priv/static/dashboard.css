@@ -504,8 +504,31 @@ pre,
 
 .quota-error {
   margin: 0 0 0.85rem;
-  color: var(--danger);
+  padding: 0.5rem 0.7rem;
+  border-radius: 12px;
   font-size: 0.85rem;
+}
+
+.quota-error-message {
+  margin: 0;
+}
+
+.quota-error-meta {
+  margin: 0.2rem 0 0;
+  font-size: 0.78rem;
+  opacity: 0.8;
+}
+
+.quota-error-warn {
+  color: #8a5a00;
+  background: #fdf4e3;
+  border: 1px solid #f0d9a8;
+}
+
+.quota-error-danger {
+  color: var(--danger);
+  background: var(--danger-soft);
+  border: 1px solid #f6d3cf;
 }
 
 .quota-row {
