@@ -456,11 +456,16 @@ defmodule SymphonyElixir.AgentRunner do
     %{fail_streak: streak, calls: calls, last_call_turn: last} =
       OverseerSession.progress_snapshot(session)
 
+    # IDE-230 observability: at every continuation turn boundary, emit the
+    # decision-bearing counters so the consult/skip/cap branch taken below can be
+    # reconstructed from the logs alone.
+    log_overseer_turn_boundary(issue, turn_number, streak, calls, last, config)
+
     cond do
       turn_number >= config.absolute_max_turns ->
         Logger.info(
-          "Reached overseer.absolute_max_turns=#{config.absolute_max_turns} for " <>
-            "#{issue_context(issue)} with issue still active; winding down"
+          "Overseer decision for #{issue_context(issue)} turn=#{turn_number}: winddown " <>
+            "reason=absolute_max_turns_reached overseer.absolute_max_turns=#{config.absolute_max_turns}"
         )
 
         run_winddown_turn(context, app_session, issue, "the absolute turn ceiling (#{config.absolute_max_turns}) was reached")
@@ -468,6 +473,11 @@ defmodule SymphonyElixir.AgentRunner do
         :max_turns_reached
 
       Overseer.should_run?(%{turn: turn_number, calls: calls, last_call_turn: last, fail_streak: streak}, config) ->
+        Logger.info(
+          "Overseer decision for #{issue_context(issue)} turn=#{turn_number}: consult " <>
+            "engine=#{config.engine} reason=#{overseer_trigger_reason(turn_number, streak, config)}"
+        )
+
         # Count the call before running so a crash mid-call still consumes the
         # per-session budget (no infinite re-fire on a flaky engine).
         OverseerSession.register_call(session, turn_number)
@@ -476,6 +486,11 @@ defmodule SymphonyElixir.AgentRunner do
       Overseer.triggered?(turn_number, streak, config) and calls >= config.max_calls_per_session ->
         # A judgement is wanted but the call budget is spent — stop extending
         # rather than run on to the absolute ceiling with no judge.
+        Logger.info(
+          "Overseer decision for #{issue_context(issue)} turn=#{turn_number}: cap " <>
+            "reason=call_budget_exhausted calls=#{calls}/#{config.max_calls_per_session}"
+        )
+
         Logger.warning(
           "Overseer call budget (#{config.max_calls_per_session}) exhausted for " <>
             "#{issue_context(issue)} turn=#{turn_number}; capping run"
@@ -485,7 +500,90 @@ defmodule SymphonyElixir.AgentRunner do
         :max_turns_reached
 
       true ->
+        Logger.info(
+          "Overseer decision for #{issue_context(issue)} turn=#{turn_number}: skip overseer, extend " <>
+            "reason=#{overseer_skip_reason(turn_number, streak, calls, last, config)}"
+        )
+
         do_run_codex_turns(context, app_session, issue, turn_number + 1, nil)
+    end
+  end
+
+  # One structured line per continuation-turn boundary carrying every counter the
+  # consult/skip/cap decision below reads, so an operator can replay the gate
+  # logic (IDE-230) from the logs without instrumenting the running daemon.
+  @spec log_overseer_turn_boundary(
+          Issue.t(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer() | nil,
+          OverseerConfig.t()
+        ) :: :ok
+  defp log_overseer_turn_boundary(issue, turn_number, streak, calls, last, config) do
+    Logger.info(
+      "Overseer turn boundary for #{issue_context(issue)} " <>
+        "turn=#{turn_number}/#{config.absolute_max_turns} " <>
+        "fail_streak=#{streak}/#{config.streak_to_llm} " <>
+        "calls=#{calls}/#{config.max_calls_per_session} " <>
+        "last_call_turn=#{last_call_turn_for_log(last)} " <>
+        "min_turns_between=#{config.min_turns_between} " <>
+        "mandatory_llm_every=#{config.mandatory_llm_every} engine=#{config.engine}"
+    )
+
+    :ok
+  end
+
+  @spec last_call_turn_for_log(non_neg_integer() | nil) :: String.t()
+  defp last_call_turn_for_log(nil), do: "none"
+  defp last_call_turn_for_log(turn), do: Integer.to_string(turn)
+
+  # Why the overseer *was* consulted: the streak arm, the cadence arm, or both.
+  @spec overseer_trigger_reason(non_neg_integer(), non_neg_integer(), OverseerConfig.t()) :: String.t()
+  defp overseer_trigger_reason(turn_number, streak, config) do
+    streak? = config.streak_to_llm > 0 and streak >= config.streak_to_llm
+    cadence? = config.mandatory_llm_every > 0 and rem(turn_number, config.mandatory_llm_every) == 0
+
+    case {streak?, cadence?} do
+      {true, true} ->
+        "fail_streak=#{streak}>=streak_to_llm=#{config.streak_to_llm} and " <>
+          "turn=#{turn_number} on mandatory_llm_every=#{config.mandatory_llm_every} cadence"
+
+      {true, false} ->
+        "fail_streak=#{streak}>=streak_to_llm=#{config.streak_to_llm}"
+
+      {false, true} ->
+        "turn=#{turn_number} on mandatory_llm_every=#{config.mandatory_llm_every} cadence"
+
+      {false, false} ->
+        "triggered"
+    end
+  end
+
+  # Why the overseer was *not* consulted on a turn that otherwise extends. Mirrors
+  # the `Overseer.should_run?/2` gate order so the reason matches the branch the
+  # `cond` actually took (not-triggered → cooldown → unsupported engine).
+  @spec overseer_skip_reason(
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer(),
+          non_neg_integer() | nil,
+          OverseerConfig.t()
+        ) :: String.t()
+  defp overseer_skip_reason(turn_number, streak, _calls, last, config) do
+    cond do
+      not Overseer.triggered?(turn_number, streak, config) ->
+        "not_triggered (fail_streak=#{streak}<streak_to_llm=#{config.streak_to_llm}, " <>
+          "turn=#{turn_number} off mandatory_llm_every=#{config.mandatory_llm_every} cadence)"
+
+      is_integer(last) and turn_number - last < config.min_turns_between ->
+        "cooldown_active (turn=#{turn_number} - last_call_turn=#{last} < min_turns_between=#{config.min_turns_between})"
+
+      config.engine != "api" ->
+        "engine_unsupported (engine=#{inspect(config.engine)})"
+
+      true ->
+        "no_overseer_gate_matched"
     end
   end
 
@@ -550,12 +648,18 @@ defmodule SymphonyElixir.AgentRunner do
 
     case Overseer.run(evidence, config) do
       {:ok, verdict} ->
+        action = Overseer.decide_action(verdict, config)
+
+        # `verdict.recommended_action` is what the model asked for; `action` is
+        # what the worker will actually do after the confidence-floor / steering /
+        # allow_abort downgrades — log both so a downgrade is visible.
         Logger.info(
           "Overseer verdict for #{issue_context(issue)} turn=#{turn_number}/#{config.absolute_max_turns} " <>
-            "verdict=#{verdict.verdict} action=#{verdict.recommended_action} confidence=#{verdict.confidence}"
+            "verdict=#{verdict.verdict} recommended_action=#{verdict.recommended_action} " <>
+            "confidence=#{verdict.confidence} resolved_action=#{decided_action_label(action)}"
         )
 
-        apply_overseer_action(Overseer.decide_action(verdict, config), issue, verdict)
+        apply_overseer_action(action, issue, verdict)
 
       {:error, reason} ->
         Logger.warning("Overseer call failed for #{issue_context(issue)} turn=#{turn_number} (no judgement): #{inspect(reason)}")
@@ -563,6 +667,15 @@ defmodule SymphonyElixir.AgentRunner do
         {:no_judgement, reason}
     end
   end
+
+  # Compact label for the `decide_action/2` result, including the downgrade
+  # reason on the `{:continue, why}` arms (e.g. `continue:low_confidence`).
+  @spec decided_action_label(Overseer.action()) :: String.t()
+  defp decided_action_label({:continue, why}), do: "continue:#{why}"
+  defp decided_action_label({:nudge, _msg}), do: "nudge"
+  defp decided_action_label({:recommend_extend_budget, _rationale}), do: "recommend_extend_budget"
+  defp decided_action_label({:escalate, _rationale, _findings}), do: "escalate"
+  defp decided_action_label({:abort, _rationale, _findings}), do: "abort"
 
   @spec apply_overseer_action(Overseer.action(), Issue.t(), Overseer.verdict()) :: overseer_outcome()
   defp apply_overseer_action({:continue, _why}, _issue, _verdict), do: {:approve, nil}
