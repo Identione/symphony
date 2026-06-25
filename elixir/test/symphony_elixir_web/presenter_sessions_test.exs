@@ -98,6 +98,13 @@ defmodule SymphonyElixirWeb.PresenterSessionsTest do
     assert length(payload.running) == 1
     assert length(payload.retrying) == 1
     assert length(payload.blocked) == 1
-    assert payload.counts == %{running: 1, retrying: 1, blocked: 1, dependency_blocked: 0}
+
+    assert payload.counts == %{
+             running: 1,
+             retrying: 1,
+             blocked: 1,
+             dependency_blocked: 0,
+             awaiting_merge: 0
+           }
   end
 end

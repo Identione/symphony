@@ -641,7 +641,8 @@ defmodule SymphonyElixir.ExtensionsTest do
                "running" => 1,
                "retrying" => 1,
                "blocked" => 1,
-               "dependency_blocked" => 1
+               "dependency_blocked" => 1,
+               "awaiting_merge" => 0
              },
              # Unified dashboard view: running/retrying/blocked entries tagged
              # with :status. Content is asserted explicitly below; the original
@@ -710,6 +711,7 @@ defmodule SymphonyElixir.ExtensionsTest do
                  "observed_at" => state_payload["dependency_blocked"] |> List.first() |> Map.fetch!("observed_at")
                }
              ],
+             "awaiting_merge" => [],
              "dependency_graph" => %{
                "nodes" => [
                  %{
@@ -849,6 +851,61 @@ defmodule SymphonyElixir.ExtensionsTest do
 
     assert %{"queued" => true, "coalesced" => false, "operations" => ["poll", "reconcile"]} =
              json_response(conn, 202)
+  end
+
+  test "phoenix observability api projects awaiting_merge entries with reason styling and a count" do
+    observed_at = DateTime.utc_now()
+
+    snapshot =
+      static_snapshot()
+      |> Map.put(:awaiting_merge, [
+        %{
+          issue_id: "issue-warn",
+          identifier: "MT-WARN",
+          title: "Resume held on an open blocker PR",
+          state: "In Progress",
+          reason: :pr_open,
+          blocker_prs: ["https://github.com/Identione/symphony/pull/7"],
+          observed_at: observed_at
+        },
+        %{
+          issue_id: "issue-danger",
+          identifier: "MT-DANGER",
+          title: "Resume held with no linked PR",
+          state: "In Progress",
+          reason: :no_pr_attachment,
+          blocker_prs: [],
+          observed_at: observed_at
+        }
+      ])
+
+    orchestrator_name = Module.concat(__MODULE__, :AwaitingMergeApiOrchestrator)
+
+    {:ok, _pid} = StaticOrchestrator.start_link(name: orchestrator_name, snapshot: snapshot)
+
+    start_test_endpoint(orchestrator: orchestrator_name, snapshot_timeout_ms: 50)
+
+    state_payload = json_response(get(build_conn(), "/api/v1/state"), 200)
+
+    assert state_payload["counts"]["awaiting_merge"] == 2
+
+    assert [warn, danger] = state_payload["awaiting_merge"]
+
+    assert warn == %{
+             "issue_id" => "issue-warn",
+             "issue_identifier" => "MT-WARN",
+             "title" => "Resume held on an open blocker PR",
+             "state" => "In Progress",
+             "reason" => "pr_open",
+             "reason_label" => "Blocker PR not yet merged",
+             "reason_level" => "warn",
+             "blocker_prs" => ["https://github.com/Identione/symphony/pull/7"],
+             "observed_at" => warn["observed_at"]
+           }
+
+    assert danger["reason"] == "no_pr_attachment"
+    assert danger["reason_level"] == "danger"
+    assert danger["blocker_prs"] == []
   end
 
   test "phoenix observability api exposes claude tokens with cache fields and claude_totals" do
@@ -1216,7 +1273,8 @@ defmodule SymphonyElixir.ExtensionsTest do
              "running" => 1,
              "retrying" => 1,
              "blocked" => 1,
-             "dependency_blocked" => 1
+             "dependency_blocked" => 1,
+             "awaiting_merge" => 0
            }
 
     dashboard_css = Req.get!("http://127.0.0.1:#{port}/dashboard.css")

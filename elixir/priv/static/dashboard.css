@@ -634,3 +634,68 @@ pre,
     padding: 1rem;
   }
 }
+
+.awaiting-merge-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 0.75rem;
+}
+
+.awaiting-merge-item {
+  border: 1px solid var(--page-deep);
+  border-left-width: 4px;
+  border-radius: 12px;
+  padding: 0.75rem 1rem;
+  background: var(--page-deep);
+}
+
+/* `pr_open` simply needs to merge — a soft warn. */
+.awaiting-merge-warn {
+  border-left-color: #d9920a;
+  background: #fdf4e3;
+}
+
+/* `no_pr_attachment` / `check_error` can hold indefinitely — loud danger. */
+.awaiting-merge-danger {
+  border-left-color: var(--danger);
+  background: var(--danger-soft);
+}
+
+.awaiting-merge-head {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+
+.awaiting-merge-badge-warn {
+  background: #fff7e8;
+  border-color: #f1d8a6;
+  color: #8a5a00;
+}
+
+.awaiting-merge-badge-danger {
+  background: var(--danger-soft);
+  border-color: #f6d3cf;
+  color: var(--danger);
+  font-weight: 600;
+}
+
+.awaiting-merge-title {
+  margin: 0.35rem 0 0;
+  font-size: 0.9rem;
+  color: var(--ink);
+}
+
+.awaiting-merge-prs {
+  margin: 0.35rem 0 0;
+  padding-left: 1.1rem;
+  font-size: 0.85rem;
+  word-break: break-all;
+}
+
+.awaiting-merge-meta {
+  margin: 0.35rem 0 0;
+  font-size: 0.8rem;
+}
