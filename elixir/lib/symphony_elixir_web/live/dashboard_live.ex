@@ -134,6 +134,12 @@ defmodule SymphonyElixirWeb.DashboardLive do
           </article>
 
           <article class="metric-card">
+            <p class="metric-label">Awaiting merge</p>
+            <p class="metric-value numeric"><%= @payload.counts.awaiting_merge %></p>
+            <p class="metric-detail">Dependency-resumed issues held until a blocker PR merges into base.</p>
+          </article>
+
+          <article class="metric-card">
             <p class="metric-label">Total tokens</p>
             <p class="metric-value numeric"><%= format_int(active_totals(@payload).total_tokens) %></p>
             <p class="metric-detail numeric">
@@ -151,6 +157,43 @@ defmodule SymphonyElixirWeb.DashboardLive do
             <p class="metric-value numeric"><%= format_runtime_seconds(total_runtime_seconds(@payload, @now)) %></p>
             <p class="metric-detail">Total agent runtime across completed and active sessions.</p>
           </article>
+        </section>
+
+        <section class="section-card">
+          <div class="section-header">
+            <div>
+              <h2 class="section-title">Awaiting merge</h2>
+              <p class="section-copy">Dependency-resumed issues held until a blocker PR lands in the base branch.</p>
+            </div>
+          </div>
+
+          <%= if @payload.awaiting_merge == [] do %>
+            <p class="empty-state">No issues awaiting a blocker merge.</p>
+          <% else %>
+            <ul class="awaiting-merge-list">
+              <li :for={entry <- @payload.awaiting_merge} class={"awaiting-merge-item awaiting-merge-#{entry.reason_level}"}>
+                <div class="awaiting-merge-head">
+                  <.issue_identifier identifier={entry.issue_identifier || entry.issue_id} />
+                  <span class={"state-badge awaiting-merge-badge-#{entry.reason_level}"}><%= entry.reason_label %></span>
+                </div>
+                <%= if entry.title do %>
+                  <p class="awaiting-merge-title"><%= entry.title %></p>
+                <% end %>
+                <%= if entry.blocker_prs == [] do %>
+                  <p class="awaiting-merge-meta muted">No blocker PR linked yet.</p>
+                <% else %>
+                  <ul class="awaiting-merge-prs">
+                    <li :for={pr <- entry.blocker_prs}>
+                      <a href={pr} target="_blank" rel="noopener noreferrer"><%= pr %></a>
+                    </li>
+                  </ul>
+                <% end %>
+                <%= if entry.observed_at do %>
+                  <p class="awaiting-merge-meta muted">Holding since <span class="mono numeric"><%= entry.observed_at %></span></p>
+                <% end %>
+              </li>
+            </ul>
+          <% end %>
         </section>
 
         <section class="section-card">

@@ -26,6 +26,7 @@ defmodule SymphonyElixirWeb.Presenter do
         project = linear_project()
 
         dependency_blocked = Map.get(snapshot, :dependency_blocked, [])
+        awaiting_merge = Map.get(snapshot, :awaiting_merge, [])
         dependency_graph_nodes = Map.get(snapshot, :dependency_graph, [])
 
         %{
@@ -37,13 +38,15 @@ defmodule SymphonyElixirWeb.Presenter do
             running: length(snapshot.running),
             retrying: length(snapshot.retrying),
             blocked: length(Map.get(snapshot, :blocked, [])),
-            dependency_blocked: length(dependency_blocked)
+            dependency_blocked: length(dependency_blocked),
+            awaiting_merge: length(awaiting_merge)
           },
           running: Enum.map(snapshot.running, &running_entry_payload/1),
           retrying: Enum.map(snapshot.retrying, &retry_entry_payload/1),
           blocked: Enum.map(Map.get(snapshot, :blocked, []), &blocked_entry_payload/1),
           sessions: session_entries(snapshot),
           dependency_blocked: Enum.map(dependency_blocked, &dependency_blocked_entry_payload/1),
+          awaiting_merge: Enum.map(awaiting_merge, &awaiting_merge_entry_payload/1),
           dependency_graph: dependency_graph_payload(dependency_graph_nodes),
           codex_totals: snapshot.codex_totals,
           claude_totals: Map.get(snapshot, :claude_totals) || @empty_claude_totals,
@@ -401,6 +404,40 @@ defmodule SymphonyElixirWeb.Presenter do
     }
   end
 
+  # Merge-gate hold entry. `reason` is a stable machine string; `reason_label` a
+  # human one; `reason_level` drives styling — `:danger` for the "could hold
+  # indefinitely" cases (`no_pr_attachment`/`check_error`), `:warn` for a PR that
+  # is simply not merged yet. `blocker_prs` are the GitHub PR URLs being awaited.
+  defp awaiting_merge_entry_payload(entry) do
+    reason = Map.get(entry, :reason)
+
+    %{
+      issue_id: Map.get(entry, :issue_id),
+      issue_identifier: Map.get(entry, :identifier),
+      title: Map.get(entry, :title),
+      state: Map.get(entry, :state),
+      reason: awaiting_merge_reason_string(reason),
+      reason_label: awaiting_merge_reason_label(reason),
+      reason_level: awaiting_merge_reason_level(reason),
+      blocker_prs: Map.get(entry, :blocker_prs, []),
+      observed_at: iso8601(Map.get(entry, :observed_at))
+    }
+  end
+
+  defp awaiting_merge_reason_string(:pr_open), do: "pr_open"
+  defp awaiting_merge_reason_string(:no_pr_attachment), do: "no_pr_attachment"
+  defp awaiting_merge_reason_string(:check_error), do: "check_error"
+  defp awaiting_merge_reason_string(reason) when is_binary(reason), do: reason
+  defp awaiting_merge_reason_string(_reason), do: nil
+
+  defp awaiting_merge_reason_label(:pr_open), do: "Blocker PR not yet merged"
+  defp awaiting_merge_reason_label(:no_pr_attachment), do: "Blocker has no linked PR"
+  defp awaiting_merge_reason_label(:check_error), do: "Could not verify blocker PR merge"
+  defp awaiting_merge_reason_label(_reason), do: "Awaiting blocker PR merge"
+
+  defp awaiting_merge_reason_level(reason) when reason in [:no_pr_attachment, :check_error], do: "danger"
+  defp awaiting_merge_reason_level(_reason), do: "warn"
+
   defp blocker_ref_payload(%{} = ref) do
     %{
       issue_id: Map.get(ref, :id),
@@ -490,12 +527,14 @@ defmodule SymphonyElixirWeb.Presenter do
   defp symphony_status_string(:retrying), do: "retrying"
   defp symphony_status_string(:blocked), do: "blocked"
   defp symphony_status_string(:waiting_on_blockers), do: "waiting_on_blockers"
+  defp symphony_status_string(:awaiting_merge), do: "awaiting_merge"
   defp symphony_status_string(_status), do: nil
 
   defp symphony_status_label(:running), do: "Running"
   defp symphony_status_label(:retrying), do: "Retrying"
   defp symphony_status_label(:blocked), do: "Blocked"
   defp symphony_status_label(:waiting_on_blockers), do: "Waiting on blockers"
+  defp symphony_status_label(:awaiting_merge), do: "Awaiting merge"
   defp symphony_status_label(_status), do: nil
 
   defp running_issue_payload(running) do

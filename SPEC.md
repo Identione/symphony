@@ -317,6 +317,20 @@ Fields:
   (an implicit Rework), so it does not build on a stale base. The entry
   is set when the running issue is paused and cleared when it is dispatched. In-memory only; cleared
   on restart.)
+- `awaiting_merge` (map `issue_id -> awaiting-merge entry`; observability-only mirror of
+  `rebase_pending` issues currently *held* by the merge-gate (§8.2): their Linear blockers have all
+  reached a terminal state, but at least one blocker's GitHub PR is not yet confirmed merged into the
+  base branch, so resuming them would build on a stale base. Each entry carries
+  `%{identifier, title, state, reason, blocker_prs, observed_at}` where `reason` is `pr_open`
+  (PR still open), `no_pr_attachment` (a Linear-terminal blocker has no linked PR — could hold
+  indefinitely), or `check_error` (the `gh` lookup failed). Recomputed wholesale each resolve pass so
+  it self-heals once the PR merges; `observed_at` is preserved across passes for a stable
+  holding-since timestamp. Dispatch consults it only to *hold* an issue (an issue present here is not
+  dispatched). In-memory only; cleared on restart.)
+- `merge_landed` (set of `issue_id`s whose blocker PRs the merge-gate has positively confirmed merged.
+  "Merged" is permanent, so once an id is cached here the gate neither re-queries GitHub nor re-holds
+  on a transient `gh` hiccup. Pruned to the live `rebase_pending` key set each pass and cleared for an
+  issue when it is (re-)dispatched. In-memory only; cleared on restart.)
 - `dependency_graph` (map `issue_id -> graph node projection`; observability-only node set for the
   dashboard dependency graph — managed candidates plus their transitive blockers (`blockers of
   blockers`). Roots are the issues this instance would actually dispatch (the candidate predicate),
@@ -724,6 +738,10 @@ Fields:
   - Implementations MAY consult `url` from a project-bootstrap preflight that performs an
     unauthenticated reachability probe (e.g. `git ls-remote`) without spawning the coding agent.
   - When absent, preflight reachability checks SHOULD be reported as skipped, not failed.
+  - A `github.com` `url` (with the `gh` CLI available) also activates the merge-gate (§8.2): a
+    `rebase_pending` issue whose Linear blockers have all gone terminal is held until each blocker's
+    linked PR is confirmed merged. A `null`, non-GitHub, or `gh`-less configuration leaves the gate
+    inactive, and the issue resumes as soon as its Linear blockers are terminal.
 - `path` (path string or `$VAR`, OPTIONAL)
   - Optional pointer to a local working copy of the repo.
   - Symphony itself MUST NOT read or write through `repo.path`; it exists so repo-local skills
@@ -1156,6 +1174,25 @@ An issue is dispatch-eligible only if all are true:
   - If that running issue was moved out of the active state set while it was waiting on the blocker
     (for example to `Human Review`), the orchestrator SHOULD move it back to the previous active
     state, falling back to `Todo` when no previous active state is known.
+- Merge-gate rule (rebase-on-resume only):
+  - A `rebase_pending` issue (§4.1.8) whose Linear blockers have *all* reached a terminal state is
+    still not safe to resume until the blocker work has actually landed on the base branch: Linear
+    "Done" is set when a PR is approved, which can precede the merge. Before re-dispatching such an
+    issue, the orchestrator consults the configured Git host (`gh pr view <url> --json state`) for
+    each blocker's linked PR URL and only releases the issue when every blocker PR is positively
+    `MERGED`. Confirmed merges are cached permanently (`merge_landed`, §4.1.8) so a later transient
+    `gh` failure cannot re-hold an already-resumed issue.
+  - The gate **fails closed when a Git host is configured** (the `repo.url` is a `github.com` remote
+    and the `gh` CLI is available): anything other than a positively-merged PR — an open PR, a
+    blocker with no linked PR (`no_pr_attachment`), or a `gh` lookup error (`check_error`) — *holds*
+    the issue rather than resuming it on a possibly-stale base. Held issues are recorded in
+    `awaiting_merge` (§4.1.8) so dashboards can surface why, and resume automatically once the PR
+    merges.
+  - The gate is **inactive** (never holds) when no Git host is configured — no `repo.url`, a
+    non-GitHub remote, or `gh` not on `PATH` (and likewise under the in-memory/simulated trackers used
+    in tests). In that case `rebase_pending` issues resume as soon as their Linear blockers go
+    terminal, exactly as before this gate existed. This rule only ever *holds* `rebase_pending`
+    issues; it never affects issues that were never paused mid-run.
 
 Sorting order (stable intent):
 
@@ -2172,7 +2209,8 @@ Minimum endpoints:
         "running": 2,
         "retrying": 1,
         "blocked": 0,
-        "dependency_blocked": 1
+        "dependency_blocked": 1,
+        "awaiting_merge": 1
       },
       "running": [
         {
@@ -2216,6 +2254,19 @@ Minimum endpoints:
             {"issue_id": "abc123", "issue_identifier": "MT-649", "state": "In Progress"}
           ],
           "observed_at": "2026-02-24T20:11:42Z"
+        }
+      ],
+      "awaiting_merge": [
+        {
+          "issue_id": "jkl012",
+          "issue_identifier": "MT-652",
+          "title": "Adopt the new audit schema",
+          "state": "In Progress",
+          "reason": "pr_open",
+          "reason_label": "Blocker PR not yet merged",
+          "reason_level": "warn",
+          "blocker_prs": ["https://github.com/example/repo/pull/120"],
+          "observed_at": "2026-02-24T20:12:05Z"
         }
       ],
       "dependency_graph": {

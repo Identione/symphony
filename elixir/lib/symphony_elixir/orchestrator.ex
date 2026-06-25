@@ -12,6 +12,7 @@ defmodule SymphonyElixir.Orchestrator do
     Config,
     DeterministicFailure,
     Git,
+    GitHost,
     ProgressSignal,
     ProviderQuota,
     StatusDashboard,
@@ -81,6 +82,20 @@ defmodule SymphonyElixir.Orchestrator do
       # Entries are cleared on dispatch; an issue that is paused then abandoned
       # before re-dispatch leaves a small, harmless residual entry until restart.
       rebase_pending: %{},
+      # Merge-gate state (§8.2). `awaiting_merge` is the observability mirror of
+      # dependency-resumed issues currently *held* because a now-Linear-terminal
+      # blocker's PR has not been confirmed merged into the base branch. Keyed by
+      # issue id; each value is `%{identifier, title, state, reason, blocker_prs,
+      # observed_at}` where `reason` is `:pr_open | :no_pr_attachment |
+      # :check_error`. Recomputed fresh every resolve pass (so it self-heals),
+      # preserving `observed_at` across polls for a stable "since" timestamp.
+      awaiting_merge: %{},
+      # Permanent (within a `rebase_pending` lifetime) cache of issue ids whose
+      # blocker work has been positively confirmed merged. "Merged" is permanent,
+      # so once cached we neither re-query GitHub nor re-hold on a transient `gh`
+      # hiccup. Pruned to the live `rebase_pending` key set each pass and cleared
+      # for an issue when it is (re-)dispatched.
+      merge_landed: MapSet.new(),
       dependency_graph: %{},
       retry_attempts: %{},
       # Per-issue counter of consecutive same-code adapter failures, used to
@@ -734,6 +749,7 @@ defmodule SymphonyElixir.Orchestrator do
         state
         |> complete_parents_with_all_children_done(issues)
         |> refresh_dependency_blocked(issues)
+        |> resolve_rebase_merge_status(issues)
         |> refresh_dependency_graph(issues)
 
       if available_slots(state) > 0, do: choose_issues(issues, state), else: state
@@ -869,6 +885,12 @@ defmodule SymphonyElixir.Orchestrator do
   @spec should_dispatch_issue_for_test(Issue.t(), term()) :: boolean()
   def should_dispatch_issue_for_test(%Issue{} = issue, %State{} = state) do
     should_dispatch_issue?(issue, state, active_state_set(), terminal_state_set())
+  end
+
+  @doc false
+  @spec resolve_rebase_merge_status_for_test(term(), [Issue.t()]) :: term()
+  def resolve_rebase_merge_status_for_test(%State{} = state, issues) when is_list(issues) do
+    resolve_rebase_merge_status(state, issues)
   end
 
   @doc false
@@ -1450,6 +1472,136 @@ defmodule SymphonyElixir.Orchestrator do
     end)
   end
 
+  # Merge-gate resolve pass (§8.2). Runs after reconcile / `refresh_dependency_blocked`
+  # and before `choose_issues`. It only inspects `rebase_pending` issues — work
+  # paused mid-run by a now-soon-to-land blocker — whose Linear blockers have
+  # *already* gone terminal. For those, it asks GitHub whether each blocker PR is
+  # merged, caching a positive result permanently and recording a hold (with a
+  # reason + the blocker PR URLs) otherwise. Issues not in `rebase_pending` are
+  # untouched; when the gate is inactive (non-GitHub / `gh` missing) nothing is
+  # ever held, so non-GitHub and test/sim setups behave exactly as before.
+  defp resolve_rebase_merge_status(%State{} = state, issues) when is_list(issues) do
+    rebase_ids = Map.keys(state.rebase_pending)
+    merge_landed = MapSet.intersection(state.merge_landed, MapSet.new(rebase_ids))
+
+    if rebase_ids == [] or not GitHost.gate_active?() do
+      %{state | awaiting_merge: %{}, merge_landed: merge_landed}
+    else
+      terminal_states = terminal_state_set()
+      issues_by_id = index_issues_by_id(issues)
+      previous = state.awaiting_merge
+      now = DateTime.utc_now()
+      repo = Config.settings!().repo.url
+
+      {awaiting_merge, merge_landed} =
+        Enum.reduce(rebase_ids, {%{}, merge_landed}, fn issue_id, {await_acc, landed_acc} ->
+          resolve_one_rebase_merge(
+            Map.get(issues_by_id, issue_id),
+            issue_id,
+            repo,
+            terminal_states,
+            previous,
+            now,
+            await_acc,
+            landed_acc
+          )
+        end)
+
+      %{state | awaiting_merge: awaiting_merge, merge_landed: merge_landed}
+    end
+  end
+
+  defp resolve_one_rebase_merge(
+         %Issue{} = issue,
+         issue_id,
+         repo,
+         terminal_states,
+         previous,
+         now,
+         await_acc,
+         landed_acc
+       ) do
+    cond do
+      # Merge already confirmed — never re-query, never re-hold.
+      MapSet.member?(landed_acc, issue_id) ->
+        {await_acc, landed_acc}
+
+      # A non-terminal Linear blocker still holds the issue the normal way
+      # (`dependency_blocked`); the merge-gate only applies once Linear is clear.
+      issue_blocked_by_non_terminal?(issue, terminal_states) ->
+        {await_acc, landed_acc}
+
+      true ->
+        case evaluate_blocker_merges(issue, repo) do
+          :landed ->
+            {await_acc, MapSet.put(landed_acc, issue_id)}
+
+          {:hold, reason, blocker_prs} ->
+            entry = %{
+              identifier: issue.identifier,
+              title: issue.title,
+              state: issue.state,
+              reason: reason,
+              blocker_prs: blocker_prs,
+              observed_at: preserved_observed_at(previous, issue_id, now)
+            }
+
+            {Map.put(await_acc, issue_id, entry), landed_acc}
+        end
+    end
+  end
+
+  # Issue absent from the current poll — can't evaluate its blockers this pass.
+  defp resolve_one_rebase_merge(_issue, _issue_id, _repo, _terminal, _previous, _now, await_acc, landed_acc) do
+    {await_acc, landed_acc}
+  end
+
+  # Decide whether all of an issue's (now Linear-terminal) blockers have landed.
+  # A blocker without a linked PR URL is the loudest "could hold indefinitely"
+  # case (`:no_pr_attachment`); a `gh` error is `:check_error`; an unmerged PR is
+  # `:pr_open`. Only when every blocker PR is positively merged do we report
+  # `:landed`. The returned `blocker_prs` are the known PR URLs, for the UI.
+  defp evaluate_blocker_merges(%Issue{blocked_by: blockers}, repo) when is_list(blockers) do
+    pr_urls =
+      blockers
+      |> Enum.map(&blocker_pr_url/1)
+      |> Enum.filter(&(is_binary(&1) and &1 != ""))
+      |> Enum.uniq()
+
+    if Enum.any?(blockers, fn ref -> is_nil(blocker_pr_url(ref)) end) do
+      {:hold, :no_pr_attachment, pr_urls}
+    else
+      statuses = Enum.map(pr_urls, fn url -> GitHost.pr_merged?(repo, url) end)
+
+      cond do
+        Enum.any?(statuses, &match?({:error, _}, &1)) -> {:hold, :check_error, pr_urls}
+        Enum.all?(statuses, &(&1 == {:ok, true})) -> :landed
+        true -> {:hold, :pr_open, pr_urls}
+      end
+    end
+  end
+
+  defp evaluate_blocker_merges(_issue, _repo), do: {:hold, :no_pr_attachment, []}
+
+  # Keep the "holding since" timestamp stable across resolve passes: reuse the
+  # previously-recorded `observed_at` when this issue was already held, else now.
+  defp preserved_observed_at(previous, issue_id, now) do
+    case Map.get(previous, issue_id) do
+      %{observed_at: %DateTime{} = stored} -> stored
+      _ -> now
+    end
+  end
+
+  defp blocker_pr_url(%{pr_url: pr_url}) when is_binary(pr_url) and pr_url != "", do: pr_url
+  defp blocker_pr_url(_ref), do: nil
+
+  defp index_issues_by_id(issues) when is_list(issues) do
+    Enum.reduce(issues, %{}, fn
+      %Issue{id: id} = issue, acc when is_binary(id) -> Map.put_new(acc, id, issue)
+      _other, acc -> acc
+    end)
+  end
+
   # Roll a parent/umbrella issue up to Done once *every* one of its sub-issues is
   # Done. Parent issues are trackers, never dispatched (see parent_issue?/1), so
   # nothing else advances them — Symphony closes them out on behalf of their
@@ -1875,15 +2027,14 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp should_dispatch_issue?(
          %Issue{} = issue,
-         %State{running: running, claimed: claimed, blocked: blocked} = state,
+         %State{running: running} = state,
          active_states,
          terminal_states
        ) do
     candidate_issue?(issue, active_states, terminal_states) and
       !issue_blocked_by_non_terminal?(issue, terminal_states) and
-      !MapSet.member?(claimed, issue.id) and
-      !Map.has_key?(running, issue.id) and
-      !Map.has_key?(blocked, issue.id) and
+      blocker_work_landed?(state, issue.id) and
+      issue_untracked?(state, issue.id) and
       available_slots(state) > 0 and
       state_slots_available?(issue, running) and
       worker_slots_available?(state) and
@@ -1891,6 +2042,24 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp should_dispatch_issue?(_issue, _state, _active_states, _terminal_states), do: false
+
+  # True when the issue is not already reserved, running, or operator-blocked —
+  # the three "already in flight" exclusions, grouped so dispatch eligibility
+  # stays a flat conjunction.
+  defp issue_untracked?(%State{running: running, claimed: claimed, blocked: blocked}, issue_id) do
+    not MapSet.member?(claimed, issue_id) and
+      not Map.has_key?(running, issue_id) and
+      not Map.has_key?(blocked, issue_id)
+  end
+
+  # Pure merge-gate read: an issue is dispatchable unless the resolve pass has
+  # recorded it as `awaiting_merge` (a held dependency-resume whose blocker PR is
+  # not yet confirmed merged). Issues never in `rebase_pending`, issues whose
+  # merge was confirmed, and every issue when the gate is inactive are absent
+  # from `awaiting_merge` and so pass.
+  defp blocker_work_landed?(%State{} = state, issue_id) do
+    not Map.has_key?(Map.get(state, :awaiting_merge, %{}), issue_id)
+  end
 
   defp state_slots_available?(%Issue{state: issue_state}, running) when is_map(running) do
     limit = Config.max_concurrent_agents_for_state(issue_state)
@@ -2124,7 +2293,9 @@ defmodule SymphonyElixir.Orchestrator do
           | running: running,
             claimed: MapSet.put(state.claimed, issue.id),
             retry_attempts: Map.delete(state.retry_attempts, issue.id),
-            rebase_pending: Map.delete(state.rebase_pending, issue.id)
+            rebase_pending: Map.delete(state.rebase_pending, issue.id),
+            awaiting_merge: Map.delete(state.awaiting_merge, issue.id),
+            merge_landed: MapSet.delete(state.merge_landed, issue.id)
         }
         |> bump_session_count(issue.id)
 
@@ -2562,6 +2733,14 @@ defmodule SymphonyElixir.Orchestrator do
     )
   end
 
+  # Human-readable merge-gate hold reason for the dependency-graph node. The
+  # `:no_pr_attachment` and `:check_error` "could hold indefinitely" cases get
+  # their own loud styling in the dashboard's awaiting-merge list.
+  defp awaiting_merge_reason_text(:pr_open), do: "Blocker PR not yet merged"
+  defp awaiting_merge_reason_text(:no_pr_attachment), do: "Blocker has no linked PR — held until one is linked"
+  defp awaiting_merge_reason_text(:check_error), do: "Could not verify blocker PR merge — held"
+  defp awaiting_merge_reason_text(_reason), do: "Awaiting blocker PR merge"
+
   # Re-derived at snapshot time so the status reflects live state-map
   # membership rather than what was true at the last successful poll.
   defp derive_symphony_status(%State{} = state, issue_id) do
@@ -2569,6 +2748,7 @@ defmodule SymphonyElixir.Orchestrator do
       Map.has_key?(state.running, issue_id) -> :running
       Map.has_key?(state.retry_attempts, issue_id) -> :retrying
       Map.has_key?(state.blocked, issue_id) -> :blocked
+      Map.has_key?(Map.get(state, :awaiting_merge, %{}), issue_id) -> :awaiting_merge
       Map.has_key?(Map.get(state, :dependency_blocked, %{}), issue_id) -> :waiting_on_blockers
       true -> nil
     end
@@ -2633,6 +2813,13 @@ defmodule SymphonyElixir.Orchestrator do
     case Map.get(state.blocked, issue_id) do
       %{error: error} when is_binary(error) and error != "" -> error
       _ -> "Blocked — operator attention required"
+    end
+  end
+
+  defp graph_inactive_reason(%State{} = state, issue_id, :awaiting_merge, _node) do
+    case Map.get(Map.get(state, :awaiting_merge, %{}), issue_id) do
+      %{reason: reason} -> awaiting_merge_reason_text(reason)
+      _ -> "Awaiting blocker PR merge"
     end
   end
 
@@ -2766,7 +2953,21 @@ defmodule SymphonyElixir.Orchestrator do
       end)
 
     dependency_blocked_map = Map.get(state, :dependency_blocked, %{})
+    awaiting_merge_map = Map.get(state, :awaiting_merge, %{})
     dependency_graph_map = Map.get(state, :dependency_graph, %{})
+
+    awaiting_merge =
+      Enum.map(awaiting_merge_map, fn {issue_id, metadata} ->
+        %{
+          issue_id: issue_id,
+          identifier: Map.get(metadata, :identifier),
+          title: Map.get(metadata, :title),
+          state: Map.get(metadata, :state),
+          reason: Map.get(metadata, :reason),
+          blocker_prs: Map.get(metadata, :blocker_prs, []),
+          observed_at: Map.get(metadata, :observed_at)
+        }
+      end)
 
     dependency_blocked =
       Enum.map(dependency_blocked_map, fn {issue_id, metadata} ->
@@ -2798,6 +2999,7 @@ defmodule SymphonyElixir.Orchestrator do
        retrying: retrying,
        blocked: blocked,
        dependency_blocked: dependency_blocked,
+       awaiting_merge: awaiting_merge,
        dependency_graph: dependency_graph,
        codex_totals: state.codex_totals,
        claude_totals: state.claude_totals,
