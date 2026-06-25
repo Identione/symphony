@@ -315,12 +315,29 @@ defmodule SymphonyElixir.Config.Schema do
 
     # The sidecar Port spawns with `cd: workspace`, so a workspace-relative
     # path here would not resolve to the priv dir. `$SYMPHONY_CLAUDE_PRIV_DIR`
-    # is injected by `Claude.AppServer` (resolves to this app's
+    # is injected by `Claude.AppServer` (resolves to this app's absolute
     # `priv/claude_agent`) and expanded by bash. The default ships with a
     # `jai` prefix so the recommended Approach A — outer sandbox containment
     # via jai (Linux 6.13+) — works out of the box; hosts without jai must
-    # override `agent.claude.command` to drop the prefix (Approach B).
-    @default_command "jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent"
+    # override `agent.claude.command` to use the plain `uv run` form (Approach B).
+    #
+    # `jai --dir $SYMPHONY_CLAUDE_PRIV_DIR` is load-bearing for the jai variant.
+    # jai casual mode overlays $HOME copy-on-write, with only the *cwd* (the
+    # per-issue workspace) granted as a live passthrough; the orchestrator repo
+    # otherwise reads through the COW overlay, which serves a STALE copy of the
+    # sidecar once `uv`/`python` write into priv/claude_agent and trigger an
+    # overlayfs copy-up (old sidecar.py → the live agent never saw the current
+    # in-process MCP servers, so `sync_workpad` silently vanished). `--dir`
+    # grants priv/claude_agent as a live bind that BYPASSES the overlay, so the
+    # jail reads current source — without moving the cwd off the workspace.
+    # Keeping cwd=workspace is itself load-bearing: it keeps the workspace a
+    # live passthrough so the agent's `workpad.md` writes land on real disk
+    # where Symphony's non-jailed `File.read` (sync_workpad) can see them
+    # (cwd=priv would push the workspace into the overlay and diverge the read).
+    # The agent's working dir is the workspace via the SDK `cwd` (init
+    # envelope), independent of where the sidecar process runs. The plain
+    # `uv run` (non-jai) variant has no overlay and needs no `--dir`.
+    @default_command "jai --dir $SYMPHONY_CLAUDE_PRIV_DIR uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent"
 
     @primary_key false
     embedded_schema do

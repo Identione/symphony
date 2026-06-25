@@ -126,15 +126,30 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
   test "default command resolves the sidecar via $SYMPHONY_CLAUDE_PRIV_DIR" do
     assert {:ok, settings} = parse(~s|tracker: {kind: linear, project_slug: p, api_key: t}\n|)
     # The sidecar Port spawns with cd:workspace, so a workspace-relative
-    # `--project priv/claude_agent` would not resolve. The default uses
-    # $SYMPHONY_CLAUDE_PRIV_DIR (injected by Claude.AppServer) so it works
-    # regardless of the per-issue workspace cwd.
+    # `--project priv/claude_agent` would not resolve. The default uses the
+    # absolute $SYMPHONY_CLAUDE_PRIV_DIR (injected by Claude.AppServer) so it
+    # works regardless of the per-issue workspace cwd.
     assert settings.agent.claude.command =~ "$SYMPHONY_CLAUDE_PRIV_DIR"
     assert settings.agent.claude.command =~ "symphony_claude_agent"
     # Default ships with `jai` so Approach A (outer sandbox containment) works
     # out of the box on Linux 6.13+. Hosts without jai must override
-    # `agent.claude.command` to drop the prefix.
-    assert String.starts_with?(settings.agent.claude.command, "jai ")
+    # `agent.claude.command` to use the plain `uv run` form.
+    #
+    # The jai variant MUST grant the sidecar source live via `jai --dir
+    # $SYMPHONY_CLAUDE_PRIV_DIR`. jai casual mode overlays $HOME copy-on-write
+    # and only the *cwd* (the per-issue workspace) is a live passthrough; the
+    # orchestrator repo otherwise reads from the COW overlay, which serves a
+    # STALE copy of the sidecar once `uv`/`python` write into priv/claude_agent
+    # (overlayfs copy-up) — so `sync_workpad` silently disappears. `--dir`
+    # bypasses the overlay with a live bind so the jail reads current source,
+    # WITHOUT moving the cwd off the workspace (keeping the workspace a live
+    # passthrough is what lets Symphony's non-jailed File.read see the agent's
+    # workpad.md writes). Regression guard for both the staleness and the
+    # workpad File.read divergence. See docs/investigations/.
+    assert String.starts_with?(
+             settings.agent.claude.command,
+             "jai --dir $SYMPHONY_CLAUDE_PRIV_DIR "
+           )
   end
 
   test "agent.claude accepts overrides" do
