@@ -506,17 +506,20 @@ defmodule SymphonyElixir.Config.Schema do
       # true but no API key resolves, the overseer is dormant: the run still caps
       # at `agent.max_turns` (no auto-extend) and posts a "could not judge" comment.
       field(:enabled, :boolean, default: true)
-      # Engine selection (SPEC §10 a-vs-b). Only "api" (direct Anthropic
-      # one-shot, read-only) is implemented; "sidecar" is accepted for
-      # forward-compat and currently fails open (treated as disabled).
+      # Engine selection (SPEC §13.6 a-vs-b). "api" = direct Anthropic one-shot,
+      # read-only, authed with `api_key`/$ANTHROPIC_API_KEY. "sidecar" = one
+      # read-only classification turn through the Claude Agent SDK sidecar
+      # (`Overseer.SidecarClient`), reusing the Claude adapter's subscription
+      # OAuth so no separate API key is needed (IDE-230 Path B).
       field(:engine, :string, default: "api")
       field(:model, :string, default: "claude-sonnet-4-6")
       # Reasoning-effort knob carried for parity with the Claude adapter; the
       # direct Messages API path does not forward it today.
       field(:effort, :string, default: "low")
       # Resolved from `$ANTHROPIC_API_KEY` when set to the literal token or left
-      # unset (mirrors `tracker.api_key`/`$LINEAR_API_KEY`). Absent key ⇒ the
-      # overseer is treated as disabled.
+      # unset (mirrors `tracker.api_key`/`$LINEAR_API_KEY`). Required by the
+      # `api` engine — an absent key leaves it dormant. Ignored by the `sidecar`
+      # engine, which authenticates via the Claude adapter's subscription OAuth.
       field(:api_key, :string, default: "$ANTHROPIC_API_KEY")
       # Legacy (IDE-212): the old budget-threshold trigger fired when
       # `turn >= max_turns - budget_threshold_k`. IDE-230 replaced it with the

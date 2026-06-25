@@ -97,12 +97,21 @@ defmodule SymphonyElixir.Config do
   @spec overseer() :: SymphonyElixir.Config.Schema.Overseer.t()
   def overseer, do: settings!().agent.overseer
 
-  @doc "Whether the Layer 2 overseer is enabled *and* has a resolved API key."
+  @doc """
+  Whether the Layer 2 overseer is enabled *and* has a usable credential for its
+  engine. The `api` engine needs a resolved `ANTHROPIC_API_KEY`; the `sidecar`
+  engine reuses the Claude adapter's subscription OAuth, so it needs no API key —
+  a missing OAuth credential surfaces at runtime as a fail-open no-judgement.
+  """
   @spec overseer_enabled?() :: boolean()
   def overseer_enabled? do
     ov = overseer()
-    ov.enabled and is_binary(ov.api_key) and ov.api_key != ""
+    ov.enabled and overseer_credential_ready?(ov)
   end
+
+  @spec overseer_credential_ready?(SymphonyElixir.Config.Schema.Overseer.t()) :: boolean()
+  defp overseer_credential_ready?(%{engine: "sidecar"}), do: true
+  defp overseer_credential_ready?(%{api_key: key}), do: is_binary(key) and key != ""
 
   @spec codex_turn_sandbox_policy(Path.t() | nil) :: map()
   def codex_turn_sandbox_policy(workspace \\ nil) do
