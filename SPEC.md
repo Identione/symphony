@@ -2484,6 +2484,14 @@ that catches busy-but-doomed runs the deterministic check is blind to) — gated
 the call cap is exhausted, the run stops (a "could not judge" comment is posted when no fresh verdict
 is available — never silent).
 
+A Claude within-query cap breach (`agent.claude.max_turns` → `error_max_turns`) is **soft-landed as a
+turn boundary** here rather than failing the run: the SDK *returns* a result on the breach so the
+session is idle and resumable, and the overseer judges continue/escalate exactly as for a clean
+turn-end (IDE-230). Without an active overseer the breach instead falls through to the
+deterministic-failure pipeline (§13.x / IDE-73). A wall-clock `turn_timeout` is **not** soft-landed —
+the underlying turn is still running, so resuming the session would desync the protocol; it remains a
+failure pending an interrupt-then-drain primitive.
+
 **Evidence (read-only).** A bounded bundle: issue title/description, the `## Symphony Workpad`
 comment (the plan + acceptance criteria, so the overseer judges progress against them), the
 worker-side deterministic assessment (status + fail-streak), the turn/budget counters, the `git diff

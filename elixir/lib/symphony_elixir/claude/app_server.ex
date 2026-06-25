@@ -534,7 +534,11 @@ defmodule SymphonyElixir.Claude.AppServer do
   # Same shape for the SDK's own within-session `max_turns` ceiling
   # (`agent.claude.max_turns`): the SDK *returns* a ResultMessage with this
   # subtype, re-emitted as an error envelope. Map it to `:max_turns_reached`
-  # (not `:unknown`) so it shares the IDE-74/IDE-73 path — fast retry with the
+  # (not `:unknown`) so the run loop can recognize a within-query cap breach.
+  # When the overseer is active, `AgentRunner.do_run_codex_turns/5` soft-lands
+  # this as a clean continuation boundary (the session is idle/resumable) and
+  # lets the overseer judge continue/escalate (IDE-230). When the overseer is
+  # dormant it falls through to the IDE-74/IDE-73 path — fast retry with the
   # deterministic-failure counter advancing toward escalation — instead of the
   # generic `:unknown` exponential backoff that retries indefinitely and resets
   # the counter.
