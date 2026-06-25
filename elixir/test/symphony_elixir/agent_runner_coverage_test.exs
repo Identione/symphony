@@ -51,7 +51,17 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
         cb.(%{event: :session_started, payload: %{}})
       end
 
-      {:ok, %{session_id: "stub-session"}}
+      # Tests script per-turn results via `:stub_run_turn_results` (a queue popped
+      # left-to-right); an empty/unset queue defaults to a successful turn so the
+      # tests that never script results are unaffected.
+      case Application.get_env(:symphony_elixir, :stub_run_turn_results) do
+        [result | rest] ->
+          Application.put_env(:symphony_elixir, :stub_run_turn_results, rest)
+          result
+
+        _ ->
+          {:ok, %{session_id: "stub-session"}}
+      end
     end
 
     @impl true
@@ -418,6 +428,81 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
                )
 
       assert_received {:stub_run_turn, _prompt}
+      refute_received {:stub_run_turn, _other}
+      assert_received :stub_stop_session
+    end
+  end
+
+  describe "soft-landing the Claude SDK turn cap as an overseer boundary (IDE-230)" do
+    test "a :max_turns_reached SDK breach continues under the overseer instead of crashing" do
+      ctx = setup_workspace!()
+
+      # Overseer ON with the absolute ceiling at 1, so the first soft-landed
+      # boundary winds down deterministically. The `api` engine + a dummy key only
+      # flips `overseer_enabled?` on — the engine is never actually called, because
+      # the ceiling winds down before `Overseer.should_run?` can fire (streak and
+      # cadence are also pinned off).
+      write_stub_workflow!(ctx,
+        max_turns: 5,
+        overseer_enabled: true,
+        overseer_engine: "api",
+        overseer_api_key: "test-overseer-key",
+        overseer_streak_to_llm: 999,
+        overseer_mandatory_llm_every: 0,
+        overseer_absolute_max_turns: 1
+      )
+
+      # The first turn returns the SDK within-query cap breach. The soft-land must
+      # route it into the overseer boundary (NOT exit on it); the absolute ceiling
+      # then winds the run down via a second run_turn.
+      Application.put_env(:symphony_elixir, :stub_run_turn_results, [
+        {:error, {:claude_sdk_error, :max_turns_reached, "error_max_turns"}}
+      ])
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :stub_run_turn_results) end)
+
+      fetcher = fn ["issue-cov-1"] -> {:ok, [issue()]} end
+
+      reason =
+        catch_exit(AgentRunner.run(issue(), nil, adapter: StubAdapter, issue_state_fetcher: fetcher))
+
+      # The run did NOT crash on the SDK breach: it soft-landed into the overseer
+      # extension and wound down to the clean cap signal (the bare atom), not the
+      # `{:claude_sdk_error, ...}` reason.
+      assert {:agent_run_failed, :max_turns_reached, :max_turns_reached} = reason
+
+      # Two run_turns prove continuation past the breach: the breaching turn + the
+      # wind-down turn (a crash on the breach would have stopped at one).
+      assert_received {:stub_run_turn, _breaching_turn}
+      assert_received {:stub_run_turn, _winddown_turn}
+      refute_received {:stub_run_turn, _other}
+      assert_received :stub_stop_session
+    end
+
+    test "without an overseer the same SDK breach keeps the deterministic-failure exit (gating)" do
+      ctx = setup_workspace!()
+      # Overseer disabled (default): no judge to bound an extension, so the breach
+      # must fall through unchanged to the IDE-74/IDE-73 deterministic path.
+      write_stub_workflow!(ctx, max_turns: 5)
+
+      Application.put_env(:symphony_elixir, :stub_run_turn_results, [
+        {:error, {:claude_sdk_error, :max_turns_reached, "error_max_turns"}}
+      ])
+
+      on_exit(fn -> Application.delete_env(:symphony_elixir, :stub_run_turn_results) end)
+
+      fetcher = fn ["issue-cov-1"] -> {:ok, [issue()]} end
+
+      reason =
+        catch_exit(AgentRunner.run(issue(), nil, adapter: StubAdapter, issue_state_fetcher: fetcher))
+
+      # The breach surfaces as the classified `:max_turns_reached` exit with the
+      # original `{:claude_sdk_error, ...}` reason preserved — exactly as before.
+      assert {:agent_run_failed, :max_turns_reached, {:claude_sdk_error, :max_turns_reached, _}} =
+               reason
+
+      # Crashed on the breaching turn — no continuation.
+      assert_received {:stub_run_turn, _only_turn}
       refute_received {:stub_run_turn, _other}
       assert_received :stub_stop_session
     end

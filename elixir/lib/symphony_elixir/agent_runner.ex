@@ -373,20 +373,53 @@ defmodule SymphonyElixir.AgentRunner do
       overseer_session: Map.get(context, :overseer_session)
     ]
 
-    with {:ok, turn_session} <-
-           adapter.run_turn(
-             app_session,
-             prompt,
-             issue,
-             on_message: compose_message_handler(adapter, recipient, issue, handler_opts),
-             turn_timeout_ms: Config.active_turn_timeout_ms(settings)
-           ) do
-      Logger.info(
-        "Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} " <>
-          "workspace=#{context.workspace} turn=#{turn_number}/#{max_turns}"
-      )
+    case adapter.run_turn(
+           app_session,
+           prompt,
+           issue,
+           on_message: compose_message_handler(adapter, recipient, issue, handler_opts),
+           turn_timeout_ms: Config.active_turn_timeout_ms(settings)
+         ) do
+      {:ok, turn_session} ->
+        Logger.info(
+          "Completed agent run for #{issue_context(issue)} session_id=#{turn_session[:session_id]} " <>
+            "workspace=#{context.workspace} turn=#{turn_number}/#{max_turns}"
+        )
 
-      handle_turn_continuation(context, app_session, issue, turn_number)
+        handle_turn_continuation(context, app_session, issue, turn_number)
+
+      # IDE-230: the Claude SDK's within-query turn cap (`agent.claude.max_turns`)
+      # is a cadence boundary, not a crash. The SDK *returns* a ResultMessage on
+      # the breach (`error_max_turns`), so the session is idle and resumable —
+      # when the overseer is active we hand the breach to the same
+      # continuation/judge path as a clean `turn_end` instead of failing the run
+      # and feeding the blind retry loop. `extend_with_overseer` then decides
+      # continue/escalate and bounds the extension at `overseer.absolute_max_turns`.
+      #
+      # Gated on a live overseer on purpose: with no judge to bound it, soft-landing
+      # would burn ~max_turns× the compute before a human is looped in, so we let
+      # the breach fall through unchanged to the existing IDE-74/IDE-73
+      # deterministic-failure path (fast escalation after N consecutive breaches).
+      #
+      # `:turn_timeout` is deliberately NOT caught here: a wall-clock timeout
+      # abandons a turn whose underlying SDK/Codex turn is still running, so
+      # resuming the same session would desync the protocol. Turning it into a
+      # boundary needs an interrupt-then-drain primitive first (follow-up).
+      {:error, {:claude_sdk_error, :max_turns_reached, _msg}} = result ->
+        if is_pid(context.overseer_session) do
+          Logger.info(
+            "Agent run hit agent.claude.max_turns for #{issue_context(issue)} " <>
+              "turn=#{turn_number}/#{max_turns}; soft-landing as overseer boundary " <>
+              "(session idle, resuming)"
+          )
+
+          handle_turn_continuation(context, app_session, issue, turn_number)
+        else
+          result
+        end
+
+      other ->
+        other
     end
   end
 
