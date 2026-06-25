@@ -34,6 +34,11 @@ query SymphonyLinearIssuesById($ids: [ID!]!, $first: Int!, $relationFirst: Int!)
             state {
               name
             }
+            attachments {
+              nodes {
+                url
+              }
+            }
           }
         }
       }

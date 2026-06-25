@@ -307,11 +307,14 @@ Fields:
   rebuilt wholesale on every successful candidate fetch so it self-heals once the upstream blocker
   reaches a terminal state. Last-known-good is kept on candidate-fetch failure / rate limit.
   In-memory only; cleared on restart.)
-- `rebase_pending` (map `issue_id -> %{blockers: [identifier]}`; issues that were paused mid-run
-  because they gained a non-terminal blocker per §8.2. When such an issue is later re-dispatched —
-  its blockers having landed — this entry is consumed to prepend a rebase-on-resume directive to the
-  turn-1 prompt, instructing the resuming agent to integrate the now-landed base branch (via the
-  `pull` skill) before continuing the ticket work, so it does not build on a stale base. The entry
+- `rebase_pending` (map `issue_id -> %{blockers: [%{identifier, pr_url}]}`; issues that were paused
+  mid-run because they gained a non-terminal blocker per §8.2. Each blocker ref carries the blocker's
+  merged GitHub PR URL (read from its Linear attachments; `nil` until linked). When such an issue is
+  later re-dispatched — its blockers having merged — this entry is consumed to prepend a
+  rebase-on-resume directive to the turn-1 prompt, instructing the resuming agent to integrate the
+  merged base branch (via the `pull` skill) before continuing the ticket work, or — if the base will
+  not integrate cleanly — to reset to the fresh base and reimplement the ticket from that baseline
+  (an implicit Rework), so it does not build on a stale base. The entry
   is set when the running issue is paused and cleared when it is dispatched. In-memory only; cleared
   on restart.)
 - `dependency_graph` (map `issue_id -> graph node projection`; observability-only node set for the
@@ -1148,7 +1151,8 @@ An issue is dispatch-eligible only if all are true:
     a terminal state, then it can be dispatched again by the normal polling loop. Because the
     workspace is preserved (not re-cloned), the paused issue is recorded in `rebase_pending`
     (§4.1.8); when it is re-dispatched, its turn-1 prompt carries a rebase-on-resume directive so the
-    agent integrates the now-landed blocker work onto its base before continuing.
+    agent integrates the now-merged blocker work onto its base before continuing — or resets to the
+    fresh base and reimplements the ticket if the merge will not integrate cleanly.
   - If that running issue was moved out of the active state set while it was waiting on the blocker
     (for example to `Human Review`), the orchestrator SHOULD move it back to the previous active
     state, falling back to `Todo` when no previous active state is known.

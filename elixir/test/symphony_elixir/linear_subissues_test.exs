@@ -92,4 +92,56 @@ defmodule SymphonyElixir.LinearSubissuesTest do
     assert issue.parent_id == nil
     assert [%Issue{id: "child-1", parent_id: "parent-1"}] = issue.children
   end
+
+  test "captures a blocker's GitHub PR URL from its attachments onto the blocker ref" do
+    issue =
+      child_node("iss-1", "MT-10", "Todo", "unstarted", [], nil)
+      |> Map.put("children", %{"nodes" => []})
+      |> Map.put("inverseRelations", %{
+        "nodes" => [
+          %{
+            "type" => "blocks",
+            "issue" => %{
+              "id" => "iss-blk",
+              "identifier" => "MT-9",
+              "state" => %{"name" => "In Progress"},
+              "attachments" => %{
+                "nodes" => [
+                  %{"url" => "https://example.com/not-a-pr"},
+                  %{"url" => "https://github.com/acme/repo/pull/9"}
+                ]
+              }
+            }
+          }
+        ]
+      })
+
+    normalized = Client.normalize_issue_for_test(issue)
+
+    assert [%{identifier: "MT-9", pr_url: "https://github.com/acme/repo/pull/9"}] =
+             normalized.blocked_by
+  end
+
+  test "leaves a blocker's pr_url nil when no GitHub PR attachment is present" do
+    issue =
+      child_node("iss-2", "MT-11", "Todo", "unstarted", [], nil)
+      |> Map.put("children", %{"nodes" => []})
+      |> Map.put("inverseRelations", %{
+        "nodes" => [
+          %{
+            "type" => "blocks",
+            "issue" => %{
+              "id" => "iss-blk2",
+              "identifier" => "MT-8",
+              "state" => %{"name" => "In Progress"},
+              "attachments" => %{"nodes" => []}
+            }
+          }
+        ]
+      })
+
+    normalized = Client.normalize_issue_for_test(issue)
+
+    assert [%{identifier: "MT-8", pr_url: nil}] = normalized.blocked_by
+  end
 end

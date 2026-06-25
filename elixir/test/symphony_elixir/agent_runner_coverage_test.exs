@@ -698,23 +698,42 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
   end
 
   describe "rebase-on-resume directive" do
-    test "prepend_resume_after_block_directive/2 prepends the pull-skill directive with blocker ids" do
+    test "prepend_resume_after_block_directive/2 prepends the pull-skill directive with blocker refs" do
       prompt =
-        AgentRunner.prepend_resume_after_block_directive("ORIGINAL PROMPT", %{blockers: ["BLK-1", "BLK-2"]})
+        AgentRunner.prepend_resume_after_block_directive("ORIGINAL PROMPT", %{
+          blockers: [
+            %{identifier: "BLK-1", pr_url: "https://github.com/acme/repo/pull/1"},
+            %{identifier: "BLK-2", pr_url: nil}
+          ]
+        })
 
       assert prompt =~ "Rebase-on-resume guidance:"
       assert prompt =~ "previously paused because it was blocked"
-      assert prompt =~ "BLK-1, BLK-2"
+      # Wording asserts the blocker work has merged (not "landed") and points at
+      # the blocker's merged PR URL when known.
+      assert prompt =~ "merged into the base branch"
+      assert prompt =~ "BLK-1 (https://github.com/acme/repo/pull/1), BLK-2"
       assert prompt =~ "`pull` skill"
+      # Implicit-Rework guidance for a non-clean integration.
+      assert prompt =~ "reset this branch to the fresh base branch and reimplement"
+      refute prompt =~ "has landed on the base branch"
       # The original prompt is preserved verbatim, after the directive.
       assert String.ends_with?(prompt, "ORIGINAL PROMPT")
       assert String.starts_with?(prompt, "Rebase-on-resume guidance:")
     end
 
+    test "prepend_resume_after_block_directive/2 renders bare-string blocker identifiers" do
+      prompt =
+        AgentRunner.prepend_resume_after_block_directive("X", %{blockers: ["BLK-1", "BLK-2"]})
+
+      assert prompt =~ "BLK-1, BLK-2"
+      assert prompt =~ "merged into the base branch"
+    end
+
     test "prepend_resume_after_block_directive/2 falls back to a generic clause without blocker ids" do
       prompt = AgentRunner.prepend_resume_after_block_directive("X", %{blockers: []})
 
-      assert prompt =~ "The issue that blocked it has now landed"
+      assert prompt =~ "The issue that blocked it has now merged into the base branch"
       assert String.ends_with?(prompt, "X")
     end
 

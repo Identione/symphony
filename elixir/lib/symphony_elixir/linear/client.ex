@@ -89,6 +89,11 @@ defmodule SymphonyElixir.Linear.Client do
               state {
                 name
               }
+              attachments {
+                nodes {
+                  url
+                }
+              }
             }
           }
         }
@@ -152,6 +157,11 @@ defmodule SymphonyElixir.Linear.Client do
               identifier
               state {
                 name
+              }
+              attachments {
+                nodes {
+                  url
+                }
               }
             }
           }
@@ -649,6 +659,7 @@ defmodule SymphonyElixir.Linear.Client do
               id: blocker_issue["id"],
               identifier: blocker_issue["identifier"],
               state: get_in(blocker_issue, ["state", "name"]),
+              pr_url: extract_pr_url(blocker_issue),
               relation: normalized_relation
             }
           ]
@@ -662,6 +673,20 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp extract_blockers(_), do: []
+
+  # The blocker's GitHub PR URL, read from its Linear attachments. Linear links
+  # the opened PR as an attachment, so we pick the first attachment whose URL
+  # looks like a GitHub pull-request link; `nil` when none is present yet.
+  defp extract_pr_url(%{"attachments" => %{"nodes" => nodes}}) when is_list(nodes) do
+    nodes
+    |> Enum.map(& &1["url"])
+    |> Enum.find(&github_pr_url?/1)
+  end
+
+  defp extract_pr_url(_), do: nil
+
+  defp github_pr_url?(url) when is_binary(url), do: Regex.match?(~r{github\.com/.+/pull/\d+}, url)
+  defp github_pr_url?(_), do: false
 
   defp extract_has_children(%{"children" => %{"nodes" => nodes}}) when is_list(nodes), do: nodes != []
   defp extract_has_children(_), do: false

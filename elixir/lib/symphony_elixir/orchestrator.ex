@@ -73,7 +73,8 @@ defmodule SymphonyElixir.Orchestrator do
       dependency_blocked: %{},
       # Issues that were paused mid-run because they gained a non-terminal
       # blocker (§4.1.8). Keyed by Linear issue id; each value is
-      # `%{blockers: [identifier]}` recording the blockers that held the work.
+      # `%{blockers: [%{identifier, pr_url}]}` recording the blockers that held
+      # the work, each carrying its merged GitHub PR URL when Linear has it.
       # When the issue is re-dispatched (its blockers having landed), the entry
       # is consumed to inject a rebase-on-resume directive into the turn-1
       # prompt so the session integrates the now-landed base before continuing.
@@ -1043,21 +1044,27 @@ defmodule SymphonyElixir.Orchestrator do
   # `cleanup_workspace: false` preserves the workspace and leaves
   # `rebase_pending` intact, so the entry survives until the next dispatch.
   defp mark_rebase_pending(%State{} = state, %Issue{id: issue_id} = issue) when is_binary(issue_id) do
-    %{state | rebase_pending: Map.put(state.rebase_pending, issue_id, %{blockers: blocker_identifiers(issue)})}
+    %{state | rebase_pending: Map.put(state.rebase_pending, issue_id, %{blockers: blocker_refs(issue)})}
   end
 
   defp mark_rebase_pending(%State{} = state, _issue), do: state
 
-  defp blocker_identifiers(%Issue{blocked_by: blockers}) when is_list(blockers) do
+  # Blocker refs carried into `rebase_pending` as `%{identifier, pr_url}` maps so
+  # the resume directive can name the blocker *and* point at its merged PR. The
+  # PR URL is best-effort (`nil` until Linear links the PR attachment).
+  defp blocker_refs(%Issue{blocked_by: blockers}) when is_list(blockers) do
     blockers
     |> Enum.flat_map(fn
-      %{identifier: identifier} when is_binary(identifier) -> [identifier]
-      _ -> []
+      %{identifier: identifier} = ref when is_binary(identifier) ->
+        [%{identifier: identifier, pr_url: Map.get(ref, :pr_url)}]
+
+      _ ->
+        []
     end)
     |> Enum.uniq()
   end
 
-  defp blocker_identifiers(_issue), do: []
+  defp blocker_refs(_issue), do: []
 
   defp maybe_restore_dependency_blocked_issue_state(%State{} = state, %Issue{} = issue, active_states) do
     if active_issue_state?(issue.state, active_states) do

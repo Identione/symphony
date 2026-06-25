@@ -482,7 +482,7 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     issue = Client.normalize_issue_for_test(raw_issue, "user-1")
 
     assert issue.blocked_by == [
-             %{id: "issue-2", identifier: "MT-2", state: "In Progress", relation: "blocks"}
+             %{id: "issue-2", identifier: "MT-2", state: "In Progress", pr_url: nil, relation: "blocks"}
            ]
 
     assert issue.labels == ["backend"]

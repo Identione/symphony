@@ -1087,8 +1087,8 @@ defmodule SymphonyElixir.AgentRunner do
 
   # Prepend a rebase-on-resume directive when the orchestrator re-dispatches a
   # session that was previously paused on a dependency blocker (§4.1.8). The
-  # blocker has since landed on the base branch, so the resuming agent must
-  # integrate the updated base before continuing the ticket work. `@doc false`
+  # blocker's work has since merged into the base branch, so the resuming agent
+  # must integrate the updated base before continuing the ticket work. `@doc false`
   # public seam so the coverage suite can assert the directive shape without
   # standing up a real session.
   @doc false
@@ -1103,19 +1103,35 @@ defmodule SymphonyElixir.AgentRunner do
     """
     Rebase-on-resume guidance:
 
-    - This session was previously paused because it was blocked by another issue.#{landed_blocker_clause(resume_after_block)}
-    - Before resuming the ticket work, integrate the latest base branch into this workspace so your changes build on top of the landed work. Use the `pull` skill (fetch the base branch and rebase/merge it in), resolving any conflicts.
-    - Only after the workspace is up to date with the landed base should you continue the remaining ticket work.
+    - This session was previously paused because it was blocked by another issue.#{merged_blocker_clause(resume_after_block)}
+    - That blocker's work has now merged into the base branch, so integrate the updated base before continuing. Use the `pull` skill (fetch the base branch and merge it in), resolving any conflicts.
+    - If the base will not integrate cleanly — large or tangled conflicts — do NOT spend effort untangling the merge. Instead, reset this branch to the fresh base branch and reimplement the ticket from that baseline (an implicit Rework), so your changes sit cleanly on top of the merged blocker work.
+    - Only after the workspace is up to date with the merged base should you continue the remaining ticket work.
     """
   end
 
-  defp landed_blocker_clause(%{blockers: [_ | _] = blockers}) do
-    " The blocking issue(s) #{Enum.join(blockers, ", ")} this work depended on have now landed on the base branch."
+  defp merged_blocker_clause(%{blockers: [_ | _] = blockers}) do
+    " The blocking issue(s) #{blocker_labels(blockers)} this work depended on have now merged into the base branch."
   end
 
-  defp landed_blocker_clause(_resume_after_block) do
-    " The issue that blocked it has now landed on the base branch."
+  defp merged_blocker_clause(_resume_after_block) do
+    " The issue that blocked it has now merged into the base branch."
   end
+
+  # Render each blocker ref as "IDENTIFIER (PR_URL)" when its merged PR URL is
+  # known, falling back to the bare identifier. Accepts the `%{identifier, pr_url}`
+  # map shape and legacy bare-string identifiers.
+  defp blocker_labels(blockers) do
+    Enum.map_join(blockers, ", ", &blocker_label/1)
+  end
+
+  defp blocker_label(%{identifier: identifier, pr_url: pr_url})
+       when is_binary(identifier) and is_binary(pr_url),
+       do: "#{identifier} (#{pr_url})"
+
+  defp blocker_label(%{identifier: identifier}) when is_binary(identifier), do: identifier
+  defp blocker_label(identifier) when is_binary(identifier), do: identifier
+  defp blocker_label(other), do: inspect(other)
 
   defp continue_with_issue?(%Issue{id: issue_id} = issue, issue_state_fetcher) when is_binary(issue_id) do
     case issue_state_fetcher.([issue_id]) do
