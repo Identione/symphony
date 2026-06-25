@@ -90,8 +90,12 @@ agent:
     # command: pick ONE. $SYMPHONY_CLAUDE_PRIV_DIR (injected by Claude.AppServer,
     # bash-expanded at exec time) points at priv/claude_agent. `jai` is an
     # optional outer sandbox (../SETUP.md, Approach A — Claude variant).
+    # `--dir` takes a path out of jai's COW overlay (live RW bind to real disk).
+    # $SYMPHONY_CLAUDE_PRIV_DIR must be live (stale copy-up breaks sync_workpad).
+    # $HOME/.cargo + $HOME/.rustup must be live (overlay readdir returns empty on
+    # lower-layer dirs, breaking lalrpop grammar discovery and Cargo extractions).
     # (A) jai outer sandbox:
-    command: jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
+    command: jai --dir $SYMPHONY_CLAUDE_PRIV_DIR --dir $HOME/.cargo --dir $HOME/.rustup uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
     # (B) no outer sandbox (Claude SDK is the only boundary):
     #command: uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
     # Scopes Claude auth to this CLAUDE_CONFIG_DIR (identione Max subscription);

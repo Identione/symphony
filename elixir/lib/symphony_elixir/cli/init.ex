@@ -661,8 +661,10 @@ defmodule SymphonyElixir.CLI.Init do
       claude:
         # command: pick ONE. $SYMPHONY_CLAUDE_PRIV_DIR is injected by Claude.AppServer
         # at sidecar launch. SPEC.md §5.3.5.2 + #{@setup_url}.
-        # (A) jai outer sandbox (Linux kernel >= 6.13):
-        #command: jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
+        # (A) jai outer sandbox (Linux kernel >= 6.13). `--dir` takes paths out
+        # of the COW overlay (live RW bind); needed for sidecar source
+        # (sync_workpad) and Cargo registry (lalrpop readdir / bulk extract):
+        #command: jai --dir $SYMPHONY_CLAUDE_PRIV_DIR --dir $HOME/.cargo --dir $HOME/.rustup uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
         # (B) no outer sandbox; the Claude SDK is the only boundary (portable default):
         command: uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
         # permission_mode: bypassPermissions (active) = allow-all under the jai +

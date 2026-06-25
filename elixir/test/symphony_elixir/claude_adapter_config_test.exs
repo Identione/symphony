@@ -135,6 +135,10 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
     # out of the box on Linux 6.13+. Hosts without jai must override
     # `agent.claude.command` to drop the prefix.
     assert String.starts_with?(settings.agent.claude.command, "jai ")
+    # Cargo dirs must be live binds (not COW overlay) to avoid overlayfs
+    # readdir-empty on lower-layer registry dirs (breaks lalrpop + bulk extract).
+    assert settings.agent.claude.command =~ "--dir $HOME/.cargo"
+    assert settings.agent.claude.command =~ "--dir $HOME/.rustup"
   end
 
   test "agent.claude accepts overrides" do

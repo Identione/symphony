@@ -1,0 +1,11 @@
+usage: run_sidecar_probe_abs.py [-h] [--cwd CWD] [--prompt PROMPT]
+                                [--prompt-file PROMPT_FILE]
+                                [--append-prompt APPEND_PROMPT]
+                                [--permission-mode PERMISSION_MODE]
+                                [--setting-sources {unset,project,none}]
+                                [--max-turns MAX_TURNS] [--verbose-logging]
+                                [--allowed-tool ALLOWED_TOOL]
+                                [--disallowed-tool DISALLOWED_TOOL]
+                                [--env ENV] [--timeout TIMEOUT]
+                                ...
+run_sidecar_probe_abs.py: error: unrecognized arguments: --model

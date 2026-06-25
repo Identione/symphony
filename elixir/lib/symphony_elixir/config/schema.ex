@@ -320,7 +320,14 @@ defmodule SymphonyElixir.Config.Schema do
     # `jai` prefix so the recommended Approach A — outer sandbox containment
     # via jai (Linux 6.13+) — works out of the box; hosts without jai must
     # override `agent.claude.command` to drop the prefix (Approach B).
-    @default_command "jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent"
+    # `--dir` flags take a path out of the COW overlay (making it a live RW
+    # bind to real disk instead). $SYMPHONY_CLAUDE_PRIV_DIR: sidecar source
+    # must be live or jai serves a stale copy-up (breaks sync_workpad).
+    # $HOME/.cargo + $HOME/.rustup: overlayfs readdir returns empty on
+    # lower-layer registry dirs, breaking lalrpop grammar discovery and Cargo
+    # bulk extractions. Both dirs are user-owned; the agent gains RW to the
+    # host cargo cache (same trust level as $SYMPHONY_CLAUDE_PRIV_DIR).
+    @default_command "jai --dir $SYMPHONY_CLAUDE_PRIV_DIR --dir $HOME/.cargo --dir $HOME/.rustup uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent"
 
     @primary_key false
     embedded_schema do
