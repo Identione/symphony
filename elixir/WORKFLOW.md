@@ -104,8 +104,8 @@ agent:
     # (xhigh is Opus > 4.7 -only). Both default via the SDK when unset.
     # model: claude-opus-4-8
     # effort: xhigh
-    # Within-continuation SDK turn cap (Level 1); distinct from agent.max_turns. Default 40.
-    # max_turns: 40
+    # Within-continuation SDK turn cap (Level 1); distinct from agent.max_turns. Default 100.
+    # max_turns: 100
     # Per-call cap (bytes) on native-tool output, shrunk by a PostToolUse hook so
     # it isn't re-paid as cache_read; 0 disables. Default 16384.
     # tool_output_limit: 16384
