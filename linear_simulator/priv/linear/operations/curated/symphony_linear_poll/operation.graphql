@@ -81,6 +81,11 @@ query SymphonyLinearPoll($projectSlug: String!, $stateNames: [String!]!, $first:
             state {
               name
             }
+            attachments {
+              nodes {
+                url
+              }
+            }
           }
         }
       }

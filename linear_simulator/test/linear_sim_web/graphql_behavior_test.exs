@@ -7,7 +7,7 @@ defmodule LinearSimWeb.GraphQLBehaviorTest do
   use LinearSimWeb.ConnCase, async: false
 
   alias LinearSim.Repo
-  alias LinearSim.Linear.{Issue, IssueRelation}
+  alias LinearSim.Linear.{Attachment, Issue, IssueRelation}
   alias LinearSim.Scenarios.Common
 
   @poll File.read!(
@@ -40,6 +40,15 @@ defmodule LinearSimWeb.GraphQLBehaviorTest do
         type: "blocks"
       })
 
+      # The blocker carries its opened PR as a Linear attachment, which the poll
+      # query reads via inverseRelations.issue.attachments.
+      Repo.insert!(%Attachment{
+        id: "attachment_eng_2_pr",
+        issue_id: "issue_eng_2",
+        title: "PR #42",
+        url: "https://github.com/acme/repo/pull/42"
+      })
+
       vars = %{
         "projectSlug" => "roadmap",
         "stateNames" => ["Todo"],
@@ -52,8 +61,17 @@ defmodule LinearSimWeb.GraphQLBehaviorTest do
       nodes = get_in(body, ["data", "issues", "nodes"])
       eng1 = Enum.find(nodes, &(&1["identifier"] == "ENG-1"))
 
-      assert [%{"type" => "blocks", "issue" => %{"identifier" => "ENG-2"}}] =
-               get_in(eng1, ["inverseRelations", "nodes"])
+      assert [
+               %{
+                 "type" => "blocks",
+                 "issue" => %{
+                   "identifier" => "ENG-2",
+                   "attachments" => %{
+                     "nodes" => [%{"url" => "https://github.com/acme/repo/pull/42"}]
+                   }
+                 }
+               }
+             ] = get_in(eng1, ["inverseRelations", "nodes"])
     end
   end
 
