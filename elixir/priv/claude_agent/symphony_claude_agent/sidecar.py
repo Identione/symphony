@@ -64,6 +64,27 @@ _STREAM_ACTIVITY_MIN_INTERVAL_S = 1.0
 CLAUDE_CODE_SYSTEM_PROMPT_PRESET = {"type": "preset", "preset": "claude_code"}
 
 
+# Env overrides forced onto the spawned claude CLI for every sidecar session.
+#
+# ``ENABLE_CLAUDEAI_MCP_SERVERS=0`` keeps the operator's personal claude.ai MCP
+# integrations (Google Drive, the Linear plugin, …) out of the unattended agent.
+# Those servers are irrelevant to orchestration — the workflow body even tells
+# the agent never to call ``mcp__plugin_linear_linear__*`` — and, worse, they
+# bloat the CLI's "tool search" deferred pool. Once the available-tool count
+# crosses the CLI's threshold, in-process MCP tools are deferred into a
+# searchable pool that drops ``mcp__symphony_workpad__sync_workpad`` (it sorts
+# after ``mcp__symphony__linear_graphql``), so the agent's ``ToolSearch`` can't
+# find it and every workpad sync silently falls back to ``linear_graphql`` —
+# defeating sync_workpad's purpose of keeping the multi-KB body out of the
+# model's token stream. Dropping the claude.ai servers shrinks the pool so
+# sync_workpad survives. ``options.env`` overrides the spawned CLI's inherited
+# process env (per the SDK transport).
+_SIDECAR_CLI_ENV: dict[str, str] = {"ENABLE_CLAUDEAI_MCP_SERVERS": "0"}
+
+_TOOL_VISIBILITY_LOG_SOURCE = "claude_tool_visibility"
+_TOOL_VISIBILITY_LOG_LIMIT = 1200
+
+
 # Length cap for any single rendered block in `render_message_text`. Sidecar
 # can afford a generous limit because each call produces one envelope, not a
 # per-key log line. Symphony's Logger handler caps further on its end (256
@@ -742,6 +763,16 @@ def build_options_payload(init_envelope: dict[str, Any]) -> dict[str, Any]:
         payload["include_partial_messages"] = True
         payload["include_hook_events"] = True
 
+    # Force the sidecar CLI env overrides (keep the operator's personal claude.ai
+    # MCP servers out of the deferred tool pool so sync_workpad isn't squeezed
+    # out). An explicit `env` in the init envelope merges on top, letting an
+    # operator re-tune without a code change.
+    env: dict[str, str] = dict(_SIDECAR_CLI_ENV)
+    caller_env = init_envelope.get("env")
+    if isinstance(caller_env, dict):
+        env.update({str(k): str(v) for k, v in caller_env.items()})
+    payload["env"] = env
+
     return payload
 
 
@@ -821,11 +852,22 @@ async def _drive(state: SessionState, env: dict[str, Any]) -> None:
         emit({"type": "error", "error": f"unknown envelope type: {msg_type}", "category": "claude_sdk_error"})
 
 
-def _build_symphony_mcp_server(state: SessionState):  # pragma: no cover - SDK runtime
-    """Register Symphony's exposed tools as in-process MCP entries.
+def build_symphony_mcp_servers(state: SessionState) -> dict[str, Any]:
+    """Register Symphony's exposed tools as in-process MCP servers.
 
     Each tool function emits a `tool_call` envelope and awaits Symphony's
     `tool_result`, so all auth/transport stays on the Symphony side.
+
+    `linear_graphql` and `sync_workpad` are deliberately split across *separate*
+    sdk MCP servers rather than co-located under one `symphony` server. The
+    bundled Claude CLI surfaces only the first tool of a single in-process (sdk)
+    MCP server to the model, so co-locating them silently hid `sync_workpad`:
+    agents only ever saw `mcp__symphony__linear_graphql` and fell back to raw
+    `linear_graphql` for workpad syncs (0 `sync_workpad` calls across every
+    instance). One tool per server sidesteps that. The tool the model sees is
+    `mcp__symphony_workpad__sync_workpad`; the forwarded `tool_call` envelope
+    still carries the bare name `sync_workpad`, so Symphony's routing is
+    unchanged.
     """
 
     schema = state.tool_schemas.get("linear_graphql", _LINEAR_GRAPHQL_FALLBACK_SCHEMA)
@@ -862,7 +904,14 @@ def _build_symphony_mcp_server(state: SessionState):  # pragma: no cover - SDK r
 
         return translate_symphony_tool_result(result)
 
-    return create_sdk_mcp_server(name="symphony", version="0.1.0", tools=[linear_graphql, sync_workpad])
+    return {
+        "symphony": create_sdk_mcp_server(
+            name="symphony", version="0.1.0", tools=[linear_graphql]
+        ),
+        "symphony_workpad": create_sdk_mcp_server(
+            name="symphony_workpad", version="0.1.0", tools=[sync_workpad]
+        ),
+    }
 
 
 async def _handle_init(state: SessionState, env: dict[str, Any]) -> None:
@@ -878,7 +927,7 @@ async def _handle_init(state: SessionState, env: dict[str, Any]) -> None:
 
     payload = build_options_payload(env)
     state.tool_schemas = extract_tool_schemas(env)
-    payload["mcp_servers"] = {"symphony": _build_symphony_mcp_server(state)}
+    payload["mcp_servers"] = build_symphony_mcp_servers(state)
 
     # R2b: cap oversized native-tool output (Read/Bash/Grep/Glob) so a single
     # large result isn't re-paid as cache_read on every subsequent turn.
@@ -962,6 +1011,73 @@ def _stream_event_text(message: Any) -> str | None:
     return None
 
 
+def summarize_mcp_server_status(data: Any) -> str | None:
+    """One-line ``name=status, …`` summary of the SDK init message's
+    ``mcp_servers`` list, or ``None`` when the payload carries no server list.
+
+    The SDK init handshake reports each MCP server's connection status; an
+    in-process sdk MCP server that fails to register (e.g. ``symphony_workpad``,
+    see claude-agent-sdk-python#207) shows up here as ``failed`` or is absent
+    entirely. Surfacing it in the structured log turns a silently-missing tool
+    into an observable fact instead of an inference from zero tool calls.
+    """
+
+    if not isinstance(data, dict):
+        return None
+    servers = data.get("mcp_servers")
+    if not isinstance(servers, list):
+        return None
+    parts = [
+        f"{s.get('name')}={s.get('status')}" for s in servers if isinstance(s, dict)
+    ]
+    return ", ".join(parts) if parts else "(none)"
+
+
+def tool_visibility_diagnostic(text: str | None) -> str | None:
+    """Extract the small ToolSearch/sync_workpad visibility signal from a
+    rendered assistant message.
+
+    The full assistant stream is too noisy for normal daemon logs, but this
+    investigation needs a durable record of whether ``ToolSearch`` found or
+    missed ``mcp__symphony_workpad__sync_workpad`` in real runs.
+    """
+
+    if not text:
+        return None
+
+    interesting = (
+        "mcp__symphony_workpad__sync_workpad" in text
+        or "No matching deferred tools found" in text
+        or ("ToolSearch" in text and "symphony" in text)
+    )
+    if not interesting:
+        return None
+
+    return fold_text(text, limit=_TOOL_VISIBILITY_LOG_LIMIT)
+
+
+def emit_tool_visibility_log(message: str) -> None:
+    emit(
+        {
+            "type": "log",
+            "level": "info",
+            "source": _TOOL_VISIBILITY_LOG_SOURCE,
+            "message": message,
+        }
+    )
+
+
+def emit_assistant_message(state: SessionState, text: str) -> None:
+    # Both AssistantMessage paths (the SDK-typed branch and the fallback render)
+    # forward assistant prose the same way: surface a tool-visibility diagnostic
+    # first if the text trips one, then emit the message. Keep that pairing in one
+    # place so the diagnostic check can't drift between the two call sites.
+    diagnostic = tool_visibility_diagnostic(text)
+    if diagnostic is not None:
+        emit_tool_visibility_log(diagnostic)
+    emit({"type": "assistant_message", "text": text, "session_id": state.session_id})
+
+
 async def _forward_message(state: SessionState, message: Any) -> None:
     # Partial-message streaming: forward a throttled `assistant_delta` so the
     # orchestrator sees continuous activity during long model generations.
@@ -992,6 +1108,14 @@ async def _forward_message(state: SessionState, message: Any) -> None:
             if session_id:
                 state.session_id = session_id
                 emit({"type": "system_init", "session_id": session_id})
+            # Surface the per-server MCP connection status from the init
+            # handshake so a `failed`/missing in-process sdk MCP server (notably
+            # symphony_workpad, see claude-agent-sdk-python#207) is observable in
+            # the structured log instead of silently swallowing its tool. One
+            # low-volume line per session.
+            status = summarize_mcp_server_status(data)
+            if status is not None:
+                emit_tool_visibility_log(f"mcp_servers init status: {status}")
             return
         # The Claude CLI subprocess forwards upstream HTTP errors from
         # api.anthropic.com as ``{"type":"system","subtype":"api_error",
@@ -1130,7 +1254,7 @@ async def _forward_message(state: SessionState, message: Any) -> None:
             return
 
         if text is not None:
-            emit({"type": "assistant_message", "text": text, "session_id": state.session_id})
+            emit_assistant_message(state, text)
 
         # Per-API-call billing arrives on AssistantMessage (claude-agent-sdk
         # ≥0.1.49 — "Preserve per-turn usage on AssistantMessage"). Surface it
@@ -1150,7 +1274,7 @@ async def _forward_message(state: SessionState, message: Any) -> None:
 
     text = render_message_text(message)
     if text is not None:
-        emit({"type": "assistant_message", "text": text, "session_id": state.session_id})
+        emit_assistant_message(state, text)
 
 
 # Matches the subscription usage-limit reset notice, e.g.

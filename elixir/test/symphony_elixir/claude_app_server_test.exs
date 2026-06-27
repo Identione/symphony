@@ -393,6 +393,64 @@ defmodule SymphonyElixir.ClaudeAppServerTest do
     AppServer.stop_session(session)
   end
 
+  test "run_turn always logs claude_tool_visibility diagnostics",
+       %{workspace: workspace} do
+    cmd =
+      scripted_command_with_input(
+        [
+          envelope(%{type: "ready"}),
+          envelope(%{type: "system_init", session_id: "s-tool-visibility"})
+        ],
+        [
+          envelope(%{
+            type: "log",
+            level: "info",
+            source: "claude_tool_visibility",
+            message: "ToolSearch result={'matches':['mcp__symphony_workpad__sync_workpad']}"
+          }),
+          envelope(%{
+            type: "turn_end",
+            stop_reason: "end_turn",
+            num_turns: 1,
+            usage: %{
+              input_tokens: 0,
+              output_tokens: 0,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0
+            }
+          })
+        ]
+      )
+
+    {:ok, session} =
+      AppServer.start_session(workspace, config: %{default_claude_config() | command: cmd})
+
+    parent = self()
+    on_message = fn msg -> send(parent, {:claude_event, msg}) end
+
+    log =
+      capture_log(fn ->
+        assert {:ok, _result} =
+                 AppServer.run_turn(session, "Go", issue(),
+                   on_message: on_message,
+                   turn_timeout_ms: 5_000
+                 )
+      end)
+
+    assert log =~ "claude_tool_visibility:"
+    assert log =~ "mcp__symphony_workpad__sync_workpad"
+
+    assert_received {:claude_event,
+                     %{
+                       event: :log,
+                       payload: %{
+                         source: "claude_tool_visibility"
+                       }
+                     }}
+
+    AppServer.stop_session(session)
+  end
+
   describe "session lifecycle Logger lines (mirroring Codex)" do
     test "happy path emits `Claude session started` then `Claude session completed` with session_id and issue context",
          %{workspace: workspace} do

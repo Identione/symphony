@@ -26,6 +26,7 @@ from symphony_claude_agent.sidecar import (  # noqa: E402
     fold_text,
     parse_line,
     render_message_text,
+    tool_visibility_diagnostic,
     usage_to_envelope,
 )
 
@@ -115,6 +116,33 @@ def test_build_options_payload_forwards_effort_when_set() -> None:
 def test_build_options_payload_omits_effort_when_unset() -> None:
     payload = build_options_payload({"type": "init", "cwd": "/tmp/ws"})
     assert "effort" not in payload
+
+
+def test_build_options_payload_drops_claudeai_mcp_servers_by_default() -> None:
+    """The operator's personal claude.ai MCP servers (Google Drive, the Linear
+    plugin) bloat the CLI's tool-search deferred pool and squeeze the
+    alphabetically-last in-process tool (``mcp__symphony_workpad__sync_workpad``)
+    out of it, so the agent's ToolSearch can no longer find it. Force
+    ``ENABLE_CLAUDEAI_MCP_SERVERS=0`` to keep them out. ``options.env`` overrides
+    the spawned CLI's inherited env."""
+
+    payload = build_options_payload({"type": "init", "cwd": "/tmp/ws"})
+    assert payload["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"] == "0"
+
+
+def test_build_options_payload_env_caller_override_wins() -> None:
+    """An explicit ``env`` in the init envelope merges over the defaults so an
+    operator can re-tune the spawned CLI's env without a code change."""
+
+    payload = build_options_payload(
+        {
+            "type": "init",
+            "cwd": "/tmp/ws",
+            "env": {"ENABLE_CLAUDEAI_MCP_SERVERS": "1", "FOO": "bar"},
+        }
+    )
+    assert payload["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"] == "1"
+    assert payload["env"]["FOO"] == "bar"
 
 
 def test_build_options_payload_requires_cwd() -> None:
@@ -293,6 +321,19 @@ def test_render_message_text_joins_multiple_blocks_with_newlines() -> None:
     assert rendered.startswith("here is a tool call:")
     assert "[tool_use Read(tu1)]" in rendered
     assert "\n" in rendered
+
+
+def test_tool_visibility_diagnostic_matches_sync_workpad_toolsearch() -> None:
+    text = (
+        "[tool_result tu1] "
+        '[{"type":"tool_reference","tool_name":"mcp__symphony_workpad__sync_workpad"}]'
+    )
+
+    assert tool_visibility_diagnostic(text) == text
+
+
+def test_tool_visibility_diagnostic_ignores_unrelated_text() -> None:
+    assert tool_visibility_diagnostic("[tool_use Read(tu1)] {}") is None
 
 
 # ---- _classify_from_message ------------------------------------------------

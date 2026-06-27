@@ -501,6 +501,20 @@ defmodule SymphonyElixir.Claude.AppServer do
     do_collect(updated, context, leftover)
   end
 
+  defp handle_envelope(
+         {:ok, %{type: :log, source: "claude_tool_visibility"} = env, leftover},
+         session,
+         context,
+         _buffer
+       ) do
+    Logger.info(fn ->
+      "#{Map.get(env, :source)}: #{Map.get(env, :message)}"
+    end)
+
+    emit_event(context.on_message, :log, env, session)
+    do_collect(session, context, leftover)
+  end
+
   defp handle_envelope({:ok, %{type: type} = env, leftover}, session, context, _buffer) do
     emit_event(context.on_message, type, env, session)
     do_collect(session, context, leftover)

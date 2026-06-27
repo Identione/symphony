@@ -93,8 +93,16 @@ agent:
     # command: pick ONE. $SYMPHONY_CLAUDE_PRIV_DIR (injected by Claude.AppServer,
     # bash-expanded at exec time) points at priv/claude_agent. `jai` is an
     # optional outer sandbox (../SETUP.md, Approach A — Claude variant).
-    # (A) jai outer sandbox:
-    command: jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
+    # (A) jai outer sandbox. The `--dir $SYMPHONY_CLAUDE_PRIV_DIR` is required:
+    # jai casual mode overlays $HOME copy-on-write and only the cwd (the per-issue
+    # workspace) is a live passthrough; the orchestrator repo otherwise reads from
+    # the COW overlay, which serves a STALE sidecar once uv/python write into
+    # priv/claude_agent (copy-up) — and `sync_workpad` disappears. `--dir` grants
+    # the priv dir as a live bind that bypasses the overlay, so the jail reads
+    # current source. cwd stays the workspace (set via the SDK init envelope) so
+    # the agent's workpad.md writes land on real disk where Symphony's File.read
+    # sees them. The (B) non-jai variant has no overlay and needs no `--dir`.
+    command: jai --dir $SYMPHONY_CLAUDE_PRIV_DIR uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
     # (B) no outer sandbox (Claude SDK is the only boundary):
     #command: uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
     # Scopes Claude auth to this CLAUDE_CONFIG_DIR (identione Max subscription);
@@ -127,8 +135,8 @@ agent:
     #  - KillBash
     #  - TodoWrite
     #  - NotebookEdit
-    #  - mcp__symphony__linear_graphql   # in-process Linear tool (auth stays in Symphony)
-    #  - mcp__symphony__sync_workpad     # in-process workpad sync (reads body from local file)
+    #  - mcp__symphony__linear_graphql        # in-process Linear tool (auth stays in Symphony)
+    #  - mcp__symphony_workpad__sync_workpad  # in-process workpad sync (its own sdk MCP server)
     #  #- mcp__lsp                        # project .mcp.json servers need mcp__<server> here
     # setting_sources unset → loads the target repo's .claude/settings.json,
     # .mcp.json servers, and CLAUDE.md (contained by jai). Set [] to isolate.
@@ -208,7 +216,7 @@ Work only in the provided repository copy. Do not touch any other path.
 
 ## Linear access
 
-All Linear access goes through Symphony's injected `linear_graphql` tool (exposed as `mcp__symphony__linear_graphql`). Use it for every Linear read and write, **except** workpad comment syncs — those use the companion `sync_workpad` tool (`mcp__symphony__sync_workpad`), which reads the body from a local `workpad.md` so the multi-KB payload never enters the conversation context (and is not re-paid on every cache_read). Do **not** call `mcp__plugin_linear_linear__*` or any other "Linear MCP" plugin tools — they are not available in this session and will be denied; reaching for them only wastes a turn. If `linear_graphql` is not present, stop and ask the user to configure Linear. See the `linear` skill for query/mutation recipes and the `sync_workpad` lifecycle.
+All Linear access goes through Symphony's injected `linear_graphql` tool (exposed as `mcp__symphony__linear_graphql`). Use it for every Linear read and write, **except** workpad comment syncs — those use the companion `sync_workpad` tool (`mcp__symphony_workpad__sync_workpad`), which reads the body from a local `workpad.md` so the multi-KB payload never enters the conversation context (and is not re-paid on every cache_read). Do **not** call `mcp__plugin_linear_linear__*` or any other "Linear MCP" plugin tools — they are not available in this session and will be denied; reaching for them only wastes a turn. If `linear_graphql` is not present, stop and ask the user to configure Linear. See the `linear` skill for query/mutation recipes and the `sync_workpad` lifecycle.
 
 ## Skills
 

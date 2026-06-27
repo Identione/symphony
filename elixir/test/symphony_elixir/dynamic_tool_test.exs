@@ -2,6 +2,7 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
   use SymphonyElixir.TestSupport
 
   alias SymphonyElixir.Codex.DynamicTool
+  alias SymphonyElixir.Workpad
 
   test "tool_specs advertises the linear_graphql and sync_workpad input contracts" do
     specs = DynamicTool.tool_specs()
@@ -551,6 +552,136 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert log =~ "reason=missing_query"
   end
 
+  # ── workpad-write guard (IDE-257) ───────────────────────────────────
+  #
+  # The agent must funnel the `## Symphony Workpad` comment through the
+  # dedicated `sync_workpad` tool (which reads the multi-KB body Symphony-side
+  # so it never enters the token stream). When `sync_workpad` is available the
+  # model nonetheless sometimes skips it and pastes the whole body into a raw
+  # `linear_graphql` commentCreate/commentUpdate — the exact token-expensive
+  # fallback we want to eliminate. The guard turns that silent fallback into a
+  # loud, self-correcting failure.
+
+  test "linear_graphql rejects a raw commentUpdate carrying a workpad body and redirects to sync_workpad" do
+    marker = Workpad.marker()
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{
+          "query" => "mutation($id: String!, $body: String!) { commentUpdate(id: $id, input: { body: $body }) { success } }",
+          "variables" => %{"id" => "c1", "body" => "#{marker}\n\n## Plan\n\n- step one"}
+        },
+        linear_client: fn _q, _v, _o ->
+          flunk("linear client must not be called for a workpad write via linear_graphql")
+        end
+      )
+
+    assert response["success"] == false
+    decoded = Jason.decode!(response["output"])
+    assert decoded["error"]["message"] =~ "sync_workpad"
+    assert decoded["error"]["use_tool"] == "sync_workpad"
+  end
+
+  test "linear_graphql rejects a raw commentCreate with a workpad body nested in input variables" do
+    marker = Workpad.marker()
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{
+          "query" => "mutation($input: CommentCreateInput!) { commentCreate(input: $input) { success comment { id } } }",
+          "variables" => %{"input" => %{"issueId" => "iss_1", "body" => "#{marker}\n\nbootstrap"}}
+        },
+        linear_client: fn _q, _v, _o -> flunk("linear client must not be called") end
+      )
+
+    assert response["success"] == false
+    assert Jason.decode!(response["output"])["error"]["message"] =~ "sync_workpad"
+  end
+
+  test "linear_graphql rejects a workpad body inlined directly in the mutation document" do
+    marker = Workpad.marker()
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{
+          "query" => ~s|mutation { commentCreate(input: { issueId: "iss_1", body: "#{marker}\\n\\nplan" }) { success } }|
+        },
+        linear_client: fn _q, _v, _o -> flunk("linear client must not be called") end
+      )
+
+    assert response["success"] == false
+    assert Jason.decode!(response["output"])["error"]["message"] =~ "sync_workpad"
+  end
+
+  test "linear_graphql allows ordinary (non-workpad) comment writes" do
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{
+          "query" => "mutation($id: String!, $body: String!) { commentUpdate(id: $id, input: { body: $body }) { success } }",
+          "variables" => %{"id" => "c1", "body" => "Plain status update, no workpad marker here."}
+        },
+        linear_client: fn query, variables, _o ->
+          send(test_pid, {:called, query, variables})
+          {:ok, %{"data" => %{"commentUpdate" => %{"success" => true}}}}
+        end
+      )
+
+    assert_received {:called, _q, _v}
+    assert response["success"] == true
+  end
+
+  test "linear_graphql allows a read query that merely mentions the workpad marker" do
+    marker = Workpad.marker()
+    test_pid = self()
+
+    response =
+      DynamicTool.execute(
+        "linear_graphql",
+        %{
+          "query" => "query { issue(id: \"X\") { comments { nodes { id body } } } }",
+          "variables" => %{"needle" => marker}
+        },
+        linear_client: fn _q, _v, _o ->
+          send(test_pid, :called)
+          {:ok, %{"data" => %{"issue" => %{"comments" => %{"nodes" => []}}}}}
+        end
+      )
+
+    assert_received :called
+    assert response["success"] == true
+  end
+
+  test "linear_graphql logs a rejected workpad write as a redirect telemetry line without leaking the body" do
+    marker = Workpad.marker()
+
+    log =
+      capture_log(fn ->
+        DynamicTool.execute(
+          "linear_graphql",
+          %{
+            "query" => "mutation($id: String!, $body: String!) { commentUpdate(id: $id, input: { body: $body }) { success } }",
+            "variables" => %{"id" => "c1", "body" => "#{marker}\n\nSECRET WORKPAD CONTENT"}
+          },
+          linear_client: fn _q, _v, _o -> flunk("linear client must not be called") end,
+          log_context: %{issue: %{id: "uuid-1", identifier: "IDE-257"}, session_id: "thr_1-turn_1"}
+        )
+      end)
+
+    assert log =~ "linear_graphql_call"
+    assert log =~ "op_type=mutation"
+    assert log =~ "root_field=commentUpdate"
+    assert log =~ "status=rejected"
+    assert log =~ "reason=workpad_must_use_sync_workpad"
+    assert log =~ "issue_id=uuid-1 issue_identifier=IDE-257"
+    refute log =~ "SECRET WORKPAD CONTENT"
+  end
+
   # ── sync_workpad ───────────────────────────────────────────────────
 
   defp write_tmp_workpad(content) do
@@ -595,6 +726,48 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert_received {:graphql, query, %{"id" => "c1", "body" => "Updated."}}
     assert query =~ "commentUpdate"
     assert response["success"] == true
+  end
+
+  test "sync_workpad bypasses the workpad-write guard for a real Symphony Workpad body" do
+    test_pid = self()
+    marker = Workpad.marker()
+    path = write_tmp_workpad("#{marker}\n\n## Plan\n\n- step one")
+
+    response =
+      DynamicTool.execute(
+        "sync_workpad",
+        %{"issue_id" => "ENG-42", "file_path" => path, "comment_id" => "c1"},
+        linear_client: fn query, variables, _opts ->
+          send(test_pid, {:graphql, query, variables})
+          {:ok, %{"data" => %{"commentUpdate" => %{"success" => true, "comment" => %{"id" => "c1"}}}}}
+        end
+      )
+
+    assert_received {:graphql, query, %{"id" => "c1", "body" => body}}
+    assert query =~ "commentUpdate"
+    assert body =~ marker
+    assert response["success"] == true
+  end
+
+  test "sync_workpad logs a positive sync_workpad_call telemetry line without the body" do
+    marker = Workpad.marker()
+    path = write_tmp_workpad("#{marker}\n\nSECRET WORKPAD CONTENT")
+
+    log =
+      capture_log(fn ->
+        DynamicTool.execute(
+          "sync_workpad",
+          %{"issue_id" => "ENG-42", "file_path" => path, "comment_id" => "c1"},
+          linear_client: fn _q, _v, _o -> {:ok, %{"data" => %{"commentUpdate" => %{"success" => true}}}} end,
+          log_context: %{issue: %{id: "uuid-1", identifier: "IDE-256"}, session_id: "s1"}
+        )
+      end)
+
+    assert log =~ "sync_workpad_call"
+    assert log =~ "action=update"
+    assert log =~ "has_marker=true"
+    assert log =~ "issue_identifier=IDE-256"
+    refute log =~ "SECRET WORKPAD CONTENT"
   end
 
   test "sync_workpad validates required arguments before calling Linear" do

@@ -73,7 +73,7 @@ Work only in the provided repository copy. Do not touch any other path.
 
 ## Linear access
 
-All Linear access goes through Symphony's injected `linear_graphql` tool (exposed as `mcp__symphony__linear_graphql`). Use it for every Linear read and write, **except** workpad comment syncs — those use the companion `sync_workpad` tool (`mcp__symphony__sync_workpad`), which reads the body from a local `workpad.md` so the multi-KB payload never enters the conversation context (and is not re-paid on every cache_read). Do **not** call `mcp__plugin_linear_linear__*` or any other "Linear MCP" plugin tools — they are not available in this session and will be denied; reaching for them only wastes a turn. If `linear_graphql` is not present, stop and ask the user to configure Linear. See the `linear` skill for query/mutation recipes and the `sync_workpad` lifecycle.
+All Linear access goes through Symphony's injected `linear_graphql` tool (exposed as `mcp__symphony__linear_graphql`). Use it for every Linear read and write, **except** workpad comment syncs — those use the companion `sync_workpad` tool (`mcp__symphony_workpad__sync_workpad`), which reads the body from a local `workpad.md` so the multi-KB payload never enters the conversation context (and is not re-paid on every cache_read). Do **not** call `mcp__plugin_linear_linear__*` or any other "Linear MCP" plugin tools — they are not available in this session and will be denied; reaching for them only wastes a turn. If `linear_graphql` is not present, stop and ask the user to configure Linear. See the `linear` skill for query/mutation recipes and the `sync_workpad` lifecycle.
 
 ## Skills
 

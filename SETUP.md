@@ -9,7 +9,7 @@ This doc covers host configuration for Symphony's coding-agent adapters
 
 - **`agent.kind: claude` (Approach A in shipped `WORKFLOW.md`)** — `uv` on
   `PATH` plus a setuid `jai` binary (Linux 6.13+). The shipped active line
-  is `command: jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR …`; the
+  is `command: jai --dir $SYMPHONY_CLAUDE_PRIV_DIR uv run --project $SYMPHONY_CLAUDE_PRIV_DIR …`; the
   no-jai alternative is preserved as a commented `command:` line in the
   same block — uncomment it (and comment out the jai one) to drop to
   adapter-internal sandboxing on hosts without jai.
@@ -26,9 +26,9 @@ The schema defaults (used when `WORKFLOW.md` omits `command:`) differ by
 adapter:
 
 - **Claude** ships with jai active by default
-  (`jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m
-  symphony_claude_agent`). Hosts without jai must override
-  `agent.claude.command` to drop the `jai` prefix — the SDK's
+  (`jai --dir $SYMPHONY_CLAUDE_PRIV_DIR uv run --project
+  $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent`). Hosts without
+  jai must override `agent.claude.command` to drop the `jai --dir` prefix — the SDK's
   `permission_mode: dontAsk` + `allowed_tools` whitelist remain the inner
   boundary either way.
 - **Codex** ships with the no-jai variant by default
@@ -122,7 +122,7 @@ uv run --project /abs/path/to/elixir/priv/claude_agent python -m symphony_claude
 
 ```yaml
 claude:
-  command: jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
+  command: jai --dir $SYMPHONY_CLAUDE_PRIV_DIR uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
   config_dir: ~/.claude-identione
   model: claude-opus-4-7
   permission_mode: dontAsk
@@ -132,8 +132,11 @@ claude:
 
 What each piece does:
 
-- `jai uv run …` — jai launches `uv run`, which provisions the sidecar venv
-  and execs `python -m symphony_claude_agent`.
+- `jai --dir $SYMPHONY_CLAUDE_PRIV_DIR uv run …` — jai launches `uv run`, which
+  provisions the sidecar venv and execs `python -m symphony_claude_agent`.
+  `--dir` grants the sidecar source as a live bind that bypasses jai's COW
+  `$HOME` overlay, so the jail always runs current sidecar code (the overlay
+  otherwise serves a stale copy once `uv`/`python` write into `priv/claude_agent`).
 - `$SYMPHONY_CLAUDE_PRIV_DIR` is injected by `SymphonyElixir.Claude.AppServer`
   at sidecar launch time (resolves to this app's `priv/claude_agent`) and
   expanded by bash at exec. Symphony launches the sidecar via `bash -lc`

@@ -6,6 +6,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   require Logger
 
   alias SymphonyElixir.Linear.Client
+  alias SymphonyElixir.Workpad
 
   @linear_graphql_tool "linear_graphql"
   @linear_graphql_description """
@@ -119,7 +120,20 @@ defmodule SymphonyElixir.Codex.DynamicTool do
           do: {@sync_workpad_update, %{"id" => comment_id, "body" => body}},
           else: {@sync_workpad_create, %{"issueId" => issue_id, "body" => body}}
 
-      execute_linear_graphql(%{"query" => query, "variables" => variables}, opts)
+      # Positive telemetry: a `sync_workpad_call` line is the durable proof the
+      # agent used the dedicated tool (body bytes + marker presence only — never
+      # the body itself, per docs/logging.md). Pairs with the guard's
+      # `status=rejected reason=workpad_must_use_sync_workpad` line so the log
+      # tells the whole story of which path each workpad write took.
+      log_sync_workpad_call(comment_id, body, opts)
+
+      # `sync_workpad` is the sanctioned path for workpad writes, so it bypasses
+      # the raw-tool workpad guard below (the body legitimately carries the
+      # `## Symphony Workpad` marker).
+      execute_linear_graphql(
+        %{"query" => query, "variables" => variables},
+        Keyword.put(opts, :allow_workpad_write, true)
+      )
     else
       {:error, reason} -> failure_response(tool_error_payload(reason))
     end
@@ -157,17 +171,9 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   end
 
   defp execute_linear_graphql(arguments, opts) do
-    linear_client = Keyword.get(opts, :linear_client, &Client.graphql/3)
-
     case normalize_linear_graphql_arguments(arguments) do
       {:ok, query, variables} ->
-        result = linear_client.(query, variables, [])
-        log_linear_graphql_call(query, variables, result, opts)
-
-        case result do
-          {:ok, response} -> graphql_response(response)
-          {:error, reason} -> failure_response(tool_error_payload(reason))
-        end
+        run_linear_graphql(query, variables, opts)
 
       {:error, reason} ->
         # The call never reached Linear (missing/invalid query). Still record the
@@ -175,6 +181,84 @@ defmodule SymphonyElixir.Codex.DynamicTool do
         log_linear_graphql_rejected(reason, opts)
         failure_response(tool_error_payload(reason))
     end
+  end
+
+  # The agent pasted the whole `## Symphony Workpad` body into a raw comment
+  # mutation instead of calling `sync_workpad`. Refuse it loudly so the
+  # multi-KB body never reaches Linear via this path (and never gets re-paid as
+  # conversation context), and point the agent at the dedicated tool. The
+  # internal sync_workpad call carries `allow_workpad_write: true` and is exempt.
+  defp run_linear_graphql(query, variables, opts) do
+    # Summarize once and reuse: both the guard (via `comment_mutation?`) and the
+    # telemetry line need the op-shape, and this runs once per turn (~1,300 calls
+    # in the spend window), so re-parsing the document twice is pure waste.
+    summary = summarize_operation(query)
+
+    if workpad_write_via_raw_tool?(summary, query, variables, opts) do
+      log_workpad_redirect(summary, variables, opts)
+      failure_response(workpad_redirect_payload())
+    else
+      linear_client = Keyword.get(opts, :linear_client, &Client.graphql/3)
+      result = linear_client.(query, variables, [])
+      log_linear_graphql_call(summary, variables, result, opts)
+      graphql_result_response(result)
+    end
+  end
+
+  defp graphql_result_response({:ok, response}), do: graphql_response(response)
+  defp graphql_result_response({:error, reason}), do: failure_response(tool_error_payload(reason))
+
+  # ---------------------------------------------------------------------------
+  # Workpad-write guard (IDE-257)
+  #
+  # `sync_workpad` exists to keep the multi-KB `## Symphony Workpad` body out of
+  # the model's token stream — it reads the body from a local file on the
+  # Symphony side. When the agent skips that tool and pastes the body into a raw
+  # `linear_graphql` commentCreate/commentUpdate it defeats the whole point and
+  # re-pays the body on every turn. We can't force the model to discover the
+  # tool, so we make the raw fallback fail loudly: any comment mutation whose
+  # body carries the workpad marker is rejected with a message pointing back at
+  # `sync_workpad`. `sync_workpad`'s own forwarded mutation sets
+  # `allow_workpad_write: true` and is exempt.
+  # ---------------------------------------------------------------------------
+  defp workpad_write_via_raw_tool?(summary, query, variables, opts) do
+    not Keyword.get(opts, :allow_workpad_write, false) and
+      comment_mutation?(summary) and
+      contains_workpad_marker?(query, variables)
+  end
+
+  defp comment_mutation?(%{op_type: op_type, root_field: root_field}) do
+    op_type == "mutation" and root_field in ["commentCreate", "commentUpdate"]
+  end
+
+  # The body may arrive as a top-level `body` variable, nested inside an `input`
+  # object, or inlined directly in the document — scan all of them for the
+  # marker rather than assuming a single shape.
+  defp contains_workpad_marker?(query, variables) do
+    marker = Workpad.marker()
+    String.contains?(query, marker) or value_contains?(variables, marker)
+  end
+
+  defp value_contains?(value, marker) when is_binary(value), do: String.contains?(value, marker)
+  defp value_contains?(value, marker) when is_map(value), do: Enum.any?(value, fn {_k, v} -> value_contains?(v, marker) end)
+  defp value_contains?(value, marker) when is_list(value), do: Enum.any?(value, &value_contains?(&1, marker))
+  defp value_contains?(_value, _marker), do: false
+
+  defp workpad_redirect_payload do
+    %{
+      "error" => %{
+        "message" =>
+          "Workpad comments must not be created or updated through `linear_graphql`. " <>
+            "This body carries the `#{Workpad.marker()}` marker, so it is the persistent " <>
+            "workpad — posting it through `linear_graphql` floods the conversation context " <>
+            "with the multi-KB body and re-pays it on every turn. Use the dedicated " <>
+            "`sync_workpad` tool instead: write the body to a local markdown file and call " <>
+            "`sync_workpad` with `issue_id`, `file_path`, and (to update an existing comment) " <>
+            "`comment_id`. If the tool is not listed, run `ToolSearch` with " <>
+            "`select:mcp__symphony_workpad__sync_workpad` first.",
+        "use_tool" => "sync_workpad"
+      }
+    }
   end
 
   defp normalize_linear_graphql_arguments(arguments) when is_binary(arguments) do
@@ -395,9 +479,7 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   # be large and carry issue content (see docs/logging.md, "Avoid logging large
   # payloads").
   # ---------------------------------------------------------------------------
-  defp log_linear_graphql_call(query, variables, result, opts) do
-    %{op_type: op_type, root_field: root_field} = summarize_operation(query)
-
+  defp log_linear_graphql_call(%{op_type: op_type, root_field: root_field}, variables, result, opts) do
     Logger.info(
       "linear_graphql_call op_type=#{op_type} root_field=#{root_field} " <>
         "var_keys=#{variable_keys(variables)} #{result_status(result)}" <>
@@ -409,6 +491,28 @@ defmodule SymphonyElixir.Codex.DynamicTool do
     Logger.info(
       "linear_graphql_call op_type=unknown root_field=unknown var_keys= " <>
         "status=rejected reason=#{reason}" <> log_context_suffix(opts)
+    )
+  end
+
+  # The workpad guard rejects the call *after* a successful parse, so unlike
+  # `log_linear_graphql_rejected/2` we know the real operation shape. Keep the
+  # same op-shape format (op_type / root_field / var_keys only — never the body)
+  # so `reason=workpad_must_use_sync_workpad` lines are greppable alongside the
+  # normal call telemetry. This is the durable signal that a fallback was caught.
+  defp log_sync_workpad_call(comment_id, body, opts) do
+    action = if comment_id, do: "update", else: "create"
+
+    Logger.info(
+      "sync_workpad_call action=#{action} body_bytes=#{byte_size(body)} " <>
+        "has_marker=#{String.contains?(body, Workpad.marker())}" <> log_context_suffix(opts)
+    )
+  end
+
+  defp log_workpad_redirect(%{op_type: op_type, root_field: root_field}, variables, opts) do
+    Logger.info(
+      "linear_graphql_call op_type=#{op_type} root_field=#{root_field} " <>
+        "var_keys=#{variable_keys(variables)} status=rejected " <>
+        "reason=workpad_must_use_sync_workpad" <> log_context_suffix(opts)
     )
   end
 

@@ -580,7 +580,7 @@ long-lived subprocess (the "sidecar") that hosts the Claude Agent SDK and expose
 protocol to Symphony shaped like the Codex app-server client.
 
 - `command` (string shell command)
-  - Default: `jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent`
+  - Default: `jai --dir $SYMPHONY_CLAUDE_PRIV_DIR uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent`
   - `$SYMPHONY_CLAUDE_PRIV_DIR` is injected by the implementation at sidecar launch and points
     at the Python sidecar's `priv` directory (`<priv-claude-agent>`); `bash` expands it at exec.
   - The default ships with `jai` so the recommended outer-sandbox containment (Linux 6.13+) works
@@ -972,7 +972,7 @@ not require recognizing or validating extension fields unless that extension is 
 - `agent.codex.quota`: object, OPTIONAL — see §5.3.5.3 (Codex honors `enabled`, `stale_after_ms`,
   `dispatch_pause_percent`)
 - `agent.claude.command`: shell command string, default
-  `jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent`
+  `jai --dir $SYMPHONY_CLAUDE_PRIV_DIR uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent`
   (see §10.8 for the `jai` default and the `SYMPHONY_CLAUDE_PRIV_DIR` env-var indirection)
 - `agent.claude.model`: string, default implementation-defined
 - `agent.claude.permission_mode`: enum
@@ -1580,6 +1580,13 @@ Optional client-side tool extension:
   the `IssueRelationType` enum has only `blocks`; `blocked_by` is rejected at variable coercion, so
   the hint explains that direction is encoded by operand order and the agent must swap
   `issueId`/`relatedIssueId` rather than change the type value.)
+- Workpad-write guard: a `commentCreate` / `commentUpdate` whose body carries the workpad marker
+  (`## Symphony Workpad`) is the persistent workpad and MUST be routed through `sync_workpad`, not
+  posted through `linear_graphql` directly (which would re-pay the multi-KB body as conversation
+  context on every turn). Implementations SHOULD reject such a call before contacting Linear with a
+  `success=false` payload that names `sync_workpad` as the required tool; `sync_workpad`'s own
+  forwarded mutation is exempt. This makes the token-expensive fallback a loud, self-correcting
+  failure rather than a silent regression when the model skips the dedicated tool.
 
 `sync_workpad` extension contract (adapter-agnostic):
 
@@ -1751,7 +1758,7 @@ Protocol source of truth:
 Launch contract:
 
 - Command: `agent.claude.command` (default
-  `jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent`;
+  `jai --dir $SYMPHONY_CLAUDE_PRIV_DIR uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent`;
   `SYMPHONY_CLAUDE_PRIV_DIR` is injected by the implementation and resolves to the
   `<priv-claude-agent>` directory).
 - Invocation: `bash -lc <agent.claude.command>` in the per-issue workspace.

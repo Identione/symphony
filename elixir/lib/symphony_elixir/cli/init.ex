@@ -661,8 +661,15 @@ defmodule SymphonyElixir.CLI.Init do
       claude:
         # command: pick ONE. $SYMPHONY_CLAUDE_PRIV_DIR is injected by Claude.AppServer
         # at sidecar launch. SPEC.md §5.3.5.2 + #{@setup_url}.
-        # (A) jai outer sandbox (Linux kernel >= 6.13):
-        #command: jai uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
+        # (A) jai outer sandbox (Linux kernel >= 6.13). `--dir $SYMPHONY_CLAUDE_PRIV_DIR`
+        # is required: jai casual mode overlays $HOME copy-on-write and only the cwd
+        # (the workspace) is live; the orchestrator repo otherwise reads from the COW
+        # overlay, which serves a STALE sidecar once uv/python write into priv (copy-up)
+        # and sync_workpad disappears. `--dir` grants the priv dir as a live bind that
+        # bypasses the overlay; cwd stays the workspace so the agent's workpad writes
+        # reach real disk for Symphony's File.read. The (B) non-jai variant has no
+        # overlay and needs no `--dir`.
+        #command: jai --dir $SYMPHONY_CLAUDE_PRIV_DIR uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
         # (B) no outer sandbox; the Claude SDK is the only boundary (portable default):
         command: uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
         # permission_mode: bypassPermissions (active) = allow-all under the jai +
@@ -683,8 +690,8 @@ defmodule SymphonyElixir.CLI.Init do
         #  - KillBash
         #  - TodoWrite
         #  - NotebookEdit
-        #  - mcp__symphony__linear_graphql   # in-process Linear tool (auth stays in Symphony)
-        #  - mcp__symphony__sync_workpad     # in-process workpad sync (reads body from local file)
+        #  - mcp__symphony__linear_graphql        # in-process Linear tool (auth stays in Symphony)
+        #  - mcp__symphony_workpad__sync_workpad  # in-process workpad sync (its own sdk MCP server)
         #  #- mcp__lsp                        # project .mcp.json servers need mcp__<server> here
         # setting_sources unset → loads the target repo's .claude/settings.json,
         # .mcp.json servers, and CLAUDE.md (contained by jai). Set [] to isolate.

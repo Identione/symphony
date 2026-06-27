@@ -21,10 +21,69 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 from symphony_claude_agent.sidecar import (  # noqa: E402
     PendingToolCalls,
+    SessionState,
+    build_symphony_mcp_servers,
     extract_tool_schemas,
     forward_tool_call_to_symphony,
+    summarize_mcp_server_status,
     translate_symphony_tool_result,
 )
+
+
+def _mcp_server_tool_names(server: dict) -> list[str]:
+    """List the tool names an in-process sdk MCP server exposes via tools/list."""
+
+    from mcp.types import ListToolsRequest
+
+    handler = server["instance"].request_handlers.get(ListToolsRequest)
+
+    async def _run() -> list[str]:
+        result = await handler(ListToolsRequest(method="tools/list"))
+        return [tool.name for tool in result.root.tools]
+
+    return asyncio.run(_run())
+
+
+def test_each_symphony_tool_gets_its_own_mcp_server() -> None:
+    """Regression: the bundled claude CLI surfaces only the *first* tool of a
+    single in-process sdk MCP server, so co-locating ``linear_graphql`` and
+    ``sync_workpad`` under one ``symphony`` server hid ``sync_workpad`` from the
+    model entirely. Each tool must live in its own server.
+    """
+
+    servers = build_symphony_mcp_servers(SessionState())
+
+    assert set(servers) == {"symphony", "symphony_workpad"}
+    assert _mcp_server_tool_names(servers["symphony"]) == ["linear_graphql"]
+    assert _mcp_server_tool_names(servers["symphony_workpad"]) == ["sync_workpad"]
+
+
+def test_summarize_mcp_server_status_reports_each_server() -> None:
+    """The init-handshake summary surfaces every server's status, so a `failed`
+    or missing in-process sdk MCP server (e.g. symphony_workpad) is observable
+    rather than inferred from zero tool calls (claude-agent-sdk-python#207).
+    """
+
+    data = {
+        "session_id": "s-1",
+        "mcp_servers": [
+            {"name": "symphony", "status": "connected"},
+            {"name": "symphony_workpad", "status": "failed"},
+        ],
+    }
+
+    assert (
+        summarize_mcp_server_status(data)
+        == "symphony=connected, symphony_workpad=failed"
+    )
+
+
+def test_summarize_mcp_server_status_edge_cases() -> None:
+    # No server list in the payload → nothing to log.
+    assert summarize_mcp_server_status({"session_id": "s-1"}) is None
+    assert summarize_mcp_server_status("not-a-dict") is None
+    # An empty (but present) list is distinct from absent.
+    assert summarize_mcp_server_status({"mcp_servers": []}) == "(none)"
 
 
 def test_pending_tool_calls_register_and_resolve() -> None:

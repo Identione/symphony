@@ -434,6 +434,11 @@ Rules:
 - Use `linear_graphql` directly for everything else (issue lookups, state
   moves, attachments, ad-hoc reads/writes) — `sync_workpad` only handles the
   one workpad comment.
+- This is **enforced**, not just advised: a raw `linear_graphql`
+  `commentCreate` / `commentUpdate` whose body carries the `## Symphony Workpad`
+  marker is rejected with an error pointing back here. Always sync the workpad
+  through `sync_workpad`. (If `sync_workpad` isn't listed, run `ToolSearch` with
+  `select:mcp__symphony_workpad__sync_workpad` first.)
 
 ## Usage rules
 
