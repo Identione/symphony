@@ -27,7 +27,7 @@ are easy to conflate:
 
 | Name | Default | Scope | Owner |
 |---|---|---|---|
-| `agent.claude.max_turns` | 40 | model↔tool cycles **inside one** SDK `query()` | Claude SDK (`--max-turns`) |
+| `agent.claude.max_turns` | 100 | model↔tool cycles **inside one** SDK `query()` | Claude SDK (`--max-turns`) |
 | `agent.max_turns` | 20 | Symphony **continuations** (re-prompts), legacy budget | Symphony |
 | `agent.overseer.absolute_max_turns` | 500 | Symphony **continuations**, overseer budget | Symphony |
 

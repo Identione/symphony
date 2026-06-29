@@ -362,17 +362,18 @@ defmodule SymphonyElixir.Config.Schema do
       # Level-1 belt (P0.4): the SDK caps model turns *within a single
       # continuation* at this value. Left unset the SDK is unbounded, so a
       # non-rate-limit within-query tool runaway is bounded only by
-      # `max_budget_usd` (also unset by default). 40 sits well above the
-      # observed 2–4 turns/continuation norm without truncating legitimate long
-      # turns. Rate-limit waste is braked separately at the error path; this is
-      # the generic within-session ceiling.
+      # `max_budget_usd` (also unset by default). 100 sits well above the
+      # observed 2–4 turns/continuation norm so complex issues don't hit the cap
+      # mid-run (operators had been hand-setting 100 per instance); it still
+      # truncates a genuine runaway. Rate-limit waste is braked separately at the
+      # error path; this is the generic within-session ceiling.
       #
       # IDE-230: when the overseer is active a breach is no longer a run-ending
       # error — `AgentRunner.do_run_codex_turns/5` soft-lands `error_max_turns` as
       # a clean continuation boundary the overseer judges (the session is idle and
       # resumable). The cap then doubles as a *judging cadence*: it can sit lower
       # to force periodic overseer review without discarding the in-progress burst.
-      field(:max_turns, :integer, default: 40)
+      field(:max_turns, :integer, default: 100)
       field(:max_budget_usd, :float)
       # R2b: per-call cap (bytes) on native-tool output (Read/Bash/Grep/Glob),
       # enforced by a PostToolUse hook in the sidecar. A returned tool result is

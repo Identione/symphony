@@ -105,9 +105,10 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
     # so the SDK loads all filesystem settings (.claude/settings.json,
     # project .mcp.json, CLAUDE.md). Set [] to restore deterministic isolation.
     assert settings.agent.claude.setting_sources == nil
-    # Level-1 belt (P0.4): bounds SDK turns within a single continuation. 40
-    # sits above the observed 2–4 norm; max_budget_usd stays unset.
-    assert settings.agent.claude.max_turns == 40
+    # Level-1 belt (P0.4): bounds SDK turns within a single continuation. 100
+    # sits well above the observed 2–4 norm so complex issues don't hit the cap
+    # mid-run; max_budget_usd stays unset.
+    assert settings.agent.claude.max_turns == 100
     assert settings.agent.claude.max_budget_usd == nil
     # R2b: native-tool output cap (PostToolUse truncation hook). 16 KiB default.
     assert settings.agent.claude.tool_output_limit == 16_384
