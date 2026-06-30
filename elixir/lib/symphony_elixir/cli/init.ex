@@ -667,9 +667,11 @@ defmodule SymphonyElixir.CLI.Init do
         # overlay, which serves a STALE sidecar once uv/python write into priv (copy-up)
         # and sync_workpad disappears. `--dir` grants the priv dir as a live bind that
         # bypasses the overlay; cwd stays the workspace so the agent's workpad writes
-        # reach real disk for Symphony's File.read. The (B) non-jai variant has no
-        # overlay and needs no `--dir`.
-        #command: jai --dir $SYMPHONY_CLAUDE_PRIV_DIR uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
+        # reach real disk for Symphony's File.read. `--dir $HOME/.cargo` +
+        # `--dir $HOME/.rustup` likewise take the Rust toolchain out of the overlay
+        # (overlay readdir returns empty on lower-layer registry dirs → lalrpop/NIF
+        # build fails). The (B) non-jai variant has no overlay and needs no `--dir`.
+        #command: jai --dir $SYMPHONY_CLAUDE_PRIV_DIR --dir $HOME/.cargo --dir $HOME/.rustup uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
         # (B) no outer sandbox; the Claude SDK is the only boundary (portable default):
         command: uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
         # permission_mode: bypassPermissions (active) = allow-all under the jai +

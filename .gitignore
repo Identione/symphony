@@ -32,3 +32,8 @@ __pycache__/
 /node_modules/
 /package.json
 /package-lock.json
+
+# Local SDK/MCP probe experiments (jai overlay debugging, sidecar wiring).
+# Operator-local scratch — probe logs, uv.lock backups, throwaway scripts —
+# not shared via git.
+/experiments/
