@@ -102,7 +102,12 @@ agent:
     # current source. cwd stays the workspace (set via the SDK init envelope) so
     # the agent's workpad.md writes land on real disk where Symphony's File.read
     # sees them. The (B) non-jai variant has no overlay and needs no `--dir`.
-    command: jai --dir $SYMPHONY_CLAUDE_PRIV_DIR uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
+    # `--dir $HOME/.cargo` + `--dir $HOME/.rustup` take the Rust toolchain out of
+    # the overlay too: overlayfs readdir returns empty on lower-layer registry
+    # dirs, so lalrpop finds no grammar sources and the NIF build fails (bulk
+    # cargo/tar extractions also silently write 0 files). The agent gains RW to
+    # the host cargo cache — same trust level as the priv dir.
+    command: jai --dir $SYMPHONY_CLAUDE_PRIV_DIR --dir $HOME/.cargo --dir $HOME/.rustup uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
     # (B) no outer sandbox (Claude SDK is the only boundary):
     #command: uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
     # Scopes Claude auth to this CLAUDE_CONFIG_DIR (identione Max subscription);

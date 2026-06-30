@@ -151,6 +151,12 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
              settings.agent.claude.command,
              "jai --dir $SYMPHONY_CLAUDE_PRIV_DIR "
            )
+
+    # The Rust toolchain dirs must also be live binds, not COW overlay: overlayfs
+    # readdir returns empty on lower-layer registry dirs, breaking lalrpop grammar
+    # discovery and bulk cargo/tar extraction (NIF builds fail). Regression guard.
+    assert settings.agent.claude.command =~ "--dir $HOME/.cargo"
+    assert settings.agent.claude.command =~ "--dir $HOME/.rustup"
   end
 
   test "agent.claude accepts overrides" do

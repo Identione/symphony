@@ -337,7 +337,17 @@ defmodule SymphonyElixir.Config.Schema do
     # The agent's working dir is the workspace via the SDK `cwd` (init
     # envelope), independent of where the sidecar process runs. The plain
     # `uv run` (non-jai) variant has no overlay and needs no `--dir`.
-    @default_command "jai --dir $SYMPHONY_CLAUDE_PRIV_DIR uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent"
+    #
+    # `--dir $HOME/.cargo` + `--dir $HOME/.rustup` apply the same fix to the
+    # Rust toolchain: under the COW overlay, overlayfs `readdir` returns empty
+    # on registry dirs that exist only in the lower layer, so lalrpop (used by
+    # cedar-policy-core) finds no `.lalrpop` grammar sources and the NIF build
+    # fails; bulk `tar`/cargo extractions into those dirs also silently write 0
+    # files. Granting both as live binds takes the Rust toolchain out of the
+    # overlay entirely (real-disk readdir, warm cache reused). Both dirs are
+    # user-owned; the agent gains RW to the host cargo cache — same trust level
+    # as $SYMPHONY_CLAUDE_PRIV_DIR. Harmless for non-Rust target repos.
+    @default_command "jai --dir $SYMPHONY_CLAUDE_PRIV_DIR --dir $HOME/.cargo --dir $HOME/.rustup uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent"
 
     @primary_key false
     embedded_schema do
