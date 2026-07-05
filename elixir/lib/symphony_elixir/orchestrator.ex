@@ -700,19 +700,24 @@ defmodule SymphonyElixir.Orchestrator do
     end
   end
 
-  # Facts Symphony already holds about an issue it has run before, prepended to
-  # the turn-1 prompt by `AgentRunner` so a re-run skips the re-discovery calls
-  # (PR URL via `gh`, workpad comment scan via `linear_graphql`). `nil` on the
-  # first run of an episode — a fresh run has nothing to hand over.
+  # Facts Symphony already holds about an issue, prepended to the turn-1
+  # prompt by `AgentRunner` so the run skips the re-discovery calls (PR URL
+  # via `gh`, workpad comment scan via `linear_graphql`). Rendered whenever
+  # ANY fact is known — not only on within-episode re-runs: the common
+  # Merging/Rework runs follow Human Review, which closes the episode and
+  # resets the run counter, yet the PR URL is poll-fresh from the issue's
+  # attachments and still worth handing over (IDE-278 smoke-test finding).
+  # `nil` when Symphony knows nothing beyond "this is a fresh run".
   defp continuation_context(%State{} = state, %Issue{} = issue) do
-    run_number = session_count(state, issue.id) + 1
+    context = %{
+      run_number: session_count(state, issue.id) + 1,
+      pr_url: issue.pr_url,
+      workpad_comment_id: Map.get(state.workpad_comments, issue.id)
+    }
 
-    if run_number > 1 do
-      %{
-        run_number: run_number,
-        pr_url: issue.pr_url,
-        workpad_comment_id: Map.get(state.workpad_comments, issue.id)
-      }
+    if context.run_number > 1 or is_binary(context.pr_url) or
+         is_binary(context.workpad_comment_id) do
+      context
     end
   end
 

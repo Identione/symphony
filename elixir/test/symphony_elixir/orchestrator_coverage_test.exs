@@ -1854,11 +1854,26 @@ defmodule SymphonyElixir.OrchestratorCoverageTest do
     assert state.workpad_comments == %{"iss-wc" => "comment-9"}
   end
 
-  test "continuation context is nil on the first run of an episode" do
+  test "continuation context is nil on the first run when Symphony knows nothing" do
     assert Orchestrator.continuation_context_for_test(
              %Orchestrator.State{},
              issue("iss-first", "CONT-1")
            ) == nil
+  end
+
+  test "continuation context still hands over a known PR URL on a fresh episode" do
+    # Live gap found in the IDE-278 smoke test: the agent moves the issue to
+    # Human Review (episode closes, run counter resets), then a human moves it
+    # to Merging — the land run counted as run #1 and got no facts, even
+    # though the PR URL is poll-fresh from the issue's attachments. Any known
+    # fact must be handed over regardless of episode boundaries.
+    iss = %{issue("iss-fresh", "CONT-3") | pr_url: "https://github.com/acme/repo/pull/9"}
+
+    assert %{
+             run_number: 1,
+             pr_url: "https://github.com/acme/repo/pull/9",
+             workpad_comment_id: nil
+           } = Orchestrator.continuation_context_for_test(%Orchestrator.State{}, iss)
   end
 
   test "continuation context carries run number, pr_url and workpad comment id on a re-run" do
