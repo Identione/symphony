@@ -112,6 +112,15 @@ agent:
     # (xhigh is Opus > 4.7 -only). Both default via the SDK when unset.
     # model: claude-opus-4-8
     # effort: xhigh
+    # Per-issue-state overrides, keyed by Linear state name (case-insensitive; an
+    # entry wins over the top-level model/effort). Mechanical Merging/land runs
+    # don't need the flagship at effort high — most of their output tokens are
+    # invisible thinking (docs/investigations/claude-session-token-optimization.md).
+    # model_by_state:
+    #   Merging: claude-sonnet-5
+    # effort_by_state:
+    #   Merging: low
+    #   Rework: medium
     # Within-continuation SDK turn cap (Level 1); distinct from agent.max_turns. Default 100.
     # max_turns: 100
     # Per-call cap (bytes) on native-tool output, shrunk by a PostToolUse hook so
@@ -138,6 +147,19 @@ agent:
     #  - mcp__symphony__linear_graphql        # in-process Linear tool (auth stays in Symphony)
     #  - mcp__symphony_workpad__sync_workpad  # in-process workpad sync (its own sdk MCP server)
     #  #- mcp__lsp                        # project .mcp.json servers need mcp__<server> here
+    # Hard-deny list (enforced under both permission modes). The harness's
+    # task-management/monitor tools misfire in unattended runs — deferred
+    # schemas fail validation and periodic task reminders provoke spurious
+    # calls (docs/investigations/claude-session-token-optimization.md).
+    # disallowed_tools:
+    #   - Monitor
+    #   - TaskCreate
+    #   - TaskUpdate
+    #   - TaskList
+    #   - TaskGet
+    #   - TaskStop
+    #   - TaskOutput
+    #   - SendMessage
     # setting_sources unset → loads the target repo's .claude/settings.json,
     # .mcp.json servers, and CLAUDE.md (contained by jai). Set [] to isolate.
     #setting_sources: []
@@ -237,6 +259,11 @@ All Linear access goes through Symphony's injected `linear_graphql` tool (expose
 - Temporary local proof edits (e.g. tweak a `make` input, hardcode a response path) are allowed only to validate assumptions and **must be reverted before commit**; document them in the workpad `Validation`/`Notes`.
 - Prefer `Edit` over `Write` when changing an existing file; use `Write` only to create a new file or fully rewrite one you have `Read` in full this turn.
 - Each Bash call runs in a fresh shell: `export`s and `cd` do not persist across calls. Use absolute paths, or `cd /abs/path && <cmd>` within a single call.
+- Batch independent tool calls (multiple reads/greps/status checks) into a single response instead of one per round-trip — every round-trip re-reads the whole conversation context.
+- When re-checking a file you have already read, re-read only the relevant slice (`Read` with `offset`/`limit`, or `sed -n`), not the whole file.
+{%- if agent.kind == "claude" %}
+- Ignore harness task-management reminders (nudges to use `TaskCreate`/`TaskList`/etc.); do not call `Task*`, `Monitor`, or `SendMessage` tools — progress tracking lives in the workpad.
+{%- endif %}
 - Never use `sleep` (or `ScheduleWakeup`) to wait for external state such as CI or a merge — see **Waiting and blocked**.
 
 ## State routing
@@ -255,11 +282,12 @@ Fetch the issue by its explicit ticket ID, read its current state, and route. If
 
 Before reusing a branch, check its PR: if the branch's PR is `CLOSED` or `MERGED`, do not reuse that branch or prior state — create a fresh branch from `origin/main` and restart from reproduction/planning as a new attempt.
 
+{% unless issue.state == "Merging" %}
 ## Execution flow
 
 For `Todo` (already moved to `In Progress`) or `In Progress`:
 
-1. Open the workpad: search active/unresolved comments for `## Symphony Workpad`; reuse it if present, otherwise create exactly one. Persist its comment ID and write all progress only to that ID. Edit a local `workpad.md` (absolute path required) and push it with the `sync_workpad` tool — first sync omits `comment_id` and returns `comment.id` (persist it); later syncs pass that id. Keep `## Symphony Workpad` as the first heading so the marker still resolves.
+1. Open the workpad: search active/unresolved comments for `## Symphony Workpad`; reuse it if present, otherwise create exactly one. Persist its comment ID and write all progress only to that ID. Edit a local `workpad.md` (absolute path required) and push it with the `sync_workpad` tool — exact signature `sync_workpad(issue_id, file_path, comment_id?)`; the body-file parameter is named `file_path`, not `workpad_path`. First sync omits `comment_id` and returns `comment.id` (persist it); later syncs pass that id. Keep `## Symphony Workpad` as the first heading so the marker still resolves.
 2. Reconcile before new edits: check off done items, expand/fix the plan for current scope, and confirm `Acceptance Criteria` and `Validation` still fit.
 3. Write/refresh a hierarchical plan in the workpad, including:
    - a one-line **deliverable determination**: not every issue is resolved by code. Some are resolved by a documentation/decision record, by recording a deferral, or by closing as already-satisfied. Signals for a non-code resolution: markers like `(deferred)`, "defer", "spike/investigate/decide whether", "behind a flag", "out of scope", or work gated on a precondition that is not yet true; or a sibling issue resolved the same way. When the resolution is non-code, follow the repo's established pattern for it instead of forcing an implementation. If build-vs-defer intent is genuinely ambiguous, pick the safest interpretation, proceed without stalling, and record the assumption so the handoff surfaces it.
@@ -291,6 +319,7 @@ When a ticket has an attached PR, run this before moving to `Human Review`, and 
    - The top-level review summary body and standalone PR comments count the same as inline threads. Scan them for follow-up asks — e.g. "please confirm", "can you verify", "worth a follow-up", "out of scope", "is this intentional", or any direct question to the author — and treat each as a required acceptance item: resolve it in code/docs or post a justified reply.
 4. Mirror each feedback item and its resolution into the workpad checklist before moving to `Human Review`.
 5. Re-run the validation gate after feedback-driven changes and push the updates.
+{% endunless %}
 
 ## Waiting and blocked
 
@@ -306,6 +335,7 @@ Blocked-access escape hatch — only when completion is blocked by a missing req
 - GitHub is **not** a valid blocker by default. Try fallback strategies first (alternate remote/auth mode, then continue the publish/review flow) and document them in the workpad before treating GitHub access as blocking.
 - For a missing non-GitHub tool or unavailable non-GitHub auth, move the ticket to `Human Review` with a concise blocker brief in the workpad: what is missing, why it blocks required acceptance/validation, and the exact human action needed to unblock. Keep it in the workpad — no extra top-level comments. If no workpad exists yet, add a single blocker comment with the same content.
 
+{% unless issue.state == "Merging" %}
 ## Completion bar before Human Review
 
 - The plan/acceptance/validation checklist in the single workpad comment is complete and accurate.
@@ -363,3 +393,4 @@ Use this exact structure for the persistent workpad comment and keep it updated 
 
 - <only include when something was confusing during execution>
 ````
+{% endunless %}
