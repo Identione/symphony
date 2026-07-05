@@ -674,6 +674,14 @@ defmodule SymphonyElixir.CLI.Init do
         #command: jai --dir $SYMPHONY_CLAUDE_PRIV_DIR --dir $HOME/.cargo --dir $HOME/.rustup uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
         # (B) no outer sandbox; the Claude SDK is the only boundary (portable default):
         command: uv run --project $SYMPHONY_CLAUDE_PRIV_DIR python -m symphony_claude_agent
+        # Per-issue-state overrides, keyed by Linear state name (case-insensitive;
+        # an entry wins over the top-level model/effort). Mechanical Merging/land
+        # runs don't need the flagship at effort high.
+        # model_by_state:
+        #   Merging: claude-sonnet-5
+        # effort_by_state:
+        #   Merging: low
+        #   Rework: medium
         # permission_mode: bypassPermissions (active) = allow-all under the jai +
         # workspace-cwd boundary; dontAsk = deny anything not in allowed_tools (an
         # empty/absent allowed_tools is then rejected at boot). SPEC.md §5.3.5.2.
@@ -695,6 +703,17 @@ defmodule SymphonyElixir.CLI.Init do
         #  - mcp__symphony__linear_graphql        # in-process Linear tool (auth stays in Symphony)
         #  - mcp__symphony_workpad__sync_workpad  # in-process workpad sync (its own sdk MCP server)
         #  #- mcp__lsp                        # project .mcp.json servers need mcp__<server> here
+        # Hard-deny list (enforced under both permission modes). The harness's
+        # task-management/monitor tools misfire in unattended runs — deny them.
+        # disallowed_tools:
+        #   - Monitor
+        #   - TaskCreate
+        #   - TaskUpdate
+        #   - TaskList
+        #   - TaskGet
+        #   - TaskStop
+        #   - TaskOutput
+        #   - SendMessage
         # setting_sources unset → loads the target repo's .claude/settings.json,
         # .mcp.json servers, and CLAUDE.md (contained by jai). Set [] to isolate.
         #setting_sources: []

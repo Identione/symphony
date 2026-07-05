@@ -811,6 +811,43 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "attempt=3"
   end
 
+  test "canonical body slims to the land flow for Merging-state runs" do
+    # The full body is re-rendered and re-sent on every agent run; a Merging
+    # run only routes to the `land` skill, so the implementation-only sections
+    # are Liquid-gated on issue.state and must NOT render for it — while any
+    # other state keeps the complete body
+    # (docs/investigations/claude-session-token-optimization.md).
+    {:ok, canonical} = File.read(Path.join(File.cwd!(), "WORKFLOW.md"))
+    marker = "You are working on a Linear ticket"
+    [_front, rest] = String.split(canonical, marker, parts: 2)
+    write_workflow_file!(Workflow.workflow_file_path(), prompt: marker <> rest)
+
+    base = %Issue{
+      identifier: "S-9",
+      title: "Land the approved PR",
+      description: "already approved",
+      url: "https://example.org/issues/S-9",
+      labels: []
+    }
+
+    merging = PromptBuilder.build_prompt(%{base | state: "Merging"})
+    refute merging =~ "## Execution flow"
+    refute merging =~ "## PR feedback sweep protocol"
+    refute merging =~ "## Completion bar before Human Review"
+    refute merging =~ "## Rework"
+    refute merging =~ "## Workpad template"
+    assert merging =~ "## State routing"
+    assert merging =~ "## Waiting and blocked"
+    assert merging =~ "Current status: Merging"
+
+    in_progress = PromptBuilder.build_prompt(%{base | state: "In Progress"})
+    assert in_progress =~ "## Execution flow"
+    assert in_progress =~ "## PR feedback sweep protocol"
+    assert in_progress =~ "## Completion bar before Human Review"
+    assert in_progress =~ "## Rework"
+    assert in_progress =~ "## Workpad template"
+  end
+
   test "prompt builder renders issue datetime fields without crashing" do
     workflow_prompt = "Ticket {{ issue.identifier }} created={{ issue.created_at }} updated={{ issue.updated_at }}"
 
