@@ -96,6 +96,12 @@ defmodule SymphonyElixir.Orchestrator do
       # hiccup. Pruned to the live `rebase_pending` key set each pass and cleared
       # for an issue when it is (re-)dispatched.
       merge_landed: MapSet.new(),
+      # Workpad comment id per issue, reported by `DynamicTool` when the agent's
+      # `sync_workpad` call returns `comment.id`. Handed back to the agent in the
+      # continuation-context block on a re-run so it can pass `comment_id`
+      # directly instead of re-scanning issue comments. Cleared when the issue's
+      # session episode closes (issue leaves the active set).
+      workpad_comments: %{},
       dependency_graph: %{},
       retry_attempts: %{},
       # Per-issue counter of consecutive same-code adapter failures, used to
@@ -129,6 +135,20 @@ defmodule SymphonyElixir.Orchestrator do
   def start_link(opts \\ []) do
     name = Keyword.get(opts, :name, __MODULE__)
     GenServer.start_link(__MODULE__, opts, name: name)
+  end
+
+  @doc """
+  Record the workpad `comment.id` a `sync_workpad` call returned for an issue.
+
+  Called from `SymphonyElixir.Codex.DynamicTool` on every successful workpad
+  sync (both adapters route through it). The id is handed back to the agent in
+  the continuation-context block on a re-run, saving the re-discovery scan.
+  Fire-and-forget: a cast so the tool path never blocks on the orchestrator.
+  """
+  @spec note_workpad_comment(String.t(), String.t()) :: :ok
+  def note_workpad_comment(issue_id, comment_id)
+      when is_binary(issue_id) and is_binary(comment_id) do
+    GenServer.cast(__MODULE__, {:note_workpad_comment, issue_id, comment_id})
   end
 
   @impl true
@@ -168,6 +188,12 @@ defmodule SymphonyElixir.Orchestrator do
       end
 
     {:ok, state}
+  end
+
+  @impl true
+  def handle_cast({:note_workpad_comment, issue_id, comment_id}, %State{} = state)
+      when is_binary(issue_id) and is_binary(comment_id) do
+    {:noreply, %{state | workpad_comments: Map.put(state.workpad_comments, issue_id, comment_id)}}
   end
 
   @impl true
@@ -658,7 +684,11 @@ defmodule SymphonyElixir.Orchestrator do
   # released). Advance the generation and zero the count so a later re-entry
   # (e.g. a human moving an escalated issue back to Todo) starts a fresh
   # episode with full budget instead of re-escalating off the stale tally.
+  # The cached workpad comment id dies with the episode: a fresh episode must
+  # re-discover its workpad rather than trust a possibly-resolved comment.
   defp close_session_episode(%State{} = state, issue_id) do
+    state = %{state | workpad_comments: Map.delete(state.workpad_comments, issue_id)}
+
     case Map.get(state.session_counts, issue_id) do
       nil ->
         state
@@ -667,6 +697,22 @@ defmodule SymphonyElixir.Orchestrator do
         updated = %{generation: generation + 1, count: 0}
         SessionBudget.put(state.session_budget_table, issue_id, updated)
         %{state | session_counts: Map.put(state.session_counts, issue_id, updated)}
+    end
+  end
+
+  # Facts Symphony already holds about an issue it has run before, prepended to
+  # the turn-1 prompt by `AgentRunner` so a re-run skips the re-discovery calls
+  # (PR URL via `gh`, workpad comment scan via `linear_graphql`). `nil` on the
+  # first run of an episode — a fresh run has nothing to hand over.
+  defp continuation_context(%State{} = state, %Issue{} = issue) do
+    run_number = session_count(state, issue.id) + 1
+
+    if run_number > 1 do
+      %{
+        run_number: run_number,
+        pr_url: issue.pr_url,
+        workpad_comment_id: Map.get(state.workpad_comments, issue.id)
+      }
     end
   end
 
@@ -905,6 +951,18 @@ defmodule SymphonyElixir.Orchestrator do
   @spec sort_issues_for_dispatch_for_test([Issue.t()]) :: [Issue.t()]
   def sort_issues_for_dispatch_for_test(issues) when is_list(issues) do
     sort_issues_for_dispatch(issues)
+  end
+
+  @doc false
+  @spec continuation_context_for_test(term(), Issue.t()) :: map() | nil
+  def continuation_context_for_test(%State{} = state, %Issue{} = issue) do
+    continuation_context(state, issue)
+  end
+
+  @doc false
+  @spec close_session_episode_for_test(term(), String.t()) :: term()
+  def close_session_episode_for_test(%State{} = state, issue_id) do
+    close_session_episode(state, issue_id)
   end
 
   @doc false
@@ -2230,18 +2288,21 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp spawn_issue_on_worker_host(%State{} = state, issue, attempt, recipient, worker_host) do
     resume_after_block = Map.get(state.rebase_pending, issue.id)
+    continuation = continuation_context(state, issue)
 
     case Task.Supervisor.start_child(agent_task_supervisor(), fn ->
            AgentRunner.run(issue, recipient,
              attempt: attempt,
              worker_host: worker_host,
-             resume_after_block: resume_after_block
+             resume_after_block: resume_after_block,
+             continuation: continuation
            )
          end) do
       {:ok, pid} ->
         ref = Process.monitor(pid)
 
         log_resume_after_block(issue, resume_after_block)
+        log_continuation_context(issue, continuation)
 
         Logger.info("Dispatching issue to agent: #{issue_context(issue)} pid=#{inspect(pid)} attempt=#{inspect(attempt)} worker_host=#{worker_host || "local"}")
 
@@ -2317,6 +2378,16 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp log_resume_after_block(_issue, _resume_after_block), do: :ok
+
+  defp log_continuation_context(issue, %{run_number: run_number} = continuation) do
+    Logger.info(
+      "Dispatching re-run with continuation context: #{issue_context(issue)} " <>
+        "run_number=#{run_number} pr_url=#{continuation.pr_url || "-"} " <>
+        "workpad_comment_id=#{continuation.workpad_comment_id || "-"}"
+    )
+  end
+
+  defp log_continuation_context(_issue, _continuation), do: :ok
 
   defp revalidate_issue_for_dispatch(%Issue{id: issue_id}, issue_fetcher, terminal_states)
        when is_binary(issue_id) and is_function(issue_fetcher, 1) do

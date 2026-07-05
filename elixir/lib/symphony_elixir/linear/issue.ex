@@ -14,6 +14,9 @@ defmodule SymphonyElixir.Linear.Issue do
     :branch_name,
     :url,
     :assignee_id,
+    # The issue's own GitHub PR URL, read from its Linear attachments (nil when
+    # no PR is linked). Feeds the continuation context on agent re-runs.
+    :pr_url,
     blocked_by: [],
     labels: [],
     assigned_to_worker: true,
@@ -36,6 +39,7 @@ defmodule SymphonyElixir.Linear.Issue do
           branch_name: String.t() | nil,
           url: String.t() | nil,
           assignee_id: String.t() | nil,
+          pr_url: String.t() | nil,
           labels: [String.t()],
           assigned_to_worker: boolean(),
           has_children: boolean(),

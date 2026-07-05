@@ -331,6 +331,15 @@ Fields:
   "Merged" is permanent, so once an id is cached here the gate neither re-queries GitHub nor re-holds
   on a transient `gh` hiccup. Pruned to the live `rebase_pending` key set each pass and cleared for an
   issue when it is (re-)dispatched. In-memory only; cleared on restart.)
+- `workpad_comments` (map `issue_id -> workpad comment id`; recorded whenever the agent's
+  `sync_workpad` tool call succeeds — the tool executor reports the returned `comment.id` back to the
+  orchestrator, covering both adapters. Consumed at dispatch to build the **continuation context**: when
+  the session-budget counter says this is a re-run of the issue within the current episode
+  (`session_counts` count ≥ 1), the turn-1 prompt is prefixed with a short block carrying the run
+  number, the issue's own GitHub PR URL (read from its top-level Linear attachments onto
+  `issue.pr_url`), and this workpad comment id — facts the agent would otherwise re-derive with
+  several discovery tool calls per run. Absent facts are omitted; first runs get no block. Cleared
+  when the issue's session episode closes. In-memory only; cleared on restart.)
 - `dependency_graph` (map `issue_id -> graph node projection`; observability-only node set for the
   dashboard dependency graph — managed candidates plus their transitive blockers (`blockers of
   blockers`). Roots are the issues this instance would actually dispatch (the candidate predicate),

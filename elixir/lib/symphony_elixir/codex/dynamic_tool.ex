@@ -139,12 +139,55 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       # `sync_workpad` is the sanctioned path for workpad writes, so it bypasses
       # the raw-tool workpad guard below (the body legitimately carries the
       # `## Symphony Workpad` marker).
-      execute_linear_graphql(
-        %{"query" => query, "variables" => variables},
-        Keyword.put(opts, :allow_workpad_write, true)
-      )
+      response =
+        execute_linear_graphql(
+          %{"query" => query, "variables" => variables},
+          Keyword.put(opts, :allow_workpad_write, true)
+        )
+
+      report_workpad_comment_id(response, opts)
+      response
     else
       {:error, reason} -> failure_response(tool_error_payload(reason))
+    end
+  end
+
+  # Report the comment id a successful sync returned to the orchestrator (or a
+  # test-injected sink) so a later re-run's continuation context can hand it
+  # back to the agent instead of the agent re-scanning issue comments.
+  # Best-effort: a missing issue in log_context, a decode failure, or an absent
+  # orchestrator all degrade to a no-op — the tool result is never affected.
+  defp report_workpad_comment_id(%{"success" => true, "output" => output}, opts)
+       when is_binary(output) do
+    with issue_id when is_binary(issue_id) <- workpad_issue_id(opts),
+         comment_id when is_binary(comment_id) <- decode_workpad_comment_id(output) do
+      sink =
+        Keyword.get(opts, :workpad_comment_sink, &SymphonyElixir.Orchestrator.note_workpad_comment/2)
+
+      sink.(issue_id, comment_id)
+      :ok
+    else
+      _ -> :ok
+    end
+  end
+
+  defp report_workpad_comment_id(_response, _opts), do: :ok
+
+  defp workpad_issue_id(opts) do
+    case Keyword.get(opts, :log_context) do
+      %{issue: %{id: id}} when is_binary(id) -> id
+      _ -> nil
+    end
+  end
+
+  defp decode_workpad_comment_id(output) do
+    case Jason.decode(output) do
+      {:ok, %{"data" => data}} when is_map(data) ->
+        get_in(data, ["commentCreate", "comment", "id"]) ||
+          get_in(data, ["commentUpdate", "comment", "id"])
+
+      _ ->
+        nil
     end
   end
 

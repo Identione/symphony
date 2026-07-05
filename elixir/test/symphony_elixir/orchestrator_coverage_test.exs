@@ -1837,4 +1837,54 @@ defmodule SymphonyElixir.OrchestratorCoverageTest do
     assert git_out(workspace, ["ls-tree", "-r", "--name-only", wip_sha]) =~ "new_work.txt"
     refute git_out(workspace, ["status", "--porcelain"]) == ""
   end
+
+  # ── continuation context (re-run prompt facts) ────────────────────────
+  # An agent re-run otherwise burns 5-10 tool calls re-deriving the PR URL and
+  # workpad comment id (docs/investigations/claude-session-token-optimization.md,
+  # finding 5). The orchestrator caches what it already knows and hands it to
+  # AgentRunner at dispatch.
+
+  test "handle_cast {:note_workpad_comment, ...} stores the comment id per issue" do
+    {:noreply, state} =
+      Orchestrator.handle_cast(
+        {:note_workpad_comment, "iss-wc", "comment-9"},
+        %Orchestrator.State{}
+      )
+
+    assert state.workpad_comments == %{"iss-wc" => "comment-9"}
+  end
+
+  test "continuation context is nil on the first run of an episode" do
+    assert Orchestrator.continuation_context_for_test(
+             %Orchestrator.State{},
+             issue("iss-first", "CONT-1")
+           ) == nil
+  end
+
+  test "continuation context carries run number, pr_url and workpad comment id on a re-run" do
+    state = %Orchestrator.State{
+      session_counts: %{"iss-rerun" => %{generation: 0, count: 2}},
+      workpad_comments: %{"iss-rerun" => "comment-9"}
+    }
+
+    iss = %{issue("iss-rerun", "CONT-2") | pr_url: "https://github.com/acme/repo/pull/7"}
+
+    assert %{
+             run_number: 3,
+             pr_url: "https://github.com/acme/repo/pull/7",
+             workpad_comment_id: "comment-9"
+           } = Orchestrator.continuation_context_for_test(state, iss)
+  end
+
+  test "closing a session episode drops the cached workpad comment id" do
+    state = %Orchestrator.State{
+      session_counts: %{"iss-close" => %{generation: 0, count: 1}},
+      workpad_comments: %{"iss-close" => "comment-9", "iss-other" => "comment-1"}
+    }
+
+    closed = Orchestrator.close_session_episode_for_test(state, "iss-close")
+
+    assert closed.workpad_comments == %{"iss-other" => "comment-1"}
+    assert %{generation: 1, count: 0} = closed.session_counts["iss-close"]
+  end
 end

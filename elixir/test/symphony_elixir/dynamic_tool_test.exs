@@ -757,6 +757,77 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert %{"inputSchema" => %{"properties" => %{"workpad_path" => _}}} = workpad_spec
   end
 
+  test "sync_workpad reports the returned comment id to the workpad-comment sink" do
+    # The orchestrator caches the workpad comment id per issue so a later
+    # re-run's continuation context can hand it to the agent instead of the
+    # agent re-scanning issue comments (finding 5 in
+    # docs/investigations/claude-session-token-optimization.md).
+    test_pid = self()
+    path = write_tmp_workpad("## Codex Workpad\n\nProgress.")
+
+    issue = %SymphonyElixir.Linear.Issue{id: "uuid-42", identifier: "ENG-42"}
+
+    DynamicTool.execute(
+      "sync_workpad",
+      %{"issue_id" => "ENG-42", "file_path" => path},
+      linear_client: fn _query, _variables, _opts ->
+        {:ok, %{"data" => %{"commentCreate" => %{"success" => true, "comment" => %{"id" => "c-new", "url" => "u"}}}}}
+      end,
+      log_context: %{issue: issue, session_id: "sess-1"},
+      workpad_comment_sink: fn issue_id, comment_id ->
+        send(test_pid, {:workpad_comment, issue_id, comment_id})
+      end
+    )
+
+    assert_received {:workpad_comment, "uuid-42", "c-new"}
+
+    DynamicTool.execute(
+      "sync_workpad",
+      %{"issue_id" => "ENG-42", "file_path" => path, "comment_id" => "c-new"},
+      linear_client: fn _query, _variables, _opts ->
+        {:ok, %{"data" => %{"commentUpdate" => %{"success" => true, "comment" => %{"id" => "c-new", "url" => "u"}}}}}
+      end,
+      log_context: %{issue: issue, session_id: "sess-1"},
+      workpad_comment_sink: fn issue_id, comment_id ->
+        send(test_pid, {:workpad_comment_update, issue_id, comment_id})
+      end
+    )
+
+    assert_received {:workpad_comment_update, "uuid-42", "c-new"}
+  end
+
+  test "sync_workpad does not invoke the sink on GraphQL failure or without an issue in log_context" do
+    test_pid = self()
+    path = write_tmp_workpad("## Codex Workpad\n\nProgress.")
+
+    DynamicTool.execute(
+      "sync_workpad",
+      %{"issue_id" => "ENG-42", "file_path" => path},
+      linear_client: fn _query, _variables, _opts ->
+        {:ok, %{"errors" => [%{"message" => "boom"}], "data" => nil}}
+      end,
+      log_context: %{issue: %SymphonyElixir.Linear.Issue{id: "uuid-42"}, session_id: "s"},
+      workpad_comment_sink: fn issue_id, comment_id ->
+        send(test_pid, {:workpad_comment, issue_id, comment_id})
+      end
+    )
+
+    refute_received {:workpad_comment, _, _}
+
+    DynamicTool.execute(
+      "sync_workpad",
+      %{"issue_id" => "ENG-42", "file_path" => path},
+      linear_client: fn _query, _variables, _opts ->
+        {:ok, %{"data" => %{"commentCreate" => %{"success" => true, "comment" => %{"id" => "c-9", "url" => "u"}}}}}
+      end,
+      workpad_comment_sink: fn issue_id, comment_id ->
+        send(test_pid, {:workpad_comment, issue_id, comment_id})
+      end
+    )
+
+    refute_received {:workpad_comment, _, _}
+  end
+
   test "sync_workpad prefers file_path when workpad_path is also given" do
     test_pid = self()
     canonical = write_tmp_workpad("canonical body")
