@@ -29,15 +29,19 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
 
     workpad_spec = Enum.find(specs, &(&1["name"] == "sync_workpad"))
 
+    # `file_path` is intentionally NOT schema-required: the model reliably
+    # guesses `workpad_path` on the first call, and a schema-level rejection
+    # burns a round-trip. The executor enforces one of the two being present.
     assert %{
              "description" => workpad_description,
              "inputSchema" => %{
                "properties" => %{
                  "issue_id" => _,
                  "file_path" => _,
+                 "workpad_path" => _,
                  "comment_id" => _
                },
-               "required" => ["issue_id", "file_path"],
+               "required" => ["issue_id"],
                "type" => "object"
              }
            } = workpad_spec
@@ -726,6 +730,48 @@ defmodule SymphonyElixir.Codex.DynamicToolTest do
     assert_received {:graphql, query, %{"id" => "c1", "body" => "Updated."}}
     assert query =~ "commentUpdate"
     assert response["success"] == true
+  end
+
+  test "sync_workpad accepts workpad_path as an alias for file_path" do
+    # Every analyzed live session's first sync_workpad call guessed
+    # `workpad_path` and burned a round-trip on the validation error
+    # (docs/investigations/claude-session-token-optimization.md), so the
+    # schema advertises the alias and the executor honors it.
+    test_pid = self()
+    path = write_tmp_workpad("## Codex Workpad\n\nAliased.")
+
+    response =
+      DynamicTool.execute(
+        "sync_workpad",
+        %{"issue_id" => "ENG-42", "workpad_path" => path},
+        linear_client: fn query, variables, _opts ->
+          send(test_pid, {:graphql, query, variables})
+          {:ok, %{"data" => %{"commentCreate" => %{"success" => true, "comment" => %{"id" => "c1", "url" => "https://linear.app/c1"}}}}}
+        end
+      )
+
+    assert_received {:graphql, _query, %{"issueId" => "ENG-42", "body" => "## Codex Workpad\n\nAliased."}}
+    assert response["success"] == true
+
+    workpad_spec = Enum.find(DynamicTool.tool_specs(), &(&1["name"] == "sync_workpad"))
+    assert %{"inputSchema" => %{"properties" => %{"workpad_path" => _}}} = workpad_spec
+  end
+
+  test "sync_workpad prefers file_path when workpad_path is also given" do
+    test_pid = self()
+    canonical = write_tmp_workpad("canonical body")
+    alias_path = write_tmp_workpad("alias body")
+
+    DynamicTool.execute(
+      "sync_workpad",
+      %{"issue_id" => "ENG-42", "file_path" => canonical, "workpad_path" => alias_path},
+      linear_client: fn query, variables, _opts ->
+        send(test_pid, {:graphql, query, variables})
+        {:ok, %{"data" => %{"commentCreate" => %{"success" => true, "comment" => %{"id" => "c1", "url" => "https://linear.app/c1"}}}}}
+      end
+    )
+
+    assert_received {:graphql, _query, %{"body" => "canonical body"}}
   end
 
   test "sync_workpad bypasses the workpad-write guard for a real Symphony Workpad body" do
