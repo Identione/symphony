@@ -87,6 +87,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         opts \\ []
       ) do
     on_message = Keyword.get(opts, :on_message, &default_on_message/1)
+    turn_timeout_ms = Keyword.get(opts, :turn_timeout_ms, Config.settings!().codex.turn_timeout_ms)
 
     tool_executor =
       Keyword.get(opts, :tool_executor, fn tool, arguments ->
@@ -117,7 +118,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           session_id: session_id
         }
 
-        case await_turn_completion(port, turn_ctx) do
+        case await_turn_completion(port, turn_ctx, turn_timeout_ms) do
           {:ok, result} ->
             Logger.info("Codex session completed for #{issue_context(issue)} session_id=#{session_id}")
 
@@ -356,31 +357,45 @@ defmodule SymphonyElixir.Codex.AppServer do
     end
   end
 
-  defp await_turn_completion(port, ctx) do
-    receive_loop(port, ctx, Config.settings!().codex.turn_timeout_ms, "")
+  defp await_turn_completion(port, ctx, turn_timeout_ms) do
+    deadline = monotonic_ms() + turn_timeout_ms
+    receive_loop(port, ctx, deadline, "")
   end
+
+  defp monotonic_ms, do: System.monotonic_time(:millisecond)
 
   defp put_optional(map, _key, nil), do: map
   defp put_optional(map, key, value), do: Map.put(map, key, value)
 
-  defp receive_loop(port, ctx, timeout_ms, pending_line) do
-    receive do
-      {^port, {:data, {:eol, chunk}}} ->
-        complete_line = pending_line <> to_string(chunk)
-        handle_incoming(port, ctx, complete_line, timeout_ms)
+  # `deadline` is an absolute `monotonic_ms/0` timestamp, not a per-receive
+  # timeout — computed once in `await_turn_completion/3` and threaded through
+  # every recursive call (including via `handle_incoming/4` and
+  # `handle_turn_method/6`) so a chatty turn can't reset the clock by simply
+  # keeping messages flowing. Mirrors `Claude.AppServer.do_collect/3`.
+  defp receive_loop(port, ctx, deadline, pending_line) do
+    remaining_ms = max(deadline - monotonic_ms(), 0)
 
-      {^port, {:data, {:noeol, chunk}}} ->
-        receive_loop(port, ctx, timeout_ms, pending_line <> to_string(chunk))
+    if remaining_ms == 0 do
+      {:error, :turn_timeout}
+    else
+      receive do
+        {^port, {:data, {:eol, chunk}}} ->
+          complete_line = pending_line <> to_string(chunk)
+          handle_incoming(port, ctx, complete_line, deadline)
 
-      {^port, {:exit_status, status}} ->
-        {:error, {:port_exit, status}}
-    after
-      timeout_ms ->
-        {:error, :turn_timeout}
+        {^port, {:data, {:noeol, chunk}}} ->
+          receive_loop(port, ctx, deadline, pending_line <> to_string(chunk))
+
+        {^port, {:exit_status, status}} ->
+          {:error, {:port_exit, status}}
+      after
+        remaining_ms ->
+          {:error, :turn_timeout}
+      end
     end
   end
 
-  defp handle_incoming(port, ctx, data, timeout_ms) do
+  defp handle_incoming(port, ctx, data, deadline) do
     payload_string = to_string(data)
 
     case Jason.decode(payload_string) do
@@ -415,7 +430,7 @@ defmodule SymphonyElixir.Codex.AppServer do
 
       {:ok, %{"method" => method} = payload}
       when is_binary(method) ->
-        handle_turn_method(port, ctx, payload, payload_string, method, timeout_ms)
+        handle_turn_method(port, ctx, payload, payload_string, method, deadline)
 
       {:ok, payload} ->
         emit_message(
@@ -428,7 +443,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           metadata_from_message(port, payload)
         )
 
-        receive_loop(port, ctx, timeout_ms, "")
+        receive_loop(port, ctx, deadline, "")
 
       {:error, _reason} ->
         log_non_json_stream_line(payload_string, "turn stream", ctx.issue, ctx.session_id)
@@ -445,7 +460,7 @@ defmodule SymphonyElixir.Codex.AppServer do
           )
         end
 
-        receive_loop(port, ctx, timeout_ms, "")
+        receive_loop(port, ctx, deadline, "")
     end
   end
 
@@ -462,7 +477,7 @@ defmodule SymphonyElixir.Codex.AppServer do
     )
   end
 
-  defp handle_turn_method(port, ctx, payload, payload_string, method, timeout_ms) do
+  defp handle_turn_method(port, ctx, payload, payload_string, method, deadline) do
     metadata = metadata_from_message(port, payload)
 
     case maybe_handle_approval_request(
@@ -486,7 +501,7 @@ defmodule SymphonyElixir.Codex.AppServer do
         {:error, {:turn_input_required, payload}}
 
       :approved ->
-        receive_loop(port, ctx, timeout_ms, "")
+        receive_loop(port, ctx, deadline, "")
 
       :approval_required ->
         emit_message(
@@ -540,7 +555,7 @@ defmodule SymphonyElixir.Codex.AppServer do
             )
 
             log_codex_notification(method)
-            receive_loop(port, ctx, timeout_ms, "")
+            receive_loop(port, ctx, deadline, "")
         end
     end
   end
