@@ -273,6 +273,61 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     end
   end
 
+  test "workspace rejects dot-only issue identifiers on worker hosts without invoking ssh" do
+    test_root =
+      Path.join(
+        System.tmp_dir!(),
+        "symphony-elixir-workspace-dotdot-#{System.unique_integer([:positive])}"
+      )
+
+    previous_path = System.get_env("PATH")
+    previous_trace = System.get_env("SYMP_TEST_SSH_TRACE")
+
+    on_exit(fn ->
+      restore_env("PATH", previous_path)
+      restore_env("SYMP_TEST_SSH_TRACE", previous_trace)
+    end)
+
+    try do
+      trace_file = Path.join(test_root, "ssh.trace")
+      fake_ssh = Path.join(test_root, "ssh")
+
+      File.mkdir_p!(test_root)
+      System.put_env("SYMP_TEST_SSH_TRACE", trace_file)
+      System.put_env("PATH", test_root <> ":" <> (previous_path || ""))
+
+      # This fake ssh would happily "succeed" at anything asked of it — the
+      # point of the test is that it must never be invoked at all for a
+      # dot-only identifier, because that would mean Symphony constructed a
+      # remote `rm -rf`/`mkdir` command against a path outside the configured
+      # workspace root (e.g. `<root>/..`).
+      File.write!(fake_ssh, """
+      #!/bin/sh
+      trace_file="${SYMP_TEST_SSH_TRACE:-/tmp/symphony-fake-ssh.trace}"
+      printf 'ARGV:%s\\n' "$*" >> "$trace_file"
+      printf '%s\\t%s\\t%s\\n' '__SYMPHONY_WORKSPACE__' '1' '/remote/home/.symphony-remote-workspaces/UNSAFE'
+      exit 0
+      """)
+
+      File.chmod!(fake_ssh, 0o755)
+
+      write_workflow_file!(Workflow.workflow_file_path(),
+        workspace_root: "/remote/home/.symphony-remote-workspaces",
+        worker_ssh_hosts: ["worker-01:2200"]
+      )
+
+      for identifier <- ["..", "."] do
+        assert {:error, {:unsafe_workspace_identifier, _safe_id}} =
+                 Workspace.create_for_issue(identifier, "worker-01:2200")
+      end
+
+      refute File.exists?(trace_file),
+             "expected no ssh command to be constructed for a dot-only identifier, but ssh was invoked"
+    after
+      File.rm_rf(test_root)
+    end
+  end
+
   test "workspace canonicalizes symlinked workspace roots before creating issue directories" do
     test_root =
       Path.join(
@@ -813,6 +868,106 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
 
     assert RateLimit.allowed?()
     assert RateLimit.retry_after_ms() == nil
+  end
+
+  # BUG E: the "me" assignee sentinel must resolve the viewer regardless of
+  # case (WORKFLOW.md `assignee: Me`, `LINEAR_ASSIGNEE=ME` env passthrough,
+  # etc.) — only trimming (no case folding) let "Me"/"ME" fall through to a
+  # literal (and therefore always-empty) assignee filter instead.
+  test "\"me\" assignee sentinel resolves the viewer case-insensitively" do
+    Client.reset_viewer_cache()
+    on_exit(fn -> Client.reset_viewer_cache() end)
+
+    graphql_fun = fn _query, _variables ->
+      {:ok, %{"data" => %{"viewer" => %{"id" => "viewer-case-test"}}}}
+    end
+
+    for sentinel <- ["me", "Me", "ME", " me "] do
+      Client.reset_viewer_cache()
+
+      assert {:ok, %{configured_assignee: "me", match_values: match_values}} =
+               Client.resolve_assignee_filter_for_test(sentinel, graphql_fun)
+
+      assert MapSet.to_list(match_values) == ["viewer-case-test"]
+    end
+
+    # "meeting" merely starts with "me" — it must not be treated as the
+    # sentinel, so no viewer query fires and the literal string is kept.
+    flunking_graphql_fun = fn _query, _variables ->
+      flunk("viewer query should not be issued for a non-sentinel assignee like \"meeting\"")
+    end
+
+    assert {:ok, %{configured_assignee: "meeting", match_values: match_values}} =
+             Client.resolve_assignee_filter_for_test("meeting", flunking_graphql_fun)
+
+    assert MapSet.to_list(match_values) == ["meeting"]
+  end
+
+  test "a non-sentinel assignee value stays a byte-exact literal match" do
+    Client.reset_viewer_cache()
+    on_exit(fn -> Client.reset_viewer_cache() end)
+
+    graphql_fun = fn _query, _variables ->
+      flunk("viewer query should not be issued for a literal (non-\"me\") assignee")
+    end
+
+    assert {:ok, %{configured_assignee: "dev@example.com", match_values: match_values}} =
+             Client.resolve_assignee_filter_for_test("dev@example.com", graphql_fun)
+
+    assert MapSet.to_list(match_values) == ["dev@example.com"]
+  end
+
+  # BUG F: resolving the "me" sentinel fires a fresh `viewer` GraphQL query on
+  # every call. Viewer identity is immutable for a given API token, so it
+  # should be resolved once and cached.
+  test "resolve_viewer_assignee_filter caches the viewer id across calls" do
+    Client.reset_viewer_cache()
+    on_exit(fn -> Client.reset_viewer_cache() end)
+
+    call_count = :counters.new(1, [:atomics])
+
+    graphql_fun = fn _query, _variables ->
+      :counters.add(call_count, 1, 1)
+      {:ok, %{"data" => %{"viewer" => %{"id" => "viewer-cached"}}}}
+    end
+
+    assert {:ok, %{match_values: match_values_1}} =
+             Client.resolve_assignee_filter_for_test("me", graphql_fun)
+
+    assert {:ok, %{match_values: match_values_2}} =
+             Client.resolve_assignee_filter_for_test("me", graphql_fun)
+
+    assert MapSet.to_list(match_values_1) == ["viewer-cached"]
+    assert MapSet.to_list(match_values_2) == ["viewer-cached"]
+
+    assert :counters.get(call_count, 1) == 1
+  end
+
+  test "a failed viewer resolution is not cached and is retried on the next call" do
+    Client.reset_viewer_cache()
+    on_exit(fn -> Client.reset_viewer_cache() end)
+
+    call_count = :counters.new(1, [:atomics])
+
+    graphql_fun = fn _query, _variables ->
+      case :counters.get(call_count, 1) do
+        0 ->
+          :counters.add(call_count, 1, 1)
+          {:error, :boom}
+
+        _ ->
+          :counters.add(call_count, 1, 1)
+          {:ok, %{"data" => %{"viewer" => %{"id" => "viewer-retry"}}}}
+      end
+    end
+
+    assert {:error, :boom} = Client.resolve_assignee_filter_for_test("me", graphql_fun)
+
+    assert {:ok, %{match_values: match_values}} =
+             Client.resolve_assignee_filter_for_test("me", graphql_fun)
+
+    assert MapSet.to_list(match_values) == ["viewer-retry"]
+    assert :counters.get(call_count, 1) == 2
   end
 
   test "orchestrator sorts dispatch by priority then oldest created_at" do
