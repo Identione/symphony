@@ -632,7 +632,9 @@ defmodule SymphonyElixir.AppServerTest do
 
                        workpad_ok? =
                          case Enum.find(tools, &(&1["name"] == "sync_workpad")) do
-                           %{"inputSchema" => %{"required" => ["issue_id", "file_path"]}} -> true
+                           # `file_path` is executor-enforced, not schema-required,
+                           # so the workpad_path alias doesn't bounce (dynamic_tool.ex).
+                           %{"inputSchema" => %{"required" => ["issue_id"]}} -> true
                            _ -> false
                          end
 

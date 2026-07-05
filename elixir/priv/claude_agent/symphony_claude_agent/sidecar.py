@@ -345,7 +345,7 @@ _LINEAR_GRAPHQL_FALLBACK_SCHEMA: dict[str, Any] = {
 _SYNC_WORKPAD_FALLBACK_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["issue_id", "file_path"],
+    "required": ["issue_id"],
     "properties": {
         "issue_id": {
             "type": "string",
@@ -353,7 +353,14 @@ _SYNC_WORKPAD_FALLBACK_SCHEMA: dict[str, Any] = {
         },
         "file_path": {
             "type": "string",
-            "description": "Path to a local markdown file whose contents become the comment body.",
+            "description": (
+                "Path to a local markdown file whose contents become the comment"
+                " body. Required (unless the workpad_path alias is given)."
+            ),
+        },
+        "workpad_path": {
+            "type": "string",
+            "description": "Alias for file_path; ignored when file_path is present.",
         },
         "comment_id": {
             "type": "string",

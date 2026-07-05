@@ -33,10 +33,15 @@ defmodule SymphonyElixir.Codex.DynamicTool do
   @sync_workpad_description "Create or update a workpad comment on a Linear issue. Reads the body from a local file to keep the conversation context small."
   @sync_workpad_create "mutation($issueId: String!, $body: String!) { commentCreate(input: { issueId: $issueId, body: $body }) { success comment { id url } } }"
   @sync_workpad_update "mutation($id: String!, $body: String!) { commentUpdate(id: $id, input: { body: $body }) { success comment { id url } } }"
+  # `file_path` is semantically required but deliberately NOT in `required`:
+  # live sessions reliably guess `workpad_path` on the first call, and a
+  # schema-level rejection burns a full model round-trip. The alias is
+  # accepted here and normalized in `normalize_sync_workpad_args/1`; a call
+  # with neither still gets a clear executor error the model can react to.
   @sync_workpad_input_schema %{
     "type" => "object",
     "additionalProperties" => false,
-    "required" => ["issue_id", "file_path"],
+    "required" => ["issue_id"],
     "properties" => %{
       "issue_id" => %{
         "type" => "string",
@@ -44,7 +49,11 @@ defmodule SymphonyElixir.Codex.DynamicTool do
       },
       "file_path" => %{
         "type" => "string",
-        "description" => "Path to a local markdown file whose contents become the comment body."
+        "description" => "Path to a local markdown file whose contents become the comment body. Required (unless the workpad_path alias is given)."
+      },
+      "workpad_path" => %{
+        "type" => "string",
+        "description" => "Alias for file_path; ignored when file_path is present."
       },
       "comment_id" => %{
         "type" => "string",
@@ -141,7 +150,11 @@ defmodule SymphonyElixir.Codex.DynamicTool do
 
   defp normalize_sync_workpad_args(%{} = args) do
     issue_id = nonempty_string_arg(args, "issue_id", :issue_id)
-    file_path = nonempty_string_arg(args, "file_path", :file_path)
+
+    file_path =
+      nonempty_string_arg(args, "file_path", :file_path) ||
+        nonempty_string_arg(args, "workpad_path", :workpad_path)
+
     comment_id = nonempty_string_arg(args, "comment_id", :comment_id)
 
     cond do
