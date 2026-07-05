@@ -124,6 +124,12 @@ defmodule SymphonyElixir.OrchestratorRetryPolicyTest do
                RetryPolicy.decide(:unknown, 1, nil, nil)
     end
 
+    test "max_sessions_per_issue is recognized and never retries" do
+      assert :max_sessions_per_issue in RetryPolicy.recognized_codes()
+      assert RetryPolicy.decide(:max_sessions_per_issue, 1, nil, nil) == :no_retry
+      assert RetryPolicy.decide(:max_sessions_per_issue, 7, 60_000, nil) == :no_retry
+    end
+
     test "Retry-After is ignored for codes that do not opt in" do
       # `:unknown` does not honor_retry_after by default
       assert {:retry, 10_000} = RetryPolicy.decide(:unknown, 1, 999_000, nil)

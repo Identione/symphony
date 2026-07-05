@@ -33,6 +33,7 @@ defmodule SymphonyElixir.Orchestrator.RetryPolicy do
     budget_exhausted
     max_turns_reached
     overseer_escalation
+    max_sessions_per_issue
     unknown
   )a
 
@@ -111,6 +112,15 @@ defmodule SymphonyElixir.Orchestrator.RetryPolicy do
   # Review via the deterministic-failure pipeline. Never retry — closing the
   # fallback-path gap where an unrecognized code would otherwise backoff-retry.
   defp built_in_for(:overseer_escalation, _cap),
+    do: %{strategy: :no_retry, base_ms: 0, max_ms: 0, honor_retry_after: false}
+
+  # The cumulative `agent.max_sessions_per_issue` cap is already a synthetic
+  # exit reason manufactured by `escalate_session_budget/5` after the budget
+  # was exhausted — relaunching here would spin up another over-cap session
+  # every time the escalation side effect (workpad comment / state move)
+  # fails. Block instead: the issue leaves the running set and stays parked
+  # until reconciliation or a human moves it on.
+  defp built_in_for(:max_sessions_per_issue, _cap),
     do: %{strategy: :no_retry, base_ms: 0, max_ms: 0, honor_retry_after: false}
 
   # IDE-74: max_turns_reached is the "ran out of agent.max_turns budget" signal.
