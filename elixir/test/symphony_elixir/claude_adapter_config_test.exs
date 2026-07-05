@@ -508,6 +508,41 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
       # false at the runtime layer.
       assert settings.codex.command == "winner"
     end
+
+    test "legacy top-level codex and nested agent.codex deep-merge per field, nested winning conflicts" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      codex:
+        turn_timeout_ms: 9999
+        command: "legacy"
+        quota:
+          enabled: true
+      agent:
+        kind: codex
+        codex:
+          read_timeout_ms: 111
+          command: "winner"
+      """
+
+      assert {:ok, settings} = parse(yaml)
+
+      # Top-level-only field survives the merge in both layouts.
+      assert settings.codex.turn_timeout_ms == 9999
+      assert settings.agent.codex.turn_timeout_ms == 9999
+
+      # Nested-only field propagates to the top-level mirror too.
+      assert settings.codex.read_timeout_ms == 111
+      assert settings.agent.codex.read_timeout_ms == 111
+
+      # Field set in both: nested wins.
+      assert settings.codex.command == "winner"
+      assert settings.agent.codex.command == "winner"
+
+      # Nested sub-block (quota) untouched by agent.codex must survive the
+      # merge rather than being wiped by wholesale block replacement.
+      assert settings.codex.quota.enabled == true
+      assert settings.agent.codex.quota.enabled == true
+    end
   end
 
   describe "Config.active_turn_timeout_ms/1 + Config.active_stall_timeout_ms/1" do
