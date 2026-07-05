@@ -54,6 +54,11 @@ defmodule SymphonyElixir.Linear.Client do
         }
         branchName
         url
+        attachments {
+          nodes {
+            url
+          }
+        }
         assignee {
           id
         }
@@ -123,6 +128,11 @@ defmodule SymphonyElixir.Linear.Client do
         }
         branchName
         url
+        attachments {
+          nodes {
+            url
+          }
+        }
         assignee {
           id
         }
@@ -574,6 +584,7 @@ defmodule SymphonyElixir.Linear.Client do
       branch_name: issue["branchName"],
       url: issue["url"],
       assignee_id: assignee_field(assignee, "id"),
+      pr_url: extract_pr_url(issue),
       blocked_by: extract_blockers(issue),
       labels: extract_labels(issue),
       assigned_to_worker: assigned_to_worker?(assignee, assignee_filter),

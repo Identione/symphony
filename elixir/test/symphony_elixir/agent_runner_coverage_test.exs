@@ -741,6 +741,43 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
       assert AgentRunner.prepend_resume_after_block_directive("X", nil) == "X"
     end
 
+    test "prepend_continuation_context_directive/2 prepends run number, PR URL and workpad comment id" do
+      prompt =
+        AgentRunner.prepend_continuation_context_directive("ORIGINAL PROMPT", %{
+          run_number: 3,
+          pr_url: "https://github.com/acme/repo/pull/7",
+          workpad_comment_id: "comment-9"
+        })
+
+      assert prompt =~ "Continuation context (provided by Symphony):"
+      assert prompt =~ "run #3"
+      assert prompt =~ "https://github.com/acme/repo/pull/7"
+      # The comment id is handed over ready to reuse as sync_workpad's comment_id.
+      assert prompt =~ "comment-9"
+      assert prompt =~ "`comment_id`"
+      # The original prompt is preserved verbatim, after the directive.
+      assert String.ends_with?(prompt, "ORIGINAL PROMPT")
+    end
+
+    test "prepend_continuation_context_directive/2 omits facts Symphony does not know" do
+      prompt =
+        AgentRunner.prepend_continuation_context_directive("X", %{
+          run_number: 2,
+          pr_url: nil,
+          workpad_comment_id: nil
+        })
+
+      assert prompt =~ "run #2"
+      refute prompt =~ "pull request"
+      refute prompt =~ "comment id"
+      assert String.ends_with?(prompt, "X")
+    end
+
+    test "prepend_continuation_context_directive/2 is a no-op for first runs and nil" do
+      assert AgentRunner.prepend_continuation_context_directive("X", nil) == "X"
+      assert AgentRunner.prepend_continuation_context_directive("X", %{run_number: 1}) == "X"
+    end
+
     test "run/3 injects the directive into the turn-1 prompt when resume_after_block is set" do
       ctx = setup_workspace!()
       write_stub_workflow!(ctx, max_turns: 1)

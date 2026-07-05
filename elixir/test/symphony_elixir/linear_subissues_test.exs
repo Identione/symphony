@@ -122,6 +122,32 @@ defmodule SymphonyElixir.LinearSubissuesTest do
              normalized.blocked_by
   end
 
+  test "captures the issue's own GitHub PR URL from its top-level attachments" do
+    # Feeds the orchestrator's continuation context on re-runs
+    # (docs/investigations/claude-session-token-optimization.md, finding 5).
+    issue =
+      child_node("iss-pr", "MT-12", "In Progress", "started", [], nil)
+      |> Map.put("children", %{"nodes" => []})
+      |> Map.put("attachments", %{
+        "nodes" => [
+          %{"url" => "https://example.com/design-doc"},
+          %{"url" => "https://github.com/acme/repo/pull/12"}
+        ]
+      })
+
+    assert Client.normalize_issue_for_test(issue).pr_url ==
+             "https://github.com/acme/repo/pull/12"
+  end
+
+  test "leaves the issue's own pr_url nil without a GitHub PR attachment" do
+    issue =
+      child_node("iss-nopr", "MT-13", "In Progress", "started", [], nil)
+      |> Map.put("children", %{"nodes" => []})
+      |> Map.put("attachments", %{"nodes" => [%{"url" => "https://example.com/doc"}]})
+
+    assert Client.normalize_issue_for_test(issue).pr_url == nil
+  end
+
   test "leaves a blocker's pr_url nil when no GitHub PR attachment is present" do
     issue =
       child_node("iss-2", "MT-11", "Todo", "unstarted", [], nil)
