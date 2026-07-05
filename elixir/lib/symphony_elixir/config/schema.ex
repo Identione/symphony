@@ -893,14 +893,31 @@ defmodule SymphonyElixir.Config.Schema do
       {top, nil} when is_map(top) ->
         Map.put(config, "agent", Map.put(agent_block, "codex", top))
 
-      {_, nested} when is_map(nested) ->
+      {top, nested} when is_map(nested) ->
+        merged = if is_map(top), do: deep_merge(top, nested), else: nested
+
         config
-        |> Map.put("codex", nested)
-        |> Map.put("agent", agent_block)
+        |> Map.put("codex", merged)
+        |> Map.put("agent", Map.put(agent_block, "codex", merged))
 
       _ ->
         config
     end
+  end
+
+  # Recursively merges two maps with `right`'s values winning per-field
+  # (rather than per-block) whenever both sides define the same key. Used by
+  # `apply_legacy_codex_alias/1` so a legacy top-level `codex:` field (e.g.
+  # `quota.enabled`) survives an unrelated `agent.codex` override instead of
+  # being wiped by wholesale block replacement.
+  defp deep_merge(left, right) when is_map(left) and is_map(right) do
+    Map.merge(left, right, fn _key, left_val, right_val ->
+      if is_map(left_val) and is_map(right_val) do
+        deep_merge(left_val, right_val)
+      else
+        right_val
+      end
+    end)
   end
 
   # `agent.claude.verbose` was the original toggle; it was renamed to

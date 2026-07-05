@@ -346,6 +346,28 @@ defmodule SymphonyElixir.Linear.Client do
     end
   end
 
+  @doc false
+  @spec resolve_assignee_filter_for_test(
+          String.t(),
+          (String.t(), map() -> {:ok, map()} | {:error, term()})
+        ) :: {:ok, map() | nil} | {:error, term()}
+  def resolve_assignee_filter_for_test(assignee, graphql_fun)
+      when is_binary(assignee) and is_function(graphql_fun, 2) do
+    build_assignee_filter(assignee, graphql_fun)
+  end
+
+  @doc false
+  @spec reset_viewer_cache() :: :ok
+  def reset_viewer_cache do
+    :persistent_term.get()
+    |> Enum.each(fn
+      {{__MODULE__, :viewer, _hash} = key, _value} -> :persistent_term.erase(key)
+      _other -> :ok
+    end)
+
+    :ok
+  end
+
   defp do_fetch_by_states(project_slug, state_names, assignee_filter) do
     do_fetch_by_states(project_slug, state_names, assignee_filter, &graphql/2)
   end
@@ -596,27 +618,49 @@ defmodule SymphonyElixir.Linear.Client do
   end
 
   defp build_assignee_filter(assignee) when is_binary(assignee) do
+    build_assignee_filter(assignee, &graphql/2)
+  end
+
+  defp build_assignee_filter(assignee, graphql_fun)
+       when is_binary(assignee) and is_function(graphql_fun, 2) do
     case normalize_assignee_match_value(assignee) do
       nil ->
         {:ok, nil}
 
-      "me" ->
-        resolve_viewer_assignee_filter()
-
       normalized ->
-        {:ok, %{configured_assignee: assignee, match_values: MapSet.new([normalized])}}
+        # The "me" sentinel is matched case-insensitively — WORKFLOW.md
+        # (`assignee: Me`) and env passthrough (`LINEAR_ASSIGNEE=ME`) can
+        # both surface non-lowercase values. Anything else stays a
+        # byte-exact literal match against the real Linear assignee id.
+        if String.downcase(normalized) == "me" do
+          resolve_viewer_assignee_filter(graphql_fun)
+        else
+          {:ok, %{configured_assignee: assignee, match_values: MapSet.new([normalized])}}
+        end
     end
   end
 
-  defp resolve_viewer_assignee_filter do
-    case graphql(@viewer_query, %{}) do
+  defp resolve_viewer_assignee_filter(graphql_fun) when is_function(graphql_fun, 2) do
+    cache_key = viewer_cache_key()
+
+    case :persistent_term.get(cache_key, :not_cached) do
+      :not_cached -> resolve_and_cache_viewer(graphql_fun, cache_key)
+      viewer_id -> {:ok, viewer_assignee_filter(viewer_id)}
+    end
+  end
+
+  defp resolve_and_cache_viewer(graphql_fun, cache_key) do
+    case graphql_fun.(@viewer_query, %{}) do
       {:ok, %{"data" => %{"viewer" => viewer}}} when is_map(viewer) ->
         case assignee_id(viewer) do
           nil ->
             {:error, :missing_linear_viewer_identity}
 
           viewer_id ->
-            {:ok, %{configured_assignee: "me", match_values: MapSet.new([viewer_id])}}
+            # Only a successful resolution is cached — a transient error
+            # must not poison future ticks with a permanent failure.
+            :persistent_term.put(cache_key, viewer_id)
+            {:ok, viewer_assignee_filter(viewer_id)}
         end
 
       {:ok, _body} ->
@@ -625,6 +669,20 @@ defmodule SymphonyElixir.Linear.Client do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  defp viewer_assignee_filter(viewer_id) do
+    %{configured_assignee: "me", match_values: MapSet.new([viewer_id])}
+  end
+
+  # Viewer identity is effectively immutable for a given API token, so caching
+  # it in :persistent_term spares an extra Linear GraphQL call on every
+  # `fetch_candidate_issues/0` / `fetch_issue_states_by_ids/1` tick. Keyed on a
+  # hash of the token (never the raw secret) so switching Linear API keys
+  # can't serve a stale viewer from a previous token's cache entry.
+  defp viewer_cache_key do
+    token = Config.settings!().tracker.api_key
+    {__MODULE__, :viewer, :erlang.phash2(token)}
   end
 
   defp normalize_assignee_match_value(value) when is_binary(value) do

@@ -213,7 +213,28 @@ defmodule SymphonyElixir.Workspace do
   end
 
   defp workspace_path_for_issue(safe_id, worker_host) when is_binary(safe_id) and is_binary(worker_host) do
-    {:ok, Path.join(Config.settings!().workspace.root, safe_id)}
+    if dot_only_identifier?(safe_id) do
+      {:error, {:unsafe_workspace_identifier, safe_id}}
+    else
+      root = Config.settings!().workspace.root
+      joined = Path.join(root, safe_id)
+
+      # `safe_id` can't contain "/" (see `safe_identifier/1`), so the only way
+      # `joined` escapes `root` is via a dot-only segment — already rejected
+      # above. This lexical check is defense-in-depth against future changes
+      # to `safe_identifier/1`/`safe_id` construction; unlike the local branch,
+      # remote paths can't be canonicalized to catch symlink escapes, so this
+      # has to stay a string check.
+      if String.length(joined) > String.length(root) and String.starts_with?(joined, root <> "/") do
+        {:ok, joined}
+      else
+        {:error, {:unsafe_workspace_identifier, safe_id}}
+      end
+    end
+  end
+
+  defp dot_only_identifier?(safe_id) when is_binary(safe_id) do
+    safe_id == "" or String.match?(safe_id, ~r/^\.+$/)
   end
 
   defp safe_identifier(identifier) do

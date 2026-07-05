@@ -4,8 +4,12 @@ Long-lived subprocess that hosts the Claude Agent SDK and bridges Symphony
 over a line-delimited JSON wire protocol on stdio (SPEC.md §10.8).
 
 The protocol is intentionally narrow: see priv/claude_agent/README.md for the
-envelope vocabulary. Anything Symphony does not pre-approve via `dontAsk` +
-`allowed_tools` + the workspace-boundary `PreToolUse` hook is denied.
+envelope vocabulary. Denial rests on `permission_mode=dontAsk` plus the
+Elixir-supplied `allowed_tools`/`disallowed_tools` whitelist — anything not
+on that whitelist is rejected by the SDK itself. The PreToolUse/PostToolUse
+hooks defined here (`build_tool_lifecycle_hooks`,
+`build_post_tool_use_hooks`) are lifecycle notifications and output-size
+caps only; they never deny a tool call.
 """
 
 from __future__ import annotations
@@ -805,12 +809,17 @@ def usage_to_envelope(usage: Any) -> dict[str, int]:
 # Async sidecar driver (SDK required)
 # ---------------------------------------------------------------------------
 
+# asyncio.StreamReader defaults to a 64 KiB line limit; Symphony envelopes
+# (e.g. a large linear_graphql tool_result relayed from the Elixir side,
+# which does not cap it) can easily exceed that, so give ourselves headroom.
+_STDIN_LINE_LIMIT = 16 * 1024 * 1024
+
 
 async def _stdin_lines():
     """Async generator yielding stripped, non-empty stdin lines."""
 
     loop = asyncio.get_running_loop()
-    reader = asyncio.StreamReader(loop=loop)
+    reader = asyncio.StreamReader(loop=loop, limit=_STDIN_LINE_LIMIT)
     protocol = asyncio.StreamReaderProtocol(reader)
     await loop.connect_read_pipe(lambda: protocol, sys.stdin)
 

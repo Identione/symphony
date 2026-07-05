@@ -190,4 +190,39 @@ defmodule SymphonyElixir.OrchestratorSessionBudgetTest do
     state2 = wait_for_state(pid, fn s -> Map.has_key?(s.retry_attempts, issue.id) end)
     assert %{attempt: 1} = state2.retry_attempts[issue.id]
   end
+
+  test "a failed escalation side effect blocks the issue instead of dispatching another over-cap session",
+       %{issue: issue, cap: cap} do
+    Application.put_env(:symphony_elixir, :memory_tracker_create_comment_response, {:error, :transport_down})
+
+    on_exit(fn ->
+      Application.delete_env(:symphony_elixir, :memory_tracker_create_comment_response)
+    end)
+
+    pid = start_orchestrator(:FailedEscalationOrchestrator)
+    ref = make_ref()
+    seed_running(pid, issue.id, running_entry(issue, ref))
+    seed_session_count(pid, issue.id, %{generation: 1, count: cap})
+
+    send(pid, {:DOWN, ref, :process, self(), :normal})
+
+    # The escalation's workpad-comment side effect failed, so no
+    # `memory_tracker_state_update` ever fires — the issue never reaches
+    # "Human Review". Before the RetryPolicy fix, the synthetic
+    # `:max_sessions_per_issue` code fell through to `:unknown` and the
+    # fallback-retry path would dispatch a brand-new over-cap session
+    # instead.
+    state =
+      wait_for_state(pid, fn s -> Map.has_key?(s.blocked, issue.id) end)
+
+    refute Map.has_key?(state.running, issue.id)
+
+    refute Map.has_key?(state.retry_attempts, issue.id),
+           "a failed escalation must not fall back to a continuation/backoff retry"
+
+    refute Map.has_key?(state.pending_escalations, issue.id)
+
+    assert %{identifier: "BUD-1"} = state.blocked[issue.id]
+    refute_received {:memory_tracker_state_update, "issue-budget", _}
+  end
 end
