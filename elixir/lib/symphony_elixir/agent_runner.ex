@@ -1101,34 +1101,50 @@ defmodule SymphonyElixir.AgentRunner do
   def prepend_resume_after_block_directive(prompt, _resume_after_block) when is_binary(prompt), do: prompt
 
   # Prepend orchestrator-known facts (run number, PR URL, workpad comment id)
-  # when this is a re-run of an issue in the same episode, so the agent skips
-  # the re-discovery tool calls (docs/investigations/
-  # claude-session-token-optimization.md, finding 5). First runs and unknown
-  # shapes pass through untouched. `@doc false` public seam for the coverage
-  # suite, mirroring `prepend_resume_after_block_directive/2`.
+  # so the agent skips the re-discovery tool calls (docs/investigations/
+  # claude-session-token-optimization.md, finding 5). Renders whenever any
+  # fact is present; the run-number line appears only on within-episode
+  # re-runs — a fresh episode's run #1 with a known PR URL still gets the URL
+  # (IDE-278 smoke-test finding). Factless maps, nil, and unknown shapes pass
+  # through untouched. `@doc false` public seam for the coverage suite,
+  # mirroring `prepend_resume_after_block_directive/2`.
   @doc false
   @spec prepend_continuation_context_directive(String.t(), map() | nil) :: String.t()
-  def prepend_continuation_context_directive(prompt, %{run_number: run_number} = continuation)
-      when is_binary(prompt) and is_integer(run_number) and run_number > 1 do
-    continuation_context_directive(continuation) <> "\n\n" <> prompt
+  def prepend_continuation_context_directive(prompt, %{run_number: _} = continuation)
+      when is_binary(prompt) do
+    case continuation_context_directive(continuation) do
+      nil -> prompt
+      directive -> directive <> "\n\n" <> prompt
+    end
   end
 
   def prepend_continuation_context_directive(prompt, _continuation) when is_binary(prompt), do: prompt
 
   defp continuation_context_directive(%{run_number: run_number} = continuation) do
-    [
-      "- This is run ##{run_number} for this issue in the current episode; earlier runs already worked in this workspace and workpad.",
-      continuation_fact(continuation, :pr_url, &"- The issue's pull request: #{&1}"),
-      continuation_fact(
-        continuation,
-        :workpad_comment_id,
-        &"- The `## Symphony Workpad` comment id is `#{&1}` — pass it to `sync_workpad` as `comment_id` instead of re-scanning issue comments."
-      ),
-      "- Trust these Symphony-provided values instead of re-deriving them; verify only what you act on."
-    ]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.join("\n")
-    |> then(&("Continuation context (provided by Symphony):\n\n" <> &1))
+    facts =
+      [
+        if(is_integer(run_number) and run_number > 1,
+          do: "- This is run ##{run_number} for this issue in the current episode; earlier runs already worked in this workspace and workpad."
+        ),
+        continuation_fact(continuation, :pr_url, &"- The issue's pull request: #{&1}"),
+        continuation_fact(
+          continuation,
+          :workpad_comment_id,
+          &"- The `## Symphony Workpad` comment id is `#{&1}` — pass it to `sync_workpad` as `comment_id` instead of re-scanning issue comments."
+        )
+      ]
+      |> Enum.reject(&is_nil/1)
+
+    if facts == [] do
+      nil
+    else
+      Enum.join(
+        ["Continuation context (provided by Symphony):", ""] ++
+          facts ++
+          ["- Trust these Symphony-provided values instead of re-deriving them; verify only what you act on."],
+        "\n"
+      )
+    end
   end
 
   defp continuation_fact(continuation, key, render) do

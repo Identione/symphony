@@ -773,9 +773,32 @@ defmodule SymphonyElixir.AgentRunnerCoverageTest do
       assert String.ends_with?(prompt, "X")
     end
 
-    test "prepend_continuation_context_directive/2 is a no-op for first runs and nil" do
+    test "prepend_continuation_context_directive/2 is a no-op for factless first runs and nil" do
       assert AgentRunner.prepend_continuation_context_directive("X", nil) == "X"
       assert AgentRunner.prepend_continuation_context_directive("X", %{run_number: 1}) == "X"
+
+      assert AgentRunner.prepend_continuation_context_directive("X", %{
+               run_number: 1,
+               pr_url: nil,
+               workpad_comment_id: nil
+             }) == "X"
+    end
+
+    test "prepend_continuation_context_directive/2 renders known facts on a fresh episode without a run-number line" do
+      # IDE-278 smoke-test gap: a Merging run after Human Review is run #1 of
+      # a new episode but the PR URL is known — hand it over, omitting the
+      # "this is run #N" line that would be false for a fresh episode.
+      prompt =
+        AgentRunner.prepend_continuation_context_directive("ORIGINAL", %{
+          run_number: 1,
+          pr_url: "https://github.com/acme/repo/pull/9",
+          workpad_comment_id: nil
+        })
+
+      assert prompt =~ "Continuation context (provided by Symphony):"
+      assert prompt =~ "https://github.com/acme/repo/pull/9"
+      refute prompt =~ "run #1"
+      assert String.ends_with?(prompt, "ORIGINAL")
     end
 
     test "run/3 injects the directive into the turn-1 prompt when resume_after_block is set" do
