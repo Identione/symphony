@@ -130,6 +130,25 @@ def test_build_options_payload_drops_claudeai_mcp_servers_by_default() -> None:
     assert payload["env"]["ENABLE_CLAUDEAI_MCP_SERVERS"] == "0"
 
 
+def test_build_options_payload_forces_synchronous_subagents() -> None:
+    """Since CLI 2.1.198 the Agent tool backgrounds subagents by default, and the
+    per-call ``run_in_background`` is chosen by the model, not by us. A
+    backgrounded subagent returns an "Async agent launched successfully" ack
+    instead of its findings, the turn ends without the work, and its late
+    ``Task*`` traffic hijacks whatever turn opens next — fatal for Symphony,
+    whose continuation turns leave the stream unread in between.
+
+    ``CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`` is the only lever that actually
+    contains a subagent inside the turn (``AgentDefinition.background=False`` is
+    inert). Measured A/B on the bundled CLI 2.1.191: without it the Agent tool
+    result is a 934-char launch ack with zero inner subagent tool calls; with it
+    the result carries the real findings and the subagent's own tool calls
+    arrive tagged with ``parent_tool_use_id``."""
+
+    payload = build_options_payload({"type": "init", "cwd": "/tmp/ws"})
+    assert payload["env"]["CLAUDE_CODE_DISABLE_BACKGROUND_TASKS"] == "1"
+
+
 def test_build_options_payload_env_caller_override_wins() -> None:
     """An explicit ``env`` in the init envelope merges over the defaults so an
     operator can re-tune the spawned CLI's env without a code change."""
