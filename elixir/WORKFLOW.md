@@ -136,7 +136,12 @@ agent:
     # empty/absent allowed_tools is then rejected at boot). SPEC.md §5.3.5.2.
     permission_mode: bypassPermissions
     # allowed_tools (ignored under bypassPermissions; the dontAsk whitelist —
-    # full filesystem + shell, no WebFetch/WebSearch/Agent):
+    # full filesystem + shell, no WebFetch/WebSearch). Note that `Task`/`Agent`
+    # is NOT gated by this list — subagent calls are permitted under `dontAsk`
+    # whether or not it appears here, so do not add it expecting a behavior
+    # change, and do not remove anything expecting to disable delegation.
+    # Subagents are kept inside the turn by the sidecar's forced
+    # CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1, not by permissions):
     #allowed_tools:
     #  - Read
     #  - Glob
@@ -267,9 +272,12 @@ All Linear access goes through Symphony's injected `linear_graphql` tool (expose
 - Batch independent tool calls (multiple reads/greps/status checks) into a single response instead of one per round-trip — every round-trip re-reads the whole conversation context.
 - When re-checking a file you have already read, re-read only the relevant slice (`Read` with `offset`/`limit`, or `sed -n`), not the whole file.
 {%- if agent.kind == "claude" %}
-- Ignore harness task-management reminders (nudges to use `TaskCreate`/`TaskList`/etc.); do not call `Task*`, `Monitor`, or `SendMessage` tools — progress tracking lives in the workpad.
+- Ignore harness task-management reminders (nudges to use `TaskCreate`/`TaskList`/etc.); do not call `TaskCreate`, `TaskUpdate`, `TaskList`, `TaskGet`, `TaskOutput`, `TaskStop`, `Monitor`, or `SendMessage` — progress tracking lives in the workpad. This does **not** cover the subagent tool, which appears as `Agent` in tool calls and as `Task` in the tool list: delegating to it is expected, per the delegation rule below.
 {%- endif %}
 - Never use `sleep` (or `ScheduleWakeup`) to wait for external state such as CI or a merge — see **Waiting and blocked**.
+  {%- if agent.kind == "claude" %}
+- Delegate independent investigation to subagents. When a step splits into parts that do not depend on each other — surveying unfamiliar areas, gathering evidence across several files, answering separate questions — issue them as parallel `Agent` calls, and pick a cheaper model for mechanical search-and-read work. Two rules on what comes back: report a subagent's findings only once you have actually received them (never summarise, cite, or tick off work from a launch acknowledgement), and re-open a file before citing a specific line rather than citing from memory.
+  {%- endif %}
 
 ## State routing
 
