@@ -98,9 +98,18 @@ CLAUDE_CODE_SYSTEM_PROMPT_PRESET = {"type": "preset", "preset": "claude_code"}
 # CLI 2.1.191: without it, one Agent call, a 934-char launch ack, zero inner
 # subagent tool calls, no answer; with it, the same call returns real findings
 # and the subagent's own tool calls arrive tagged with ``parent_tool_use_id``.
+#
+# ``CLAUDE_CODE_THISTLE_GREBE=default`` opts out of the CLI's server-toggleable
+# "subagent steer" experiment (GrowthBook flag ``tengu_thistle_grebe``, shipped
+# in CLI 2.1.224): any non-default steer strips the Agent tool's encouraging
+# when-to-use text, and ``counter_steer`` injects a system-prompt block telling
+# the model to do bounded work inline instead of delegating. Symphony's
+# workflow contract treats delegation as an execution gate, so a remote flag
+# flip would silently invert measured behavior with no code change on our side.
 _SIDECAR_CLI_ENV: dict[str, str] = {
     "ENABLE_CLAUDEAI_MCP_SERVERS": "0",
     "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+    "CLAUDE_CODE_THISTLE_GREBE": "default",
 }
 
 _TOOL_VISIBILITY_LOG_SOURCE = "claude_tool_visibility"

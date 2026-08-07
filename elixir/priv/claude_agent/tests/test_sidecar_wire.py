@@ -412,3 +412,18 @@ def test_classify_sdk_error_context_window_via_message() -> None:
 def test_classify_sdk_error_overloaded_via_message() -> None:
     exc = Exception("The API is currently overloaded")
     assert _classify_sdk_error(exc) == "overloaded"
+
+
+def test_build_options_payload_pins_subagent_steer() -> None:
+    """CLI 2.1.224 ships a server-toggleable "subagent steer" experiment
+    (GrowthBook flag ``tengu_thistle_grebe``, env override
+    ``CLAUDE_CODE_THISTLE_GREBE``): any non-default steer strips the Agent
+    tool's encouraging when-to-use text, and ``counter_steer`` injects a
+    system-prompt block telling the model to do bounded work inline instead of
+    delegating. Symphony's workflow contract treats delegation as an execution
+    gate, so a remote flag flip would silently invert measured behavior with no
+    code change on our side. Pinning the override to ``default`` opts every
+    sidecar session out of the experiment."""
+
+    payload = build_options_payload({"type": "init", "cwd": "/tmp/ws"})
+    assert payload["env"]["CLAUDE_CODE_THISTLE_GREBE"] == "default"
