@@ -5,7 +5,13 @@ description = "Symphony's Claude Agent SDK sidecar (SPEC.md §10.8)."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
-  "claude-agent-sdk>=0.1.0",
+  # Floor is deliberate, not cosmetic. The SDK pins the bundled Claude Code CLI
+  # (and `_find_cli` prefers the bundled binary over anything on PATH, so this
+  # pin alone decides CLI behaviour). 0.2.131 ships CLI 2.1.223, clearing two
+  # bugs that bite hardest in the subagent fan-out this sidecar now relies on:
+  # before 2.1.199 a rate-limited subagent returned its error text as if it were
+  # findings, and before 2.1.211 completion could be reported prematurely.
+  "claude-agent-sdk>=0.2.131",
 ]
 
 [project.scripts]

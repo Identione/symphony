@@ -687,7 +687,12 @@ defmodule SymphonyElixir.CLI.Init do
         # empty/absent allowed_tools is then rejected at boot). SPEC.md §5.3.5.2.
         permission_mode: bypassPermissions
         # allowed_tools (ignored under bypassPermissions; the dontAsk whitelist —
-        # full filesystem + shell, no WebFetch/WebSearch/Agent):
+        # full filesystem + shell, no WebFetch/WebSearch). Note that `Task`/`Agent`
+        # is NOT gated by this list — subagent calls are permitted under `dontAsk`
+        # whether or not it appears here, so do not add it expecting a behavior
+        # change, and do not remove anything expecting to disable delegation.
+        # Subagents are kept inside the turn by the sidecar's forced
+        # CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1, not by permissions):
         #allowed_tools:
         #  - Read
         #  - Glob

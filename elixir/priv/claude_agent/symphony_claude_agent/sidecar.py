@@ -83,7 +83,25 @@ CLAUDE_CODE_SYSTEM_PROMPT_PRESET = {"type": "preset", "preset": "claude_code"}
 # model's token stream. Dropping the claude.ai servers shrinks the pool so
 # sync_workpad survives. ``options.env`` overrides the spawned CLI's inherited
 # process env (per the SDK transport).
-_SIDECAR_CLI_ENV: dict[str, str] = {"ENABLE_CLAUDEAI_MCP_SERVERS": "0"}
+#
+# ``CLAUDE_CODE_DISABLE_BACKGROUND_TASKS=1`` keeps delegated subagents inside the
+# turn. Since CLI 2.1.198 the Agent tool backgrounds by default and the per-call
+# ``run_in_background`` is the *model's* choice, so a delegating agent gets an
+# "Async agent launched successfully" ack instead of findings, ends the turn
+# having done nothing, and its late ``Task*`` traffic lands in whatever turn
+# opens next (claude-code#788). That is doubly fatal here: Symphony drains
+# ``receive_response()`` to ``ResultMessage`` and then leaves the stream unread
+# until the orchestrator starts the next continuation turn, which is exactly the
+# window that bug needs. This env var is the only lever that actually forces
+# synchronous execution — ``AgentDefinition.background=False`` is inert, and
+# prompt phrasing is persuasion, not a guarantee. Measured A/B on the bundled
+# CLI 2.1.191: without it, one Agent call, a 934-char launch ack, zero inner
+# subagent tool calls, no answer; with it, the same call returns real findings
+# and the subagent's own tool calls arrive tagged with ``parent_tool_use_id``.
+_SIDECAR_CLI_ENV: dict[str, str] = {
+    "ENABLE_CLAUDEAI_MCP_SERVERS": "0",
+    "CLAUDE_CODE_DISABLE_BACKGROUND_TASKS": "1",
+}
 
 _TOOL_VISIBILITY_LOG_SOURCE = "claude_tool_visibility"
 _TOOL_VISIBILITY_LOG_LIMIT = 1200
