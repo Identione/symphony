@@ -65,26 +65,52 @@ foreground: ensure-trust check-built check-workflow check-key ## Launch attached
 	  --logs-root "$(INSTANCE_DIR)" "$(WORKFLOW)"
 
 stop: ## Stop the daemon (graceful, then SIGKILL after 10s).
-	@if [ ! -f $(PID_FILE) ]; then \
-	  echo "$(DIM)no pid file at $(PID_FILE)$(RESET)"; \
-	  exit 0; \
-	fi
-	@PID=$$(cat $(PID_FILE)); \
-	if kill -0 $$PID 2>/dev/null; then \
-	  echo "stopping symphony (pid $$PID)"; \
-	  kill $$PID; \
-	  for i in 1 2 3 4 5 6 7 8 9 10; do \
-	    kill -0 $$PID 2>/dev/null || break; \
-	    sleep 1; \
-	  done; \
+	@if [ -f $(PID_FILE) ]; then \
+	  PID=$$(cat $(PID_FILE)); \
 	  if kill -0 $$PID 2>/dev/null; then \
-	    echo "$(YELLOW)didn't exit gracefully; SIGKILL$(RESET)"; \
-	    kill -9 $$PID; \
+	    echo "stopping symphony (pid $$PID)"; \
+	    kill $$PID; \
+	    for i in 1 2 3 4 5 6 7 8 9 10; do \
+	      kill -0 $$PID 2>/dev/null || break; \
+	      sleep 1; \
+	    done; \
+	    if kill -0 $$PID 2>/dev/null; then \
+	      echo "$(YELLOW)didn't exit gracefully; SIGKILL$(RESET)"; \
+	      kill -9 $$PID; \
+	    fi; \
+	  else \
+	    echo "$(DIM)pid $$PID not running$(RESET)"; \
 	  fi; \
 	else \
-	  echo "$(DIM)pid $$PID not running$(RESET)"; \
+	  echo "$(DIM)no pid file at $(PID_FILE)$(RESET)"; \
 	fi
+	@$(MAKE) --no-print-directory _reap-orphans
 	@rm -f $(PID_FILE)
+
+# `start` records the pid of `mise exec`, which forks the escript's beam as a
+# child. Killing the recorded pid does not always take the child with it, and a
+# surviving beam keeps the dashboard port bound — so the next `preflight` fails
+# with "port N unavailable: eaddrinuse", which reads as a config error rather
+# than a stale process. Sweep any survivor whose command line still references
+# THIS instance's workflow file, so sibling instances are never touched.
+#
+# This deliberately runs even when the pid file is absent: that is precisely the
+# case where an orphan is most likely (the file was removed while the beam kept
+# running), and the old early-exit skipped the cleanup that was needed most.
+_reap-orphans:
+	@self=$$$$; \
+	pids=$$(pgrep -f -- "$(WORKFLOW)" 2>/dev/null || true); \
+	for p in $$pids; do \
+	  [ "$$p" = "$$self" ] && continue; \
+	  ps -p $$p >/dev/null 2>&1 || continue; \
+	  echo "$(YELLOW)reaping orphaned symphony process$(RESET) (pid $$p)"; \
+	  kill $$p 2>/dev/null || true; \
+	  for i in 1 2 3 4 5; do \
+	    kill -0 $$p 2>/dev/null || break; \
+	    sleep 1; \
+	  done; \
+	  kill -0 $$p 2>/dev/null && kill -9 $$p 2>/dev/null || true; \
+	done
 
 restart: stop start ## Stop, then start.
 
