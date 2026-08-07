@@ -97,11 +97,25 @@ All Linear access goes through Symphony's injected `linear_graphql` tool (expose
 - Batch independent tool calls (multiple reads/greps/status checks) into a single response instead of one per round-trip — every round-trip re-reads the whole conversation context.
 - When re-checking a file you have already read, re-read only the relevant slice (`Read` with `offset`/`limit`, or `sed -n`), not the whole file.
 {%- if agent.kind == "claude" %}
-- Ignore harness task-management reminders (nudges to use `TaskCreate`/`TaskList`/etc.); do not call `TaskCreate`, `TaskUpdate`, `TaskList`, `TaskGet`, `TaskOutput`, `TaskStop`, `Monitor`, or `SendMessage` — progress tracking lives in the workpad. This does **not** cover the subagent tool, which appears as `Agent` in tool calls and as `Task` in the tool list: delegating to it is expected, per the delegation rule below.
+- Ignore harness task-management reminders (nudges to use `TaskCreate`/`TaskList`/etc.); do not call `TaskCreate`, `TaskUpdate`, `TaskList`, `TaskGet`, `TaskOutput`, `TaskStop`, `Monitor`, or `SendMessage` — progress tracking lives in the workpad. This does not cover the `Agent` tool, which is allowed and expected (see **Delegation**).
 {%- endif %}
 - Never use `sleep` (or `ScheduleWakeup`) to wait for external state such as CI or a merge — see **Waiting and blocked**.
   {%- if agent.kind == "claude" %}
-- Delegate independent investigation to subagents. When a step splits into parts that do not depend on each other — surveying unfamiliar areas, gathering evidence across several files, answering separate questions — issue them as parallel `Agent` calls, and pick a cheaper model for mechanical search-and-read work. Two rules on what comes back: report a subagent's findings only once you have actually received them (never summarise, cite, or tick off work from a launch acknowledgement), and re-open a file before citing a specific line rather than citing from memory.
+
+## Delegation
+
+You run on a top-tier model. Most of the work in a ticket does not need one. **For every task, first judge whether it needs main-model reasoning — if it does not, pick the lowest-power model that can do it correctly and run it in a subagent via the `Agent` tool, then act on the subagent's report instead of doing the work inline.**
+
+- **Delegation is an execution gate, not a suggestion.** After the main model has made the plan, the first bounded search, implementation, test, log-inspection, or other worker step that matches the rules below MUST be an `Agent` call. Completing a qualifying step inline without first delegating it violates this workflow.
+- Call `Agent` directly. It is a built-in tool and does not need `ToolSearch`; the SDK may advertise it as `Task` in `system_init` for compatibility, but the invocation tool is `Agent`.
+- Every `Agent` call MUST include an explicit `model` chosen by you for that particular task. Choose among `haiku`, `sonnet`, and `opus`; do not omit `model`, use `inherit`, or launch a `fable` child. Fable-level reasoning stays in the main conversation.
+- `subagent_type`: `Explore` for read-only searching, `general-purpose` for anything that also edits files or runs commands. No repo-specific agent types are defined here.
+- `haiku` — mechanical and fully specified: locating files/symbols, greps and inventories, reading logs, formatting/lint fixups, repetitive boilerplate edits.
+- `sonnet` — the default worker: implementing an already-decided change, writing tests, running the validation gate and reporting failures verbatim, PR-feedback sweeps, mechanical `land`/merge follow-through.
+- `opus` — difficult but bounded analysis where context isolation is valuable and Sonnet is insufficient; do not escalate merely because the task is large.
+- Keep on the main model, never delegate: the deliverable determination, the plan and its self-review, reproduction-signal design, ambiguous ticket interpretation, architectural or cross-cutting decisions, state moves and workpad/handoff wording, and anything whose wrong call is expensive to undo.
+- Subagents see none of this conversation: give each one a self-contained prompt with absolute paths, the exact commands to run, and what to return. Verify what comes back against the real artifact (file contents, command output) before you trust it — do not delegate work you cannot verify.
+- Escalate one tier only after a subagent fails the same task twice; do not run several subagents on the same task hoping one succeeds.
   {%- endif %}
 
 ## State routing
