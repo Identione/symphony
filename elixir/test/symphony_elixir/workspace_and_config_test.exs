@@ -7,6 +7,25 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
   alias SymphonyElixir.Linear.Pagination
   alias SymphonyElixir.Linear.RateLimit
 
+  # Shared by the after_create-hook-bootstrap test and the skills-provisioning
+  # tests below: initializes `path` as a git repo, writes `files`
+  # (`%{relative_path => content}`), and commits them all.
+  defp init_git_repo!(path, files) do
+    File.mkdir_p!(path)
+
+    Enum.each(files, fn {relative_path, content} ->
+      full_path = Path.join(path, relative_path)
+      File.mkdir_p!(Path.dirname(full_path))
+      File.write!(full_path, content)
+    end)
+
+    System.cmd("git", ["-C", path, "init", "-b", "main"])
+    System.cmd("git", ["-C", path, "config", "user.name", "Test User"])
+    System.cmd("git", ["-C", path, "config", "user.email", "test@example.com"])
+    System.cmd("git", ["-C", path, "add" | Map.keys(files)])
+    System.cmd("git", ["-C", path, "commit", "-m", "initial"])
+  end
+
   test "claude quota config defaults to disabled and validates opt-in values" do
     assert {:ok, settings} =
              Schema.parse(%{
@@ -117,15 +136,10 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       template_repo = Path.join(test_root, "source")
       workspace_root = Path.join(test_root, "workspaces")
 
-      File.mkdir_p!(template_repo)
-      File.mkdir_p!(Path.join(template_repo, "keep"))
-      File.write!(Path.join([template_repo, "keep", "file.txt"]), "keep me")
-      File.write!(Path.join(template_repo, "README.md"), "hook clone\n")
-      System.cmd("git", ["-C", template_repo, "init", "-b", "main"])
-      System.cmd("git", ["-C", template_repo, "config", "user.name", "Test User"])
-      System.cmd("git", ["-C", template_repo, "config", "user.email", "test@example.com"])
-      System.cmd("git", ["-C", template_repo, "add", "README.md", "keep/file.txt"])
-      System.cmd("git", ["-C", template_repo, "commit", "-m", "initial"])
+      init_git_repo!(template_repo, %{
+        "README.md" => "hook clone\n",
+        "keep/file.txt" => "keep me"
+      })
 
       write_workflow_file!(Workflow.workflow_file_path(),
         workspace_root: workspace_root,
@@ -2170,6 +2184,404 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
       assert trace =~ workspace_path
     after
       File.rm_rf(test_root)
+    end
+  end
+
+  describe "workspace.skills_source auto-provisioning" do
+    defp build_skills_source(root, content) do
+      skills_source = Path.join(root, "skills-source")
+      File.mkdir_p!(Path.join(skills_source, "commit"))
+      File.write!(Path.join([skills_source, "commit", "SKILL.md"]), content)
+      skills_source
+    end
+
+    defp count_occurrences(haystack, needle) do
+      haystack |> String.split(needle) |> length() |> Kernel.-(1)
+    end
+
+    # Shared tail for after_create hooks that need a real git commit to test
+    # repo-wins precedence against: `setup_lines` is prepended verbatim, then
+    # `git init -b main -q` / `git add -A` / commit everything.
+    defp commit_all_hook(setup_lines) do
+      """
+      #{setup_lines}
+      git init -b main -q
+      git add -A
+      git -c user.name=t -c user.email=t@t commit -q -m initial
+      """
+    end
+
+    test "fresh create with clone hook copies skills into default targets and excludes them from git" do
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-workspace-skills-fresh-#{System.unique_integer([:positive])}"
+        )
+
+      try do
+        template_repo = Path.join(test_root, "source")
+        workspace_root = Path.join(test_root, "workspaces")
+        skills_source = build_skills_source(test_root, "commit skill v1")
+
+        init_git_repo!(template_repo, %{"README.md" => "hello\n"})
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: workspace_root,
+          hook_after_create: "git clone --depth 1 #{template_repo} .",
+          workspace_skills_source: skills_source
+        )
+
+        assert {:ok, workspace} = Workspace.create_for_issue("SK-1")
+
+        assert File.read!(Path.join([workspace, ".codex", "skills", "commit", "SKILL.md"])) ==
+                 "commit skill v1"
+
+        assert File.read!(Path.join([workspace, ".claude", "skills", "commit", "SKILL.md"])) ==
+                 "commit skill v1"
+
+        exclude = File.read!(Path.join([workspace, ".git", "info", "exclude"]))
+        assert count_occurrences(exclude, "/.codex/skills/") == 1
+        assert count_occurrences(exclude, "/.claude/skills/") == 1
+      after
+        File.rm_rf(test_root)
+      end
+    end
+
+    test "reuse refreshes skills content and keeps exclude entries and unrelated files intact" do
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-workspace-skills-reuse-#{System.unique_integer([:positive])}"
+        )
+
+      try do
+        workspace_root = Path.join(test_root, "workspaces")
+        skills_source = build_skills_source(test_root, "commit skill v1")
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: workspace_root,
+          hook_after_create: "git init -b main -q",
+          workspace_skills_source: skills_source
+        )
+
+        assert {:ok, first_workspace} = Workspace.create_for_issue("SK-REUSE")
+
+        assert File.read!(Path.join([first_workspace, ".codex", "skills", "commit", "SKILL.md"])) ==
+                 "commit skill v1"
+
+        # Sanity check: the copied skill is untracked (the hook only ran `git
+        # init`, nothing was ever added/committed) — proving that a later
+        # refresh below exercises the untracked-refresh path, not the
+        # repo-wins skip path.
+        assert {"", 0} =
+                 System.cmd("git", ["-C", first_workspace, "ls-files", "--", ".codex/skills"], stderr_to_stdout: true)
+
+        File.write!(Path.join(first_workspace, "local-progress.txt"), "in progress\n")
+
+        # Refresh the source skill content between the two creates.
+        File.write!(Path.join([skills_source, "commit", "SKILL.md"]), "commit skill v2")
+
+        assert {:ok, second_workspace} = Workspace.create_for_issue("SK-REUSE")
+        assert second_workspace == first_workspace
+
+        assert File.read!(Path.join([second_workspace, ".codex", "skills", "commit", "SKILL.md"])) ==
+                 "commit skill v2"
+
+        assert File.read!(Path.join(second_workspace, "local-progress.txt")) == "in progress\n"
+
+        exclude = File.read!(Path.join([second_workspace, ".git", "info", "exclude"]))
+        assert count_occurrences(exclude, "/.codex/skills/") == 1
+        assert count_occurrences(exclude, "/.claude/skills/") == 1
+      after
+        File.rm_rf(test_root)
+      end
+    end
+
+    test "repo-tracked skill dirs win over skills_source" do
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-workspace-skills-repo-wins-#{System.unique_integer([:positive])}"
+        )
+
+      try do
+        workspace_root = Path.join(test_root, "workspaces")
+        skills_source = build_skills_source(test_root, "operator version")
+        File.mkdir_p!(Path.join(skills_source, "extra"))
+        File.write!(Path.join([skills_source, "extra", "SKILL.md"]), "extra skill")
+
+        hook =
+          commit_all_hook("""
+          mkdir -p .codex/skills/commit
+          printf 'repo version' > .codex/skills/commit/SKILL.md
+          """)
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: workspace_root,
+          hook_after_create: hook,
+          workspace_skills_source: skills_source
+        )
+
+        assert {:ok, workspace} = Workspace.create_for_issue("SK-REPO-WINS")
+
+        # The repo's own tracked commit skill is untouched by the operator's
+        # skills_source...
+        assert File.read!(Path.join([workspace, ".codex", "skills", "commit", "SKILL.md"])) ==
+                 "repo version"
+
+        # ...while entries the repo doesn't track are still copied in
+        # additively.
+        assert File.read!(Path.join([workspace, ".codex", "skills", "extra", "SKILL.md"])) ==
+                 "extra skill"
+
+        assert {status, 0} =
+                 System.cmd("git", ["-C", workspace, "status", "--porcelain"], stderr_to_stdout: true)
+
+        assert String.trim(status) == ""
+      after
+        File.rm_rf(test_root)
+      end
+    end
+
+    test "tracked symlink target is skipped entirely" do
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-workspace-skills-symlink-target-#{System.unique_integer([:positive])}"
+        )
+
+      try do
+        workspace_root = Path.join(test_root, "workspaces")
+        skills_source = build_skills_source(test_root, "operator version")
+        File.mkdir_p!(Path.join(skills_source, "extra"))
+        File.write!(Path.join([skills_source, "extra", "SKILL.md"]), "extra skill")
+
+        hook =
+          commit_all_hook("""
+          mkdir -p .codex/skills/commit .claude
+          printf 'repo version' > .codex/skills/commit/SKILL.md
+          ln -s ../.codex/skills .claude/skills
+          """)
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: workspace_root,
+          hook_after_create: hook,
+          workspace_skills_source: skills_source
+        )
+
+        assert {:ok, workspace} = Workspace.create_for_issue("SK-SYMLINK-TARGET")
+
+        # Nothing was written through the `.claude/skills` symlink — its
+        # resolved directory (`.codex/skills`) still only has what the repo
+        # committed plus the additive `extra/` copy from (a) above.
+        assert File.read!(Path.join([workspace, ".claude", "skills", "commit", "SKILL.md"])) ==
+                 "repo version"
+
+        assert File.read!(Path.join([workspace, ".codex", "skills", "extra", "SKILL.md"])) ==
+                 "extra skill"
+
+        # The `.claude/skills` symlink itself was never touched: nothing was
+        # ever written to it directly (writes only ever went through
+        # `.codex/skills`), confirmed by it still resolving as the exact
+        # same symlink git committed.
+        assert {:ok, "../.codex/skills"} =
+                 File.read_link(Path.join([workspace, ".claude", "skills"]))
+
+        exclude = File.read!(Path.join([workspace, ".git", "info", "exclude"]))
+        assert exclude =~ "/.codex/skills/"
+        refute exclude =~ "/.claude/skills/"
+
+        assert {status, 0} =
+                 System.cmd("git", ["-C", workspace, "status", "--porcelain"], stderr_to_stdout: true)
+
+        assert String.trim(status) == ""
+      after
+        File.rm_rf(test_root)
+      end
+    end
+
+    test "exclude hygiene works when .git is a file (worktree / --separate-git-dir)" do
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-workspace-skills-gitdir-file-#{System.unique_integer([:positive])}"
+        )
+
+      try do
+        workspace_root = Path.join(test_root, "workspaces")
+        skills_source = build_skills_source(test_root, "commit skill v1")
+
+        # `--separate-git-dir` makes `.git` a *file* pointing at the real git
+        # directory instead of a directory — the layout `git worktree` and
+        # `--separate-git-dir` clones use, and the regression this test
+        # guards: exclude lines must land in the *real* `info/exclude`, not a
+        # hand-built `<workspace>/.git/info/exclude`. The hook's cwd is the
+        # workspace itself, so `$PWD-gitdir` is a sibling path that still
+        # lands under `test_root` for cleanup.
+        hook =
+          commit_all_hook("""
+          git init --separate-git-dir "$PWD-gitdir" -b main -q
+          printf 'hello' > README.md
+          """)
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: workspace_root,
+          hook_after_create: hook,
+          workspace_skills_source: skills_source
+        )
+
+        assert {:ok, workspace} = Workspace.create_for_issue("SK-GITDIR-FILE")
+
+        refute File.dir?(Path.join(workspace, ".git"))
+        assert File.regular?(Path.join(workspace, ".git"))
+
+        assert File.read!(Path.join([workspace, ".codex", "skills", "commit", "SKILL.md"])) ==
+                 "commit skill v1"
+
+        assert {status, 0} =
+                 System.cmd("git", ["-C", workspace, "status", "--porcelain"], stderr_to_stdout: true)
+
+        assert String.trim(status) == ""
+
+        assert {real_exclude_path, 0} =
+                 System.cmd("git", ["-C", workspace, "rev-parse", "--git-path", "info/exclude"], stderr_to_stdout: true)
+
+        exclude = real_exclude_path |> String.trim() |> Path.expand(workspace) |> File.read!()
+        assert count_occurrences(exclude, "/.codex/skills/") == 1
+        assert count_occurrences(exclude, "/.claude/skills/") == 1
+      after
+        File.rm_rf(test_root)
+      end
+    end
+
+    test "missing skills_source on fresh create returns an error and removes the created workspace" do
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-workspace-skills-missing-#{System.unique_integer([:positive])}"
+        )
+
+      try do
+        workspace_root = Path.join(test_root, "workspaces")
+        missing_source = Path.join(test_root, "does-not-exist")
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: workspace_root,
+          workspace_skills_source: missing_source
+        )
+
+        expanded_missing_source = Path.expand(missing_source)
+
+        assert {:error, {:workspace_skills_source_missing, ^expanded_missing_source}} =
+                 Workspace.create_for_issue("SK-MISSING")
+
+        refute File.exists?(Path.join(workspace_root, "SK-MISSING"))
+      after
+        File.rm_rf(test_root)
+      end
+    end
+
+    test "custom skills_targets only populates the configured target" do
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-workspace-skills-custom-target-#{System.unique_integer([:positive])}"
+        )
+
+      try do
+        workspace_root = Path.join(test_root, "workspaces")
+        skills_source = build_skills_source(test_root, "commit skill v1")
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: workspace_root,
+          workspace_skills_source: skills_source,
+          workspace_skills_targets: [".codex/skills"]
+        )
+
+        assert {:ok, workspace} = Workspace.create_for_issue("SK-CUSTOM")
+
+        assert File.read!(Path.join([workspace, ".codex", "skills", "commit", "SKILL.md"])) ==
+                 "commit skill v1"
+
+        refute File.exists?(Path.join(workspace, ".claude"))
+      after
+        File.rm_rf(test_root)
+      end
+    end
+
+    test "schema rejects skills_targets entries that escape the workspace" do
+      assert {:error, {:invalid_workflow_config, escape_message}} =
+               Schema.parse(%{
+                 tracker: %{kind: "memory"},
+                 workspace: %{skills_targets: ["../escape"]}
+               })
+
+      assert escape_message =~ "skills_targets"
+
+      assert {:error, {:invalid_workflow_config, absolute_message}} =
+               Schema.parse(%{
+                 tracker: %{kind: "memory"},
+                 workspace: %{skills_targets: ["/abs"]}
+               })
+
+      assert absolute_message =~ "skills_targets"
+    end
+
+    test "schema rejects workspace.skills_source combined with worker.ssh_hosts" do
+      assert {:error, {:invalid_workflow_config, message}} =
+               Schema.parse(%{
+                 tracker: %{kind: "memory"},
+                 workspace: %{skills_source: "/opt/skills"},
+                 worker: %{ssh_hosts: ["alice@host"]}
+               })
+
+      assert message =~ "workspace.skills_source"
+      assert message =~ "worker.ssh_hosts"
+    end
+
+    test "no skills_source configured leaves workspaces untouched" do
+      workspace_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-workspace-skills-unset-#{System.unique_integer([:positive])}"
+        )
+
+      try do
+        write_workflow_file!(Workflow.workflow_file_path(), workspace_root: workspace_root)
+
+        assert {:ok, workspace} = Workspace.create_for_issue("SK-UNSET")
+        refute File.exists?(Path.join(workspace, ".codex"))
+        refute File.exists?(Path.join(workspace, ".claude"))
+      after
+        File.rm_rf(workspace_root)
+      end
+    end
+
+    test "non-git workspace still receives copied skills without an exclude file" do
+      test_root =
+        Path.join(
+          System.tmp_dir!(),
+          "symphony-elixir-workspace-skills-nongit-#{System.unique_integer([:positive])}"
+        )
+
+      try do
+        workspace_root = Path.join(test_root, "workspaces")
+        skills_source = build_skills_source(test_root, "commit skill v1")
+
+        write_workflow_file!(Workflow.workflow_file_path(),
+          workspace_root: workspace_root,
+          workspace_skills_source: skills_source
+        )
+
+        assert {:ok, workspace} = Workspace.create_for_issue("SK-NONGIT")
+
+        assert File.read!(Path.join([workspace, ".codex", "skills", "commit", "SKILL.md"])) ==
+                 "commit skill v1"
+
+        refute File.exists?(Path.join(workspace, ".git"))
+      after
+        File.rm_rf(test_root)
+      end
     end
   end
 end

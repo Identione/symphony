@@ -515,7 +515,10 @@ defmodule SymphonyElixir.CLI.Init do
 
     The cloned repo must carry repo-local skills (.codex/skills/) for the
     workflow's commit/push/pull/land steps; copy them from the Symphony repo
-    if absent.
+    if absent. Alternatively, set `workspace.skills_source` in WORKFLOW.md to
+    have Symphony copy a skills directory into every workspace itself instead
+    of provisioning them in the target repo (SPEC.md §5.3.3; additive and
+    repo-wins — skills the target repo tracks itself are kept).
     """
   end
 

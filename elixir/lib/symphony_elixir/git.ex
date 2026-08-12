@@ -244,6 +244,72 @@ defmodule SymphonyElixir.Git do
     end
   end
 
+  @typedoc "Result of `tracked_paths/3`: matching tracked paths plus the repo's real exclude file."
+  @type tracked_paths_result :: %{paths: [String.t()], exclude_file: Path.t()}
+
+  @doc """
+  Resolve git-tracked paths under one or more pathspecs, plus the git-native
+  `info/exclude` file for the same repo, in a single non-mutating `sh`
+  invocation. Used by `SymphonyElixir.Workspace`'s skills auto-provisioning to
+  determine repo-wins precedence (which paths the target repo already tracks)
+  and where to append exclude lines.
+
+  `exclude_file` is resolved via `git rev-parse --git-path info/exclude` and
+  made absolute relative to `workspace` (`--git-path` can return a relative
+  path) — this makes it correct for worktree / `--separate-git-dir` layouts
+  where `.git` is a file rather than a directory, unlike a hand-built
+  `<workspace>/.git/info/exclude` path.
+
+  Returns `:not_a_git_repo` when `workspace` isn't a git repo (mirrors the
+  sibling probes in this module), or `{:error, reason}` on any other git
+  failure. Best-effort/timeout-bounded like the sibling probes.
+  """
+  @spec tracked_paths(Path.t(), [String.t()], pos_integer()) ::
+          {:ok, tracked_paths_result()} | :not_a_git_repo | {:error, term()}
+  def tracked_paths(workspace, pathspecs, timeout_ms \\ @default_timeout_ms)
+      when is_binary(workspace) and is_list(pathspecs) do
+    script = build_tracked_paths_script(pathspecs)
+
+    case run_script(workspace, script, nil, timeout_ms) do
+      {:ok, {output, 0}} -> parse_tracked_paths(output, workspace)
+      {:ok, {output, status}} -> {:error, {:git_failed, status, String.trim(output)}}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Not-git sentinel (shared shape with `build_signals_script/1`), then the
+  # git-resolved exclude file path, then a machine-readable marker line
+  # followed by NUL-separated tracked paths under the given pathspecs.
+  @spec build_tracked_paths_script([String.t()]) :: String.t()
+  defp build_tracked_paths_script(pathspecs) do
+    escaped_pathspecs = Enum.map_join(pathspecs, " ", &esc/1)
+
+    """
+    if [ ! -d .git ] && ! git rev-parse --git-dir >/dev/null 2>&1; then
+      echo __SYMPHONY_NOT_GIT__
+      exit 0
+    fi
+    printf '__SYMPHONY_EXCLUDE__ %s\\n' "$(git rev-parse --git-path info/exclude)"
+    printf '__SYMPHONY_LS__\\n'
+    git ls-files -z -- #{escaped_pathspecs}
+    """
+  end
+
+  @spec parse_tracked_paths(String.t(), Path.t()) ::
+          {:ok, tracked_paths_result()} | :not_a_git_repo | {:error, term()}
+  defp parse_tracked_paths(output, workspace) do
+    if String.contains?(output, "__SYMPHONY_NOT_GIT__") do
+      :not_a_git_repo
+    else
+      with [_, exclude_file] <- Regex.run(~r/__SYMPHONY_EXCLUDE__\s+(\S+)/, output),
+           [_before, rest] <- String.split(output, "__SYMPHONY_LS__\n", parts: 2) do
+        {:ok, %{paths: String.split(rest, <<0>>, trim: true), exclude_file: Path.expand(exclude_file, workspace)}}
+      else
+        _ -> {:error, {:git_unexpected_output, String.trim(output)}}
+      end
+    end
+  end
+
   # Distinct from `Workspace.safe_identifier/1` (which preserves case and forbids
   # `/`): a ref path component is lowercased and keeps `/` as a path separator.
   @spec safe_ref_component(String.t()) :: String.t()

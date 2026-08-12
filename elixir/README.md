@@ -128,8 +128,11 @@ raw CLI surface the Makefile rules call.
   `land` skills (incl. `land_watch.py`) must read `git config symphony.baseBranch`
   (recorded by the `after_create` hook, with a `main` fallback) to set the PR
   `--base`, merge the right branch, and refuse pushing the protected/base branch.
-  Symphony never vendors them — without them PRs target the wrong base and the
-  protected-branch guard is missing. Re-run with `--force` to change the base later.
+  Symphony never vendors them by default — without them PRs target the wrong base and
+  the protected-branch guard is missing (set `workspace.skills_source` in WORKFLOW.md to
+  have Symphony copy a skills directory into every workspace instead, see SPEC.md §5.3.3;
+  the copy is additive and repo-wins — skills the target repo tracks itself are kept).
+  Re-run with `--force` to change the base later.
 - `--output <PATH>` — workflow output path
 - `--port <PORT>` — enable the Phoenix dashboard. `0` = OS-assigned. Omit
   for no `server:` block at all.
