@@ -18,6 +18,15 @@ polling:
   interval_ms: 30000
 workspace:
   root: ~/code/workspaces
+  # Optional: copy an on-host skills directory (e.g. containing commit/SKILL.md,
+  # push/SKILL.md) into every workspace at creation, refreshed on reuse, so the
+  # target repo doesn't need to vendor them. Additive + repo-wins: skills the
+  # cloned repo tracks itself are never overwritten (a tracked symlink target is
+  # skipped whole). Local-only — invalid together with worker.ssh_hosts.
+  # Defaults to .codex/skills + .claude/skills; override via skills_targets.
+  # SPEC.md §5.3.3/§9.3. NOT enabled here — this repo's skills are committed in
+  # .codex/skills/ already.
+  # skills_source: ~/code/identione/symphony/.codex/skills
 # Declarative repo metadata (SPEC.md §5.3.6). `repo.url` feeds
 # `hooks.after_create` + `symphony preflight`; `repo.path` is optional and
 # operator-facing only (Symphony never reads/writes through it).
@@ -27,8 +36,10 @@ workspace:
 # skills (incl. land_watch.py) that read `git config symphony.baseBranch` (set
 # by the after_create hook, `main` fallback) to set the PR `--base`, merge the
 # right branch, and refuse pushing the protected/base branch. Symphony never
-# vendors them — without them PRs target the wrong base and the protected-branch
-# guard is absent. See SPEC.md §5.3.6 + elixir/README.md.
+# vendors them by default — without them PRs target the wrong base and the
+# protected-branch guard is absent; `workspace.skills_source` above opts into
+# auto-copying a skills directory instead of hand-provisioning the target repo.
+# See SPEC.md §5.3.6 + elixir/README.md.
 repo:
   url: https://github.com/Identione/symphony.git
 hooks:

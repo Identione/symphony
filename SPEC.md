@@ -487,6 +487,26 @@ Fields:
   - `~` is expanded.
   - Relative paths are resolved relative to the directory containing `WORKFLOW.md`.
   - The effective workspace root is normalized to an absolute path before use.
+- `skills_source` (path string or `$VAR`, OPTIONAL)
+  - Default: unset (no-op).
+  - Path, on the daemon host, to a directory of agent skills (e.g. containing
+    `commit/SKILL.md`, `push/SKILL.md`) that implementations SHOULD copy into every
+    per-issue workspace at creation time and refresh on reuse (§9.2, §9.3), so the target
+    repository does not need to vendor those skills itself.
+  - `~` is expanded at the point of use; a `$VAR` whole-value reference is resolved from
+    the environment the same way other path fields are, with a missing/empty variable
+    resolving to unset (not an error).
+  - Local-only in this version: implementations MUST reject a config where `skills_source`
+    is set and `worker.ssh_hosts` (§5.3.5) is non-empty — remote skill copy is unsupported.
+  - The copy is additive and repo-wins (§9.3): entries the cloned repository already tracks
+    under a target path are never overwritten, so a target repo that vendors its own
+    (possibly repo-adapted) skills keeps them.
+- `skills_targets` (list of workspace-relative path strings, OPTIONAL)
+  - Default: `.codex/skills`, `.claude/skills`.
+  - Workspace-relative directories that `skills_source`'s contents are copied into. Ignored
+    when `skills_source` is unset.
+  - Each entry MUST be a relative path that cannot escape the workspace: absolute paths
+    (leading `/`), `..` segments, `~`-prefixed entries, and empty strings are invalid config.
 
 #### 5.3.4 `hooks` (object)
 
@@ -756,6 +776,8 @@ Fields:
   - Optional pointer to a local working copy of the repo.
   - Symphony itself MUST NOT read or write through `repo.path`; it exists so repo-local skills
     can find a stable on-disk copy outside the per-issue workspace.
+  - Symphony does not vendor skills by default; `workspace.skills_source` (§5.3.3) opts into
+    copying them at workspace creation instead of requiring the target repo to commit them.
   - `~` and `$VAR` are expanded under the same rules as other path fields.
 - `base_branch` (string, OPTIONAL)
   - The git branch agents branch from, sync with, and squash-merge into. When absent (the
@@ -1353,6 +1375,9 @@ Algorithm summary:
 4. Mark `created_now=true` only if the directory was created during this call; otherwise
    `created_now=false`.
 5. If `created_now=true`, run `after_create` hook if configured.
+6. If `workspace.skills_source` is configured, copy it into `workspace.skills_targets`
+   (§9.3) — this step runs on every call, including reused workspaces (`created_now=false`),
+   so a workspace's skills stay current with the source directory.
 
 Notes:
 
@@ -1366,6 +1391,25 @@ The spec does not require any built-in VCS or repository bootstrap behavior.
 
 Implementations MAY populate or synchronize the workspace using implementation-defined logic and/or
 hooks (for example `after_create` and/or `before_run`).
+
+`workspace.skills_source`/`workspace.skills_targets` (§5.3.3) is one such implementation-defined
+population step: copying an operator-provisioned skills directory into the workspace so the coding
+agent has repo-local skills (e.g. `commit`, `push`) available without the target repository vendoring
+them itself.
+
+Precedence — the copy is additive and repo-wins. For each target and each top-level entry of the
+source directory:
+
+- If the target path itself is a VCS-tracked blob (for example a committed symlink such as
+  `.claude/skills -> ../../.codex/skills`), the entire target is skipped — nothing is written
+  through it.
+- If the cloned repository tracks files under `<target>/<entry>`, that entry is skipped: the repo's
+  own (possibly repo-adapted) skill wins over the operator copy.
+- Otherwise the entry is copied, overwriting any previously auto-copied (untracked) version so
+  reused workspaces stay current with the source directory.
+- Workspaces that are not a VCS checkout have no tracked set; every entry is copied.
+
+Skipped entries SHOULD be surfaced in the success log line.
 
 Failure handling:
 
@@ -3062,6 +3106,12 @@ Unless otherwise noted, Sections 17.1 through 17.7 are `Core Conformance`. Bulle
 - `before_remove` hook runs on cleanup and failures/timeouts are ignored
 - Workspace path sanitization and root containment invariants are enforced before agent launch
 - Agent launch uses the per-issue workspace path as cwd and rejects out-of-root paths
+- `workspace.skills_source` copy runs after the `after_create` hook and refreshes on reuse
+  (not gated on `created_now`); copied paths are excluded from git tracking; local-only
+  (rejected at config-validate time when combined with `worker.ssh_hosts`)
+- `workspace.skills_source` copy is additive and repo-wins: repo-tracked entries under a
+  target are never overwritten, and a target that is itself a tracked blob/symlink is
+  skipped entirely (§9.3)
 
 ### 17.3 Issue Tracker Client
 

@@ -105,12 +105,51 @@ defmodule SymphonyElixir.Config.Schema do
     @primary_key false
     embedded_schema do
       field(:root, :string)
+      # Optional path (on the daemon host) to a directory of agent skills
+      # (e.g. containing `commit/SKILL.md`, `push/SKILL.md`) that Symphony
+      # copies into every workspace at creation (and refreshes on reuse), so
+      # target repos don't need to vendor skills themselves. Nil (default) is
+      # a no-op. Local-only: rejected at config-validate time alongside a
+      # non-empty `worker.ssh_hosts` (see `Schema.changeset/1`). `~`/`$VAR`
+      # expansion happens like other path settings; a bare `~` is expanded at
+      # the use site (`Workspace.maybe_copy_skills/4`), not here.
+      field(:skills_source, :string)
+      # Workspace-relative directories `skills_source`'s contents are copied
+      # into. Must stay under the workspace (no absolute paths, no `..`
+      # segments, no `~`).
+      field(:skills_targets, {:array, :string}, default: [".codex/skills", ".claude/skills"])
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:root], empty_values: [])
+      |> cast(attrs, [:root, :skills_source, :skills_targets], empty_values: [])
+      |> validate_skills_targets()
+    end
+
+    defp validate_skills_targets(changeset) do
+      validate_change(changeset, :skills_targets, fn :skills_targets, targets ->
+        Enum.flat_map(targets, &skills_target_errors/1)
+      end)
+    end
+
+    defp skills_target_errors(target) do
+      cond do
+        not is_binary(target) or target == "" ->
+          [{:skills_targets, "entries must be non-empty relative paths, got: #{inspect(target)}"}]
+
+        String.starts_with?(target, "/") ->
+          [{:skills_targets, "entries must be relative paths (no leading \"/\"), got: #{inspect(target)}"}]
+
+        String.starts_with?(target, "~") ->
+          [{:skills_targets, "entries must not use \"~\" expansion, got: #{inspect(target)}"}]
+
+        ".." in Path.split(target) ->
+          [{:skills_targets, "entries must not contain \"..\" segments, got: #{inspect(target)}"}]
+
+        true ->
+          []
+      end
     end
   end
 
@@ -1147,6 +1186,26 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
     |> validate_deterministic_escalation_state_disjoint()
+    |> validate_skills_source_worker_compat()
+  end
+
+  # Remote skill copy is unsupported in v1 (`Workspace.maybe_copy_skills/4` only
+  # ever runs locally); refuse the combination at parse time instead of letting
+  # every dispatched issue fail at workspace-creation time.
+  defp validate_skills_source_worker_compat(changeset) do
+    with %Workspace{skills_source: skills_source} when is_binary(skills_source) and skills_source != "" <-
+           get_field(changeset, :workspace),
+         %Worker{ssh_hosts: ssh_hosts} when is_list(ssh_hosts) and ssh_hosts != [] <-
+           get_field(changeset, :worker) do
+      add_error(
+        changeset,
+        :workspace,
+        "workspace.skills_source is not supported together with worker.ssh_hosts " <>
+          "(remote skill copy unsupported; ssh_hosts=#{inspect(ssh_hosts)})"
+      )
+    else
+      _ -> changeset
+    end
   end
 
   # If the escalation state is still listed in `tracker.active_states`, the
@@ -1187,7 +1246,8 @@ defmodule SymphonyElixir.Config.Schema do
 
     workspace = %{
       settings.workspace
-      | root: resolve_path_value(settings.workspace.root, Path.join(System.tmp_dir!(), "symphony_workspaces"))
+      | root: resolve_path_value(settings.workspace.root, Path.join(System.tmp_dir!(), "symphony_workspaces")),
+        skills_source: resolve_path_value(settings.workspace.skills_source, nil)
     }
 
     codex = %{

@@ -4,7 +4,7 @@ defmodule SymphonyElixir.Workspace do
   """
 
   require Logger
-  alias SymphonyElixir.{Config, PathSafety, SSH}
+  alias SymphonyElixir.{Config, Git, PathSafety, SSH}
 
   @remote_workspace_marker "__SYMPHONY_WORKSPACE__"
 
@@ -21,7 +21,8 @@ defmodule SymphonyElixir.Workspace do
       with {:ok, workspace} <- workspace_path_for_issue(safe_id, worker_host),
            :ok <- validate_workspace_path(workspace, worker_host),
            {:ok, workspace, created?} <- ensure_workspace(workspace, worker_host),
-           :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, worker_host) do
+           :ok <- maybe_run_after_create_hook(workspace, issue_context, created?, worker_host),
+           :ok <- maybe_copy_skills(workspace, issue_context, worker_host, created?) do
         {:ok, workspace}
       end
     rescue
@@ -258,20 +259,20 @@ defmodule SymphonyElixir.Workspace do
         :ok
 
       {:error, reason} = error ->
-        remove_created_workspace_after_hook_failure(workspace, issue_context, worker_host, reason)
+        remove_created_workspace_after_failure(workspace, issue_context, worker_host, "after_create hook", reason)
         error
     end
   end
 
-  defp remove_created_workspace_after_hook_failure(workspace, issue_context, nil, reason) do
-    Logger.warning("Removing workspace after after_create hook failure #{issue_log_context(issue_context)} workspace=#{workspace} reason=#{inspect(reason)} worker_host=local")
+  defp remove_created_workspace_after_failure(workspace, issue_context, nil, stage, reason) do
+    Logger.warning("Removing workspace after #{stage} failure #{issue_log_context(issue_context)} workspace=#{workspace} reason=#{inspect(reason)} worker_host=local")
     File.rm_rf(workspace)
     :ok
   end
 
-  defp remove_created_workspace_after_hook_failure(workspace, issue_context, worker_host, reason)
+  defp remove_created_workspace_after_failure(workspace, issue_context, worker_host, stage, reason)
        when is_binary(worker_host) do
-    Logger.warning("Removing workspace after after_create hook failure #{issue_log_context(issue_context)} workspace=#{workspace} reason=#{inspect(reason)} worker_host=#{worker_host}")
+    Logger.warning("Removing workspace after #{stage} failure #{issue_log_context(issue_context)} workspace=#{workspace} reason=#{inspect(reason)} worker_host=#{worker_host}")
 
     script =
       [
@@ -286,16 +287,238 @@ defmodule SymphonyElixir.Workspace do
 
       {:ok, {output, status}} ->
         Logger.warning(
-          "Failed to remove workspace after after_create hook failure #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host} status=#{status} output=#{inspect(sanitize_hook_output_for_log(output))}"
+          "Failed to remove workspace after #{stage} failure #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host} status=#{status} output=#{inspect(sanitize_hook_output_for_log(output))}"
         )
 
       {:error, cleanup_reason} ->
-        Logger.warning(
-          "Failed to remove workspace after after_create hook failure #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host} reason=#{inspect(cleanup_reason)}"
-        )
+        Logger.warning("Failed to remove workspace after #{stage} failure #{issue_log_context(issue_context)} workspace=#{workspace} worker_host=#{worker_host} reason=#{inspect(cleanup_reason)}")
     end
 
     :ok
+  end
+
+  # Auto-provisions `workspace.skills_source` (SPEC.md §9.3) into
+  # `workspace.skills_targets` on every `create_for_issue/2` call — both fresh
+  # creates and reuses, so a reused workspace's skills stay fresh. No-op when
+  # `skills_source` is unset. Local-only: a remote `worker_host` is rejected
+  # here as defense-in-depth (the config layer already refuses
+  # `workspace.skills_source` + non-empty `worker.ssh_hosts` at parse time).
+  # Repo-wins: the copy is additive per top-level entry — anything the target
+  # repo already tracks at a given target (a whole target path tracked as a
+  # blob/symlink, or a top-level entry name under it) is left alone rather
+  # than overwritten.
+  defp maybe_copy_skills(workspace, issue_context, worker_host, created?) do
+    workspace_settings = Config.settings!().workspace
+
+    case workspace_settings.skills_source do
+      empty when empty in [nil, ""] ->
+        :ok
+
+      _skills_source when is_binary(worker_host) ->
+        {:error, {:workspace_skills_remote_unsupported, worker_host}}
+
+      skills_source ->
+        copy_skills(workspace, issue_context, created?, skills_source, workspace_settings.skills_targets)
+    end
+  end
+
+  defp copy_skills(workspace, issue_context, created?, skills_source, targets) do
+    expanded_source = Path.expand(skills_source)
+
+    if File.dir?(expanded_source) do
+      copy_skill_targets(workspace, issue_context, created?, expanded_source, targets)
+    else
+      fail_skills_copy(
+        workspace,
+        issue_context,
+        created?,
+        {:error, {:workspace_skills_source_missing, expanded_source}}
+      )
+    end
+  end
+
+  # One `Git.tracked_paths/3` probe per copy operation (not per target).
+  # `:not_a_git_repo` preserves the pre-repo-wins blind-copy behavior (empty
+  # tracked set, exclude file skipped entirely); a probe failure aborts the
+  # copy rather than risking a blind clobber over a repo git couldn't read.
+  defp copy_skill_targets(workspace, issue_context, created?, expanded_source, targets) do
+    case Git.tracked_paths(workspace, targets) do
+      :not_a_git_repo ->
+        apply_skill_targets(workspace, issue_context, created?, expanded_source, targets, [], nil)
+
+      {:ok, %{paths: tracked_paths, exclude_file: exclude_file}} ->
+        apply_skill_targets(workspace, issue_context, created?, expanded_source, targets, tracked_paths, exclude_file)
+
+      {:error, reason} ->
+        fail_skills_copy(
+          workspace,
+          issue_context,
+          created?,
+          {:error, {:workspace_skills_git_probe_failed, reason}}
+        )
+    end
+  end
+
+  defp apply_skill_targets(workspace, issue_context, created?, expanded_source, targets, tracked_paths, exclude_file) do
+    with {:ok, canonical_workspace} <- PathSafety.canonicalize(workspace),
+         ctx = %{
+           canonical_workspace: canonical_workspace,
+           workspace: workspace,
+           expanded_source: expanded_source,
+           entries: File.ls!(expanded_source)
+         },
+         {:ok, exclude_targets, skipped} <- reduce_skill_targets(ctx, targets, tracked_paths) do
+      if exclude_file, do: ensure_skills_git_exclude(exclude_file, exclude_targets)
+      log_skills_copy(issue_context, expanded_source, targets, skipped)
+      :ok
+    else
+      {:error, reason} -> fail_skills_copy(workspace, issue_context, created?, {:error, reason})
+    end
+  end
+
+  # Repo-wins, additive copy per target: a target the repo tracks as a blob
+  # or symlink (e.g. a committed `.claude/skills` symlink) is skipped
+  # entirely — nothing is created or written through it. Otherwise, each
+  # top-level entry of `expanded_source` is copied in unless the repo
+  # already tracks something at that name under `target`, in which case the
+  # repo's version wins and the entry is left untouched. Accumulates the
+  # exclude-worthy (normalized) targets and skip labels directly, in one pass.
+  defp reduce_skill_targets(ctx, targets, tracked_paths) do
+    targets
+    |> Enum.reduce_while({:ok, [], []}, fn target, {:ok, exclude_targets, skipped} ->
+      normalized = String.trim_trailing(target, "/")
+
+      case copy_skill_target(ctx, target, normalized, tracked_paths) do
+        {:ok, :skipped_target} ->
+          {:cont, {:ok, exclude_targets, [normalized | skipped]}}
+
+        {:ok, {:copied, skipped_entries}} ->
+          {:cont, {:ok, [normalized | exclude_targets], skipped_entries ++ skipped}}
+
+        {:error, _reason} = error ->
+          {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, exclude_targets, skipped} -> {:ok, Enum.reverse(exclude_targets), Enum.reverse(skipped)}
+      error -> error
+    end
+  end
+
+  defp copy_skill_target(ctx, target, normalized, tracked_paths) do
+    target_dir = Path.join(ctx.workspace, target)
+
+    with :ok <- validate_skills_target_path(ctx.canonical_workspace, target_dir) do
+      if target_tracked_as_blob?(tracked_paths, normalized) do
+        {:ok, :skipped_target}
+      else
+        File.mkdir_p!(target_dir)
+        tracked_top_level = tracked_top_level_entries(tracked_paths, normalized)
+
+        skipped_entries =
+          copy_skill_entries(ctx.entries, ctx.expanded_source, target_dir, normalized, tracked_top_level)
+
+        {:ok, {:copied, skipped_entries}}
+      end
+    end
+  end
+
+  defp target_tracked_as_blob?(tracked_paths, normalized_target) do
+    normalized_target in tracked_paths
+  end
+
+  defp tracked_top_level_entries(tracked_paths, normalized_target) do
+    prefix = normalized_target <> "/"
+
+    tracked_paths
+    |> Enum.filter(&String.starts_with?(&1, prefix))
+    |> Enum.map(fn path ->
+      path |> String.replace_prefix(prefix, "") |> String.split("/", parts: 2) |> List.first()
+    end)
+    |> Enum.uniq()
+    |> MapSet.new()
+  end
+
+  defp copy_skill_entries(entries, expanded_source, target_dir, normalized_target, tracked_top_level) do
+    entries
+    |> Enum.reduce([], fn name, skipped ->
+      if MapSet.member?(tracked_top_level, name) do
+        [Path.join(normalized_target, name) | skipped]
+      else
+        File.cp_r!(Path.join(expanded_source, name), Path.join(target_dir, name))
+        skipped
+      end
+    end)
+    |> Enum.reverse()
+  end
+
+  # Mirrors `validate_workspace_path/2`'s canonicalize-and-prefix-check style:
+  # the schema already rejects absolute/`..`/`~` target entries, so this is
+  # defense-in-depth against a symlinked workspace/target escaping the root.
+  # `canonical_workspace` is resolved once per operation by the caller.
+  defp validate_skills_target_path(canonical_workspace, target_dir) do
+    case PathSafety.canonicalize(target_dir) do
+      {:ok, canonical_target} ->
+        workspace_prefix = canonical_workspace <> "/"
+
+        if String.starts_with?(canonical_target <> "/", workspace_prefix) do
+          :ok
+        else
+          {:error, {:workspace_skills_target_escape, canonical_target, canonical_workspace}}
+        end
+
+      {:error, reason} ->
+        {:error, {:workspace_skills_target_unreadable, target_dir, reason}}
+    end
+  end
+
+  defp log_skills_copy(issue_context, expanded_source, targets, skipped) do
+    suffix = if skipped == [], do: "", else: " skipped=#{Enum.join(skipped, ",")}"
+
+    Logger.info(
+      "Workspace skills copied #{issue_log_context(issue_context)} skills_source=#{expanded_source} targets=#{Enum.join(targets, ",")}" <>
+        suffix
+    )
+  end
+
+  defp fail_skills_copy(_workspace, _issue_context, false, error), do: error
+
+  defp fail_skills_copy(workspace, issue_context, true, {:error, reason} = error) do
+    remove_created_workspace_after_failure(workspace, issue_context, nil, "skills copy", reason)
+    error
+  end
+
+  # Keeps the copied skill files out of `git status`/`git add -A`/Symphony's
+  # WIP-preservation commits without touching files the cloned repo tracks
+  # under the same directories. Idempotent: appends each `/<target>/` line at
+  # most once. `exclude_file` is the git-resolved `info/exclude` path from
+  # `Git.tracked_paths/3` — correct for worktree/`--separate-git-dir` layouts
+  # where `.git` is a file, unlike a hand-built `<workspace>/.git/info/exclude`.
+  defp ensure_skills_git_exclude(exclude_file, targets) do
+    File.mkdir_p!(Path.dirname(exclude_file))
+
+    existing =
+      case File.read(exclude_file) do
+        {:ok, content} -> content
+        {:error, _reason} -> ""
+      end
+
+    existing_lines = String.split(existing, "\n")
+
+    missing_lines =
+      targets
+      |> Enum.map(&("/" <> &1 <> "/"))
+      |> Enum.uniq()
+      |> Enum.reject(&(&1 in existing_lines))
+
+    case missing_lines do
+      [] ->
+        :ok
+
+      _ ->
+        separator = if existing == "" or String.ends_with?(existing, "\n"), do: "", else: "\n"
+        File.write!(exclude_file, existing <> separator <> Enum.join(missing_lines, "\n") <> "\n")
+    end
   end
 
   defp maybe_run_before_remove_hook(workspace, nil) do
