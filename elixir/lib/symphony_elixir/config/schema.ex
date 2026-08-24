@@ -848,6 +848,13 @@ defmodule SymphonyElixir.Config.Schema do
     use Ecto.Schema
     import Ecto.Changeset
 
+    # `dashboard_enabled: true` (the default) is necessary but not sufficient —
+    # SymphonyElixir.StatusDashboard also gates terminal rendering on stdout
+    # actually being a tty (`:prim_tty.isatty/1`), so a detached daemon whose
+    # stdout is redirected to a file (`make start`'s `nohup ... > symphony.out`)
+    # no longer appends an unbounded ~1 Hz ANSI clear+repaint frame to that
+    # file. There is currently no way to force frames back on for a redirected
+    # stream even with `dashboard_enabled: true` — the tty check always wins.
     @primary_key false
     embedded_schema do
       field(:dashboard_enabled, :boolean, default: true)

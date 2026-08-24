@@ -1182,8 +1182,97 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         assert :ok = StatusDashboard.render_offline_status()
       end)
 
+    # `render_offline_status/0` now gates on the real `:prim_tty.isatty/1`
+    # check against this OS process's actual stdout, which ExUnit.CaptureIO
+    # doesn't replace (it only swaps the group leader) — so whether a frame
+    # is written depends on whether the test runner's real stdout is a tty.
+    # Compute the same expectation the production code does, rather than
+    # hard-coding either outcome.
+    if ambient_stdout_tty?() do
+      assert rendered =~ "app_status=offline"
+      refute rendered =~ "Timestamp:"
+    else
+      assert rendered == ""
+    end
+  end
+
+  test "status dashboard skips offline marker when stdout is not a tty" do
+    rendered =
+      ExUnit.CaptureIO.capture_io(fn ->
+        assert :ok = StatusDashboard.render_offline_status(tty_probe: fn -> false end)
+      end)
+
+    assert rendered == ""
+  end
+
+  test "status dashboard renders offline marker when stdout is a tty" do
+    rendered =
+      ExUnit.CaptureIO.capture_io(fn ->
+        assert :ok = StatusDashboard.render_offline_status(tty_probe: fn -> true end)
+      end)
+
     assert rendered =~ "app_status=offline"
-    refute rendered =~ "Timestamp:"
+  end
+
+  test "status dashboard tty probe defensively falls back to enabled" do
+    # A real `false` from the probe disables rendering...
+    refute StatusDashboard.tty_enabled_for_test(false)
+    # ...but a real `true` enables it...
+    assert StatusDashboard.tty_enabled_for_test(true)
+    # ...and anything else (:ebadf, a raised error, an unexpected value) must
+    # fall back to "enabled" rather than silently going dark.
+    assert StatusDashboard.tty_enabled_for_test(:ebadf)
+    assert StatusDashboard.tty_enabled_for_test(:anything_unexpected)
+  end
+
+  test "status dashboard tty probe wrapper survives a raising or throwing probe" do
+    assert StatusDashboard.terminal_tty_for_test(fn -> raise "boom" end)
+    assert StatusDashboard.terminal_tty_for_test(fn -> throw(:boom) end)
+    assert StatusDashboard.terminal_tty_for_test(fn -> true end)
+    refute StatusDashboard.terminal_tty_for_test(fn -> false end)
+    assert StatusDashboard.terminal_tty_for_test(fn -> :ebadf end)
+  end
+
+  test "status dashboard init folds the injected tty probe into enable resolution" do
+    dashboard_name = Module.concat(__MODULE__, :ProbeCallDashboard)
+    parent = self()
+
+    {:ok, pid} =
+      StatusDashboard.start_link(
+        name: dashboard_name,
+        tty_probe: fn ->
+          send(parent, :tty_probe_called)
+          false
+        end
+      )
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    # Before the fix, `init/1` never reads `opts[:tty_probe]` at all, so this
+    # never fires. After the fix, it's folded into the same `and`-chain that
+    # already gates on `observability.dashboard_enabled` and `dashboard_enabled?/0`.
+    assert_receive :tty_probe_called, 500
+  end
+
+  test "status dashboard init: explicit enabled override wins over a no-tty probe" do
+    dashboard_name = Module.concat(__MODULE__, :OverrideWinsDashboard)
+
+    {:ok, pid} =
+      StatusDashboard.start_link(
+        name: dashboard_name,
+        enabled: true,
+        tty_probe: fn -> false end,
+        render_fun: fn _content -> :ok end
+      )
+
+    on_exit(fn ->
+      if Process.alive?(pid), do: Process.exit(pid, :normal)
+    end)
+
+    state = :sys.get_state(pid)
+    assert state.enabled
   end
 
   test "status dashboard renders linear project link in header" do
@@ -2244,9 +2333,17 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
         assert :ok = SymphonyElixir.Application.stop(:normal)
       end)
 
-    assert rendered =~ "app_status=offline"
-    refute rendered =~ "Timestamp:"
+    # Same ambient-tty caveat as "status dashboard renders offline marker to
+    # terminal" above — Application.stop/1 calls the real render_offline_status/0.
+    if ambient_stdout_tty?() do
+      assert rendered =~ "app_status=offline"
+      refute rendered =~ "Timestamp:"
+    else
+      assert rendered == ""
+    end
   end
+
+  defp ambient_stdout_tty?, do: StatusDashboard.terminal_tty_for_test(fn -> :prim_tty.isatty(:stdout) end)
 
   defp send_claude_turn_completed(pid, issue_id, usage) when is_map(usage) do
     send(
