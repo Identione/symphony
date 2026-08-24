@@ -850,7 +850,11 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
-      field(:dashboard_enabled, :boolean, default: true)
+      # Unset by default (nil) so the runtime can distinguish "explicitly enabled"
+      # from "not configured". An explicit true/false wins; nil defers to a
+      # terminal-capability probe so a daemonized instance whose stdout is a
+      # redirected file does not accumulate ANSI redraw frames (IDE-307).
+      field(:dashboard_enabled, :boolean, default: nil)
       field(:refresh_ms, :integer, default: 1_000)
       field(:render_interval_ms, :integer, default: 16)
     end

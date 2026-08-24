@@ -1176,14 +1176,23 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
            } = state.blocked[issue_id]
   end
 
-  test "status dashboard renders offline marker to terminal" do
+  test "status dashboard renders offline marker to terminal when stdout is a terminal" do
     rendered =
       ExUnit.CaptureIO.capture_io(fn ->
-        assert :ok = StatusDashboard.render_offline_status()
+        assert :ok = StatusDashboard.render_offline_status(terminal_capable: fn -> true end)
       end)
 
     assert rendered =~ "app_status=offline"
     refute rendered =~ "Timestamp:"
+  end
+
+  test "status dashboard suppresses offline marker when stdout is not a terminal" do
+    rendered =
+      ExUnit.CaptureIO.capture_io(fn ->
+        assert :ok = StatusDashboard.render_offline_status(terminal_capable: fn -> false end)
+      end)
+
+    refute rendered =~ "app_status=offline"
   end
 
   test "status dashboard renders linear project link in header" do
@@ -2238,14 +2247,16 @@ defmodule SymphonyElixir.OrchestratorStatusTest do
     assert StatusDashboard.humanize_codex_message(fallback_reasoning) == "reasoning update"
   end
 
-  test "application stop renders offline status" do
+  test "application stop suppresses offline status when stdout is not a terminal" do
+    # Under the ExUnit suite (and any daemonized instance whose stdout is a
+    # redirected file), the offline marker is gated off so no ANSI is written
+    # to a non-terminal stdout (IDE-307).
     rendered =
       ExUnit.CaptureIO.capture_io(fn ->
         assert :ok = SymphonyElixir.Application.stop(:normal)
       end)
 
-    assert rendered =~ "app_status=offline"
-    refute rendered =~ "Timestamp:"
+    refute rendered =~ "app_status=offline"
   end
 
   defp send_claude_turn_completed(pid, issue_id, usage) when is_map(usage) do

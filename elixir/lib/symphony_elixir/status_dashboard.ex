@@ -47,6 +47,7 @@ defmodule SymphonyElixir.StatusDashboard do
     :enabled_override,
     :render_interval_ms_override,
     :render_fun,
+    :terminal_capable_fun,
     :token_samples,
     :last_tps_second,
     :last_tps_value,
@@ -65,6 +66,7 @@ defmodule SymphonyElixir.StatusDashboard do
           enabled_override: boolean() | nil,
           render_interval_ms_override: pos_integer() | nil,
           render_fun: (String.t() -> term()),
+          terminal_capable_fun: (-> boolean()),
           token_samples: [{integer(), integer()}],
           last_tps_second: integer() | nil,
           last_tps_value: float() | nil,
@@ -104,7 +106,14 @@ defmodule SymphonyElixir.StatusDashboard do
     refresh_ms = refresh_ms_override || observability.refresh_ms
     render_interval_ms = render_interval_ms_override || observability.render_interval_ms
     render_fun = Keyword.get(opts, :render_fun, &render_to_terminal/1)
-    enabled = resolve_override(enabled_override, observability.dashboard_enabled and dashboard_enabled?())
+    terminal_capable_fun = Keyword.get(opts, :terminal_capable, &default_terminal_capable?/0)
+
+    enabled =
+      resolve_override(
+        enabled_override,
+        compute_enabled(observability.dashboard_enabled, terminal_capable_fun)
+      )
+
     schedule_tick(refresh_ms, enabled)
 
     {:ok,
@@ -116,6 +125,7 @@ defmodule SymphonyElixir.StatusDashboard do
        enabled_override: enabled_override,
        render_interval_ms_override: render_interval_ms_override,
        render_fun: render_fun,
+       terminal_capable_fun: terminal_capable_fun,
        token_samples: [],
        last_tps_second: nil,
        last_tps_value: nil,
@@ -127,17 +137,24 @@ defmodule SymphonyElixir.StatusDashboard do
      }}
   end
 
-  @spec render_offline_status() :: :ok
-  def render_offline_status do
-    content =
-      [
-        colorize("╭─ SYMPHONY STATUS", @ansi_bold),
-        colorize("│ app_status=offline", @ansi_red),
-        closing_border()
-      ]
-      |> Enum.join("\n")
+  @spec render_offline_status(keyword()) :: :ok
+  def render_offline_status(opts \\ []) do
+    terminal_capable_fun = Keyword.get(opts, :terminal_capable, &default_terminal_capable?/0)
+    render_fun = Keyword.get(opts, :render_fun, &render_to_terminal/1)
+    dashboard_enabled = Config.settings!().observability.dashboard_enabled
 
-    render_to_terminal(content)
+    if compute_enabled(dashboard_enabled, terminal_capable_fun) do
+      content =
+        [
+          colorize("╭─ SYMPHONY STATUS", @ansi_bold),
+          colorize("│ app_status=offline", @ansi_red),
+          closing_border()
+        ]
+        |> Enum.join("\n")
+
+      render_fun.(content)
+    end
+
     :ok
   rescue
     error in [ArgumentError, RuntimeError] ->
@@ -182,7 +199,11 @@ defmodule SymphonyElixir.StatusDashboard do
 
     %{
       state
-      | enabled: resolve_override(state.enabled_override, observability.dashboard_enabled and dashboard_enabled?()),
+      | enabled:
+          resolve_override(
+            state.enabled_override,
+            compute_enabled(observability.dashboard_enabled, state.terminal_capable_fun)
+          ),
         refresh_ms: state.refresh_ms_override || observability.refresh_ms,
         render_interval_ms: state.render_interval_ms_override || observability.render_interval_ms
     }
@@ -2115,6 +2136,27 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp truncate(value, _max), do: value
+
+  @doc false
+  # Resolve automatic dashboard enablement from the configured flag and a
+  # terminal-capability probe. `false` disables and `true` enables
+  # unconditionally (explicit config wins over TTY detection); when the flag is
+  # unset (`nil`) the probe decides, so a daemonized instance whose stdout is a
+  # redirected file leaves the full-screen renderer off (IDE-307).
+  @spec compute_enabled(boolean() | nil, (-> boolean())) :: boolean()
+  def compute_enabled(false, _terminal_capable_fun), do: false
+  def compute_enabled(true, _terminal_capable_fun), do: true
+  def compute_enabled(nil, terminal_capable_fun), do: terminal_capable_fun.() == true
+
+  # Default terminal-capability probe. Two conditions must hold to auto-enable
+  # the full-screen dashboard: we must not be inside the ExUnit suite (so
+  # captured test output is never corrupted by ANSI frames), and stdout must be
+  # an interactive terminal. `:io.columns/0` returns `{:ok, _}` only for a TTY;
+  # a redirected file yields `{:error, :enotsup}`. Tests inject their own probe
+  # via the `:terminal_capable` option to exercise the gate deterministically.
+  defp default_terminal_capable? do
+    dashboard_enabled?() and match?({:ok, _}, :io.columns())
+  end
 
   defp dashboard_enabled? do
     if Code.ensure_loaded?(Mix) and function_exported?(Mix, :env, 0) do

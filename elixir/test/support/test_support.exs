@@ -141,7 +141,7 @@ defmodule SymphonyElixir.TestSupport do
           hook_after_run: nil,
           hook_before_remove: nil,
           hook_timeout_ms: 60_000,
-          observability_enabled: true,
+          observability_enabled: nil,
           observability_refresh_ms: 1_000,
           observability_render_interval_ms: 16,
           server_port: nil,
@@ -333,10 +333,14 @@ defmodule SymphonyElixir.TestSupport do
   defp observability_yaml(enabled, refresh_ms, render_interval_ms) do
     [
       "observability:",
-      "  dashboard_enabled: #{yaml_value(enabled)}",
+      # Omit the line entirely when unset so the schema default (nil) applies —
+      # `dashboard_enabled: null` and an absent key both parse to nil, but
+      # leaving the key out keeps fixtures closer to a real WORKFLOW.md.
+      enabled != nil && "  dashboard_enabled: #{yaml_value(enabled)}",
       "  refresh_ms: #{yaml_value(refresh_ms)}",
       "  render_interval_ms: #{yaml_value(render_interval_ms)}"
     ]
+    |> Enum.reject(&(&1 in [nil, false]))
     |> Enum.join("\n")
   end
 
