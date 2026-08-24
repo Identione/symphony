@@ -936,6 +936,64 @@ defmodule SymphonyElixir.CLI.InitTest do
     assert flattened =~ ~r/^\.PHONY:.*\b_upgrade-restart-if-running\b/m
   end
 
+  test "--instance-makefile stop target re-checks after SIGKILL and keeps the pid file on failure" do
+    deps = capture_deps()
+    workflow_out = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+
+    makefile_out =
+      Path.join(System.tmp_dir!(), "Makefile-init-#{System.unique_integer([:positive])}")
+
+    on_exit(fn ->
+      File.rm(workflow_out)
+      File.rm(makefile_out)
+    end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--output",
+                 workflow_out,
+                 "--instance-makefile",
+                 makefile_out,
+                 "--instance-name",
+                 "repo-a"
+               ],
+               deps
+             )
+
+    assert_received {:write, ^workflow_out, _workflow_contents}
+    assert_received {:write, ^makefile_out, makefile_contents}
+
+    [_before, stop_and_after] = String.split(makefile_contents, ~r/^stop:.*$/m, parts: 2)
+    [stop_body, _rest] = String.split(stop_and_after, ~r/^_reap-orphans:/m, parts: 2)
+
+    # After `kill -9`, the target must pause and re-check liveness rather than
+    # assuming the SIGKILL landed.
+    assert stop_body =~ "kill -9 $$PID"
+    assert stop_body =~ ~r/kill -9 \$\$PID;.*\n.*sleep 1;/
+    assert stop_body =~ "kill -0 $$PID 2>/dev/null"
+
+    # A survivor must be reported loudly, in red, naming the pid and the fact
+    # that the pid file is being kept — then the recipe must fail so the
+    # unconditional `rm -f $(PID_FILE)` below never runs.
+    assert stop_body =~ "$(RED)"
+    assert stop_body =~ "$$PID"
+    assert stop_body =~ "$(PID_FILE)"
+    assert stop_body =~ ~r/exit 1;/
+
+    # Untouched branches: the two pre-existing else-branches survive byte for
+    # byte, and the trailing reap + unconditional rm -f are still there for
+    # the success path.
+    assert makefile_contents =~ "pid $$PID not running"
+    assert makefile_contents =~ "no pid file at $(PID_FILE)"
+    assert makefile_contents =~ "_reap-orphans"
+    assert makefile_contents =~ ~r/^\t@rm -f \$\(PID_FILE\)$/m
+  end
+
   test "--instance-makefile without --instance-name is rejected" do
     workflow_out = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
 

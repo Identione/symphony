@@ -2153,6 +2153,12 @@ implementation-defined.
 If present, it SHOULD draw from orchestrator state/metrics only and MUST NOT be REQUIRED for
 correctness.
 
+A terminal-rendering status surface SHOULD detect whether its output stream is an actual terminal
+and skip rendering when it is not (for example when a daemon is launched detached with stdout
+redirected to a file), to avoid appending unbounded ANSI clear/repaint frames to a log. The
+detection SHOULD fail open (treat the stream as a terminal) when the check itself is unavailable or
+inconclusive, rather than silently disabling the status surface.
+
 ### 13.5 Session Metrics and Token Accounting
 
 Token accounting rules:

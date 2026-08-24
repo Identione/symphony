@@ -47,6 +47,7 @@ defmodule SymphonyElixir.StatusDashboard do
     :enabled_override,
     :render_interval_ms_override,
     :render_fun,
+    :tty_probe,
     :token_samples,
     :last_tps_second,
     :last_tps_value,
@@ -65,6 +66,7 @@ defmodule SymphonyElixir.StatusDashboard do
           enabled_override: boolean() | nil,
           render_interval_ms_override: pos_integer() | nil,
           render_fun: (String.t() -> term()),
+          tty_probe: (-> term()),
           token_samples: [{integer(), integer()}],
           last_tps_second: integer() | nil,
           last_tps_value: float() | nil,
@@ -104,7 +106,19 @@ defmodule SymphonyElixir.StatusDashboard do
     refresh_ms = refresh_ms_override || observability.refresh_ms
     render_interval_ms = render_interval_ms_override || observability.render_interval_ms
     render_fun = Keyword.get(opts, :render_fun, &render_to_terminal/1)
-    enabled = resolve_override(enabled_override, observability.dashboard_enabled and dashboard_enabled?())
+    tty_probe = Keyword.get(opts, :tty_probe, &default_tty_probe/0)
+
+    # `dashboard_enabled?/0` is deliberately last in this `and`-chain: Elixir's
+    # `and` short-circuits left-to-right, and `dashboard_enabled?/0` is always
+    # `false` under `Mix.env() == :test`. Evaluating `terminal_tty?/1` first
+    # keeps the tty probe genuinely exercised under test, instead of being
+    # skipped every time by the test-env short circuit.
+    enabled =
+      resolve_override(
+        enabled_override,
+        observability.dashboard_enabled and terminal_tty?(tty_probe) and dashboard_enabled?()
+      )
+
     schedule_tick(refresh_ms, enabled)
 
     {:ok,
@@ -116,6 +130,7 @@ defmodule SymphonyElixir.StatusDashboard do
        enabled_override: enabled_override,
        render_interval_ms_override: render_interval_ms_override,
        render_fun: render_fun,
+       tty_probe: tty_probe,
        token_samples: [],
        last_tps_second: nil,
        last_tps_value: nil,
@@ -128,16 +143,29 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   @spec render_offline_status() :: :ok
-  def render_offline_status do
-    content =
-      [
-        colorize("╭─ SYMPHONY STATUS", @ansi_bold),
-        colorize("│ app_status=offline", @ansi_red),
-        closing_border()
-      ]
-      |> Enum.join("\n")
+  def render_offline_status, do: render_offline_status_impl(&default_tty_probe/0)
 
-    render_to_terminal(content)
+  # `render_offline_status/0` runs outside any GenServer state (it's called
+  # from `Application.stop/1`), so it has no `enabled`/`tty_probe` to read.
+  # Gate it directly on the same defensive tty check the state-based path
+  # uses, so a detached daemon's shutdown doesn't also append an ANSI frame.
+  @doc false
+  @spec render_offline_status_for_test((-> term())) :: :ok
+  def render_offline_status_for_test(tty_probe), do: render_offline_status_impl(tty_probe)
+
+  defp render_offline_status_impl(tty_probe) do
+    if terminal_tty?(tty_probe) do
+      content =
+        [
+          colorize("╭─ SYMPHONY STATUS", @ansi_bold),
+          colorize("│ app_status=offline", @ansi_red),
+          closing_border()
+        ]
+        |> Enum.join("\n")
+
+      render_to_terminal(content)
+    end
+
     :ok
   rescue
     error in [ArgumentError, RuntimeError] ->
@@ -182,7 +210,11 @@ defmodule SymphonyElixir.StatusDashboard do
 
     %{
       state
-      | enabled: resolve_override(state.enabled_override, observability.dashboard_enabled and dashboard_enabled?()),
+      | enabled:
+          resolve_override(
+            state.enabled_override,
+            observability.dashboard_enabled and terminal_tty?(state.tty_probe) and dashboard_enabled?()
+          ),
         refresh_ms: state.refresh_ms_override || observability.refresh_ms,
         render_interval_ms: state.render_interval_ms_override || observability.render_interval_ms
     }
@@ -2127,6 +2159,40 @@ defmodule SymphonyElixir.StatusDashboard do
       true
     end
   end
+
+  # Real probe used everywhere except tests: `:prim_tty.isatty/1` is available
+  # on this toolchain's Erlang 28 and reports whether the given standard
+  # stream is an actual terminal. Under a detached daemon (`nohup ... >
+  # symphony.out 2>&1 &`) stdout is a plain file, so this reports `false` and
+  # the ~1 Hz ANSI clear+repaint frame stops going into the redirected log.
+  defp default_tty_probe, do: :prim_tty.isatty(:stdout)
+
+  # Wraps a probe call defensively: any raise/throw, or any result other than
+  # a real `true`/`false` (the probe can return `:ebadf`), falls back to
+  # "enabled" rather than silently going dark. Only an explicit `false` from
+  # the probe disables rendering.
+  defp terminal_tty?(probe_fun) do
+    try do
+      probe_fun.()
+    rescue
+      _ -> :probe_error
+    catch
+      _kind, _reason -> :probe_error
+    end
+    |> tty_enabled?()
+  end
+
+  defp tty_enabled?(true), do: true
+  defp tty_enabled?(false), do: false
+  defp tty_enabled?(_other), do: true
+
+  @doc false
+  @spec terminal_tty_for_test((-> term())) :: boolean()
+  def terminal_tty_for_test(probe_fun), do: terminal_tty?(probe_fun)
+
+  @doc false
+  @spec tty_enabled_for_test(term()) :: boolean()
+  def tty_enabled_for_test(probe_result), do: tty_enabled?(probe_result)
 
   defp keyword_override(opts, key) do
     if Keyword.has_key?(opts, key), do: Keyword.fetch!(opts, key), else: nil
