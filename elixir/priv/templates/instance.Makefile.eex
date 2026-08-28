@@ -77,6 +77,11 @@ stop: ## Stop the daemon (graceful, then SIGKILL after 10s).
 	    if kill -0 $$PID 2>/dev/null; then \
 	      echo "$(YELLOW)didn't exit gracefully; SIGKILL$(RESET)"; \
 	      kill -9 $$PID; \
+	      sleep 1; \
+	      if kill -0 $$PID 2>/dev/null; then \
+	        echo "$(RED)error:$(RESET) pid $$PID survived SIGKILL; keeping $(PID_FILE)"; \
+	        exit 1; \
+	      fi; \
 	    fi; \
 	  else \
 	    echo "$(DIM)pid $$PID not running$(RESET)"; \
@@ -112,6 +117,10 @@ _reap-orphans:
 	  kill -0 $$p 2>/dev/null && kill -9 $$p 2>/dev/null || true; \
 	done
 
+# `stop` exits non-zero (keeping $(PID_FILE)) if the daemon survives SIGKILL,
+# so `restart` aborts before `start` in that case — intentional: starting a
+# second instance while the old one still holds the pid file and dashboard
+# port would be worse than a `restart` that stops short.
 restart: stop start ## Stop, then start.
 
 upgrade: ## Rebuild escript at $(ROOT) and restart this daemon (only if running).

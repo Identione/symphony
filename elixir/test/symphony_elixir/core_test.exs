@@ -830,22 +830,24 @@ defmodule SymphonyElixir.CoreTest do
       labels: []
     }
 
+    # The condensed body folds the old `## PR feedback sweep protocol`,
+    # `## Completion bar`, `## Rework`, and `## Workpad template` sections into
+    # numbered Execution-flow steps, so assert on the step text rather than on
+    # headings that no longer exist. The gating property under test is unchanged.
     merging = PromptBuilder.build_prompt(%{base | state: "Merging"})
     refute merging =~ "## Execution flow"
-    refute merging =~ "## PR feedback sweep protocol"
-    refute merging =~ "## Completion bar before Human Review"
-    refute merging =~ "## Rework"
-    refute merging =~ "## Workpad template"
+    refute merging =~ "PR feedback sweep (required whenever a PR is attached)"
+    refute merging =~ "Workpad: search active comments"
+    refute merging =~ "Hand off: finalize the workpad"
     assert merging =~ "## State routing"
     assert merging =~ "## Waiting and blocked"
     assert merging =~ "Current status: Merging"
 
     in_progress = PromptBuilder.build_prompt(%{base | state: "In Progress"})
     assert in_progress =~ "## Execution flow"
-    assert in_progress =~ "## PR feedback sweep protocol"
-    assert in_progress =~ "## Completion bar before Human Review"
-    assert in_progress =~ "## Rework"
-    assert in_progress =~ "## Workpad template"
+    assert in_progress =~ "PR feedback sweep (required whenever a PR is attached)"
+    assert in_progress =~ "Workpad: search active comments"
+    assert in_progress =~ "Hand off: finalize the workpad"
   end
 
   test "prompt builder renders issue datetime fields without crashing" do
@@ -1027,11 +1029,11 @@ defmodule SymphonyElixir.CoreTest do
     assert prompt =~ "Title: Use rich templates for WORKFLOW.md"
     assert prompt =~ "Current status: In Progress"
     assert prompt =~ "https://example.org/issues/MT-616/use-rich-templates-for-workflowmd"
-    assert prompt =~ "This is an unattended orchestration session."
-    assert prompt =~ "Only stop early for a true blocker"
-    assert prompt =~ "Do not include \"next steps for user\""
+    assert prompt =~ "This is an unattended orchestration session:"
+    assert prompt =~ "never ask a human for follow-up"
+    assert prompt =~ "report completed actions and blockers only"
     assert prompt =~ "open and follow `.codex/skills/land/SKILL.md`"
-    assert prompt =~ "Do not call `gh pr merge` directly"
+    assert prompt =~ "never `gh pr merge` directly"
     assert prompt =~ "Continuation context:"
     assert prompt =~ "retry attempt #2"
   end
@@ -1156,6 +1158,22 @@ defmodule SymphonyElixir.CoreTest do
           refute String.contains?(with_guard, "/simplify"),
                  "codex render must not mention /simplify"
 
+          # The condensed body carries three claude-only guards. Codex has none
+          # of these tools, and the Delegation section is phrased as mandatory
+          # ("almost all repository work MUST run ... via the `Agent` tool"), so
+          # leaking it would instruct a codex session to call a tool it does not
+          # have.
+          for claude_only <- [
+                "## Delegation",
+                "`Agent` tool",
+                "subagent_type",
+                "TaskCreate",
+                "/code-review"
+              ] do
+            refute String.contains?(with_guard, claude_only),
+                   "codex render must not contain claude-only material: #{claude_only}"
+          end
+
         "claude" ->
           refute with_guard == without_guard,
                  "claude render should change when the simplify guard block is removed"
@@ -1165,6 +1183,11 @@ defmodule SymphonyElixir.CoreTest do
 
           refute String.contains?(without_guard, "/simplify"),
                  "render without the guard block must not contain /simplify"
+
+          for claude_only <- ["## Delegation", "`Agent` tool", "TaskCreate", "/code-review"] do
+            assert String.contains?(with_guard, claude_only),
+                   "claude render should contain #{claude_only}"
+          end
       end
     end
   end
