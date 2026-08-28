@@ -4,7 +4,7 @@ tracker:
   api_key: $LINEAR_API_KEY
   project_slug: <%= @project_slug %>
   assignee: "me"
-  active_states:
+<%= @label_block %>  active_states:
     - Todo
     - In Progress
     - Merging

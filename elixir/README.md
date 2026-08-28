@@ -141,6 +141,12 @@ raw CLI surface the Makefile rules call.
 - `--instance-makefile <PATH>` / `--instance-name <NAME>` — render the
   per-instance Makefile alongside the workflow. The root `make init`
   target uses these under the hood.
+- `--require-label <NAME>` / `--exclude-label <NAME>` — repeatable; set
+  `tracker.required_labels` / `tracker.excluded_labels`. Matching is
+  case-insensitive. Omit both for no label gating (the default). The same
+  label in both lists is rejected — it gates every issue out, so the daemon
+  would poll forever and dispatch nothing. Whichever list you leave empty is
+  written as a commented example, so the other half stays discoverable.
 - `--force` — overwrite existing output(s). Gates both files together.
 
 ## WORKFLOW.md
@@ -194,7 +200,8 @@ repo:
   dispatch by Linear label, case-insensitively. An issue is picked up only
   if it carries *every* `required_labels` entry and *none* of the
   `excluded_labels` entries; an excluded label always disqualifies. Leave
-  both empty to disable label gating.
+  both empty to disable label gating. `symphony init --require-label <name>`
+  / `--exclude-label <name>` set these (repeatable; see `init` flags above).
 - `~` and `$VAR` are expanded in path values (except `codex.command`,
   which is a shell command string — `$VAR` expands at exec time there).
 - If `WORKFLOW.md` is missing or invalid at boot, Symphony refuses to
