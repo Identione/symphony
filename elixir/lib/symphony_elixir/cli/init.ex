@@ -19,7 +19,9 @@ defmodule SymphonyElixir.CLI.Init do
     port: :integer,
     host: :string,
     instance_makefile: :string,
-    instance_name: :string
+    instance_name: :string,
+    require_label: [:string, :keep],
+    exclude_label: [:string, :keep]
   ]
 
   @aliases [o: :output, f: :force]
@@ -133,6 +135,8 @@ defmodule SymphonyElixir.CLI.Init do
       [--host <ADDR>] \\
       [--instance-makefile <PATH>] \\
       [--instance-name <NAME>] \\
+      [--require-label <NAME>]... \\
+      [--exclude-label <NAME>]... \\
       [--force]
 
       --linear-project   Linear project URL (https://linear.app/<org>/project/<slug>)
@@ -165,6 +169,11 @@ defmodule SymphonyElixir.CLI.Init do
                          are gated together by --force.
       --instance-name    Slug for the instance Makefile (path-safe:
                          A-Za-z0-9_.- only; no leading dot, no '..').
+      --require-label    Only dispatch issues carrying this label. Repeatable;
+                         an issue must carry every given label. Matching is
+                         case-insensitive. Omit for no gating.
+      --exclude-label    Never dispatch issues carrying this label. Repeatable.
+                         Matching is case-insensitive. Omit for no gating.
       --force            Overwrite existing output file(s).
     """
   end
@@ -192,6 +201,9 @@ defmodule SymphonyElixir.CLI.Init do
          {:ok, base_branch} <- validate_base_branch(Keyword.get(opts, :base_branch)),
          {:ok, port} <- validate_port(Keyword.get(opts, :port)),
          {:ok, host} <- validate_host(Keyword.get(opts, :host), port),
+         {:ok, required_labels} <- validate_labels(opts, :require_label),
+         {:ok, excluded_labels} <- validate_labels(opts, :exclude_label),
+         :ok <- ensure_labels_disjoint(required_labels, excluded_labels),
          {:ok, instance} <- resolve_instance(opts),
          {:ok, output_path} <- output_path(opts),
          :ok <- ensure_overwrite_allowed(output_path, force?, deps),
@@ -209,7 +221,9 @@ defmodule SymphonyElixir.CLI.Init do
              workspace_root: workspace_root,
              base_branch: base_branch,
              port: port,
-             host: host
+             host: host,
+             required_labels: required_labels,
+             excluded_labels: excluded_labels
            }),
          instance_makefile_content <-
            render_instance_makefile(instance_template, instance),
@@ -310,6 +324,83 @@ defmodule SymphonyElixir.CLI.Init do
          "--host must be a literal IPv4 or IPv6 address (got: #{inspect(value)})\n\n" <>
            usage_message()}
     end
+  end
+
+  # Collects every occurrence of `--require-label` / `--exclude-label` (kept
+  # via `[:string, :keep]` in @switches), trims each value, rejects
+  # empty/whitespace-only entries, and deduplicates case-insensitively while
+  # keeping the first-seen casing (matching downstream in the orchestrator's
+  # label gate is case-insensitive — see orchestrator.ex — so a caller who
+  # types the same label with different casing gets one entry, not a silent
+  # near-duplicate).
+  defp validate_labels(opts, key) do
+    opts
+    |> Keyword.get_values(key)
+    |> Enum.reduce_while({:ok, []}, fn value, {:ok, acc} ->
+      case validate_label(key, value) do
+        {:ok, trimmed} -> {:cont, {:ok, [trimmed | acc]}}
+        {:error, _} = error -> {:halt, error}
+      end
+    end)
+    |> case do
+      {:ok, values} -> {:ok, dedup_case_insensitive(Enum.reverse(values))}
+      {:error, _} = error -> error
+    end
+  end
+
+  defp validate_label(key, value) do
+    case String.trim(value) do
+      "" -> {:error, label_error(key)}
+      trimmed -> {:ok, trimmed}
+    end
+  end
+
+  # A label present in both lists makes the orchestrator's gate a contradiction:
+  # `issue_satisfies_label_filters?/1` asks for `subset?(required, present) and
+  # disjoint?(excluded, present)` over the *same* normalized label, which is
+  # never true. That would boot a daemon that polls forever and claims nothing,
+  # with no error to explain it — so reject it here, at generation time.
+  # Comparison mirrors `Orchestrator.normalize_label/1` (trim + downcase), the
+  # same normalization validate_labels/2 already dedups with.
+  defp ensure_labels_disjoint(required_labels, excluded_labels) do
+    excluded_keys = MapSet.new(excluded_labels, &normalize_label/1)
+
+    case Enum.filter(required_labels, &MapSet.member?(excluded_keys, normalize_label(&1))) do
+      [] ->
+        :ok
+
+      conflicting ->
+        {:error,
+         "--require-label and --exclude-label must not share a label " <>
+           "(#{Enum.map_join(conflicting, ", ", &inspect/1)}); " <>
+           "an issue can never carry and not carry the same label, so the " <>
+           "generated workflow would never dispatch anything\n\n" <> usage_message()}
+    end
+  end
+
+  defp label_error(:require_label) do
+    "--require-label must be a non-empty label name\n\n" <> usage_message()
+  end
+
+  defp label_error(:exclude_label) do
+    "--exclude-label must be a non-empty label name\n\n" <> usage_message()
+  end
+
+  defp normalize_label(value), do: value |> String.trim() |> String.downcase()
+
+  defp dedup_case_insensitive(values) do
+    values
+    |> Enum.reduce({[], MapSet.new()}, fn value, {acc, seen} ->
+      key = normalize_label(value)
+
+      if MapSet.member?(seen, key) do
+        {acc, seen}
+      else
+        {[value | acc], MapSet.put(seen, key)}
+      end
+    end)
+    |> elem(0)
+    |> Enum.reverse()
   end
 
   defp resolve_instance(opts) do
@@ -572,6 +663,11 @@ defmodule SymphonyElixir.CLI.Init do
     # exercised by tests that pass maps without `:base_branch`, so destructuring
     # it in the head would raise MatchError. nil → renders today's `origin/main`.
     base_branch = Map.get(params, :base_branch)
+    # Same reasoning as base_branch above: render_workflow/1 test callers pass
+    # maps without these keys, so Map.get (not the function head) with an
+    # empty-list default keeps those callers working unchanged.
+    required_labels = Map.get(params, :required_labels, [])
+    excluded_labels = Map.get(params, :excluded_labels, [])
 
     [
       project_slug: yaml_string(project_slug),
@@ -582,6 +678,7 @@ defmodule SymphonyElixir.CLI.Init do
       agent_kind: agent,
       agent_block: both_agent_blocks(),
       server_block: render_server_block(port, host),
+      label_block: render_label_block(required_labels, excluded_labels),
       # `base_branch` is nil unless `--base-branch` was given. The template uses
       # `@base_branch || "main"` for the inline `origin/<base>` refs (so nil
       # renders today's `origin/main`) and gates the issue-branch section / clone
@@ -627,6 +724,55 @@ defmodule SymphonyElixir.CLI.Init do
 
   defp render_server_block(port, host) when is_integer(port) and is_binary(host) do
     "server:\n  port: #{port}\n  host: #{yaml_string(host)}\n"
+  end
+
+  # Unlike render_server_block/2, this always renders *something* — even the
+  # no-flags case — so operators who never pass --require-label/--exclude-label
+  # still discover the label gate exists (SPEC.md §5.3.1 + §8.2) instead of the
+  # knob being invisible until they read the schema source.
+  defp render_label_block([], []) do
+    """
+      # Optional dispatch gate: only issues carrying every `required_labels` entry
+      # and none of the `excluded_labels` entries are picked up (case-insensitive;
+      # empty/omitted = no gating). SPEC.md 5.3.1 + 8.2. Set via
+      # `symphony init --require-label <name>` / `--exclude-label <name>`.
+      # required_labels:
+      #   - symphony
+      # excluded_labels:
+      #   - no-symphony
+    """
+  end
+
+  defp render_label_block(required_labels, excluded_labels) do
+    render_label_list("required_labels", required_labels) <>
+      render_label_list("excluded_labels", excluded_labels)
+  end
+
+  # Passing only one flag must not hide the other half of the gate — otherwise
+  # the same "knob stayed undiscovered" problem render_label_block/2's no-flags
+  # clause exists to prevent just moves to whichever list was left empty. An
+  # empty list therefore renders a commented stub, never nothing.
+  defp render_label_list("required_labels", []) do
+    """
+      # Add `required_labels` to also demand labels (an issue must carry every
+      # entry; case-insensitive). `symphony init --require-label <name>`.
+      # required_labels:
+      #   - symphony
+    """
+  end
+
+  defp render_label_list("excluded_labels", []) do
+    """
+      # Add `excluded_labels` to also skip labels (an issue carrying any entry is
+      # never picked up; case-insensitive). `symphony init --exclude-label <name>`.
+      # excluded_labels:
+      #   - no-symphony
+    """
+  end
+
+  defp render_label_list(key, labels) do
+    lines = Enum.map_join(labels, "", fn label -> "    - #{yaml_string(label)}\n" end)
+    "  #{key}:\n" <> lines
   end
 
   defp render_instance_makefile(nil, nil), do: ""

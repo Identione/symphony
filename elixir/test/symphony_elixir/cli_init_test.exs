@@ -881,6 +881,321 @@ defmodule SymphonyElixir.CLI.InitTest do
     assert settings.server.host == "0.0.0.0"
   end
 
+  # --- --require-label / --exclude-label flags -----------------------------
+
+  # Shared helper: parse the front matter of a rendered workflow through the
+  # real config schema, the same split-on-"---" approach the tests above use.
+  defp parse_settings(contents) do
+    [_first | rest] = String.split(contents, ~r/\R/, trim: false)
+    {front, _} = Enum.split_while(rest, &(&1 != "---"))
+    yaml = Enum.join(front, "\n")
+    {:ok, decoded} = YamlElixir.read_from_string(yaml)
+    Schema.parse(decoded)
+  end
+
+  test "no --require-label/--exclude-label emits a commented discovery block and no gating" do
+    deps = capture_deps()
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:write, ^output, contents}
+
+    assert contents =~ "# required_labels:"
+    assert contents =~ "# excluded_labels:"
+    refute contents =~ ~r/^\s*required_labels:/m
+    refute contents =~ ~r/^\s*excluded_labels:/m
+
+    assert {:ok, %Schema{} = settings} = parse_settings(contents)
+    assert settings.tracker.required_labels == []
+    assert settings.tracker.excluded_labels == []
+  end
+
+  test "--require-label emits an active required_labels key" do
+    deps = capture_deps()
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--require-label",
+                 "symphony",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:write, ^output, contents}
+
+    assert contents =~ ~r/^\s*required_labels:\n\s*- "symphony"$/m
+    refute contents =~ ~r/^\s*excluded_labels:/m
+
+    # The unused half of the gate stays discoverable as a commented stub —
+    # passing one flag must not hide the other knob.
+    assert contents =~ "# excluded_labels:"
+
+    assert {:ok, %Schema{} = settings} = parse_settings(contents)
+    assert settings.tracker.required_labels == ["symphony"]
+    assert settings.tracker.excluded_labels == []
+  end
+
+  test "repeated --require-label flags preserve order" do
+    deps = capture_deps()
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--require-label",
+                 "a",
+                 "--require-label",
+                 "b",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:write, ^output, contents}
+
+    assert {:ok, %Schema{} = settings} = parse_settings(contents)
+    assert settings.tracker.required_labels == ["a", "b"]
+  end
+
+  test "--exclude-label alone emits excluded_labels and no required_labels" do
+    deps = capture_deps()
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--exclude-label",
+                 "no-symphony",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:write, ^output, contents}
+
+    assert contents =~ ~r/^\s*excluded_labels:\n\s*- "no-symphony"$/m
+    refute contents =~ ~r/^\s*required_labels:/m
+
+    # Mirror of the --require-label case: the unused half stays discoverable.
+    assert contents =~ "# required_labels:"
+
+    assert {:ok, %Schema{} = settings} = parse_settings(contents)
+    assert settings.tracker.required_labels == []
+    assert settings.tracker.excluded_labels == ["no-symphony"]
+  end
+
+  test "--require-label and --exclude-label together emit both keys" do
+    deps = capture_deps()
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--require-label",
+                 "symphony",
+                 "--exclude-label",
+                 "no-symphony",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:write, ^output, contents}
+
+    assert {:ok, %Schema{} = settings} = parse_settings(contents)
+    assert settings.tracker.required_labels == ["symphony"]
+    assert settings.tracker.excluded_labels == ["no-symphony"]
+  end
+
+  test "--require-label dedups case-insensitively, keeping first-seen casing" do
+    deps = capture_deps()
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--require-label",
+                 "Symphony",
+                 "--require-label",
+                 "symphony",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:write, ^output, contents}
+
+    assert {:ok, %Schema{} = settings} = parse_settings(contents)
+    assert settings.tracker.required_labels == ["Symphony"]
+  end
+
+  test "--require-label rejects an empty value" do
+    assert {:error, message} =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--require-label",
+                 ""
+               ],
+               capture_deps()
+             )
+
+    assert message =~ "--require-label"
+    refute_received {:write, _path, _contents}
+  end
+
+  test "--require-label rejects a whitespace-only value" do
+    assert {:error, message} =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--require-label",
+                 "   "
+               ],
+               capture_deps()
+             )
+
+    assert message =~ "--require-label"
+    refute_received {:write, _path, _contents}
+  end
+
+  test "the same label in both lists is rejected instead of writing a dead gate" do
+    assert {:error, message} =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--require-label",
+                 "symphony",
+                 "--exclude-label",
+                 "Symphony"
+               ],
+               capture_deps()
+             )
+
+    assert message =~ "--require-label"
+    assert message =~ "--exclude-label"
+    assert message =~ "symphony"
+    refute_received {:write, _path, _contents}
+  end
+
+  test "conflict detection is case-insensitive and ignores surrounding whitespace" do
+    assert {:error, message} =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--require-label",
+                 "  Needs Review  ",
+                 "--exclude-label",
+                 "needs review"
+               ],
+               capture_deps()
+             )
+
+    assert message =~ "Needs Review"
+    refute_received {:write, _path, _contents}
+  end
+
+  test "disjoint required/excluded labels are still accepted" do
+    deps = capture_deps()
+    output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+    on_exit(fn -> File.rm(output) end)
+
+    assert :ok =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--require-label",
+                 "symphony",
+                 "--exclude-label",
+                 "no-symphony",
+                 "--output",
+                 output
+               ],
+               deps
+             )
+
+    assert_received {:write, ^output, _contents}
+  end
+
+  test "--exclude-label rejects an empty value" do
+    assert {:error, message} =
+             Init.run(
+               [
+                 "--linear-project",
+                 "symphony-2e32f5d86d8c",
+                 "--repo-url",
+                 "git@github.com:org/repo.git",
+                 "--exclude-label",
+                 ""
+               ],
+               capture_deps()
+             )
+
+    assert message =~ "--exclude-label"
+    refute_received {:write, _path, _contents}
+  end
+
   # --- --instance-makefile / --instance-name -------------------------------
 
   test "--instance-makefile renders a second template through the same EEx pipeline" do
