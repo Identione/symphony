@@ -137,7 +137,7 @@ defmodule SymphonyElixir.CLI.InitTest do
     assert contents =~ "Rework"
     assert contents =~ "Merging"
     assert contents =~ "## Symphony Workpad"
-    assert contents =~ "PR feedback sweep protocol"
+    assert contents =~ "PR feedback sweep (required whenever a PR is attached)"
     assert contents =~ "kind: codex"
     assert contents =~ "command: codex app-server"
     assert contents =~ "git clone --depth 1"
