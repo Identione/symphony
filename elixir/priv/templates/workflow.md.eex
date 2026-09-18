@@ -25,9 +25,16 @@ workspace:
 repo:
   url: <%= @repo_url %>
 <%= @repo_path_line %><%= @repo_base_branch_line %>hooks:
+  # Do NOT reintroduce `--depth 1`. It implies `--single-branch`, which pins the
+  # workspace's fetch refspec to the remote's default branch alone. Everything
+  # else then has no remote-tracking ref: the configured base branch, and the
+  # agent's own `symphony/<ISSUE>` PR branch. A targeted `git fetch origin <branch>`
+  # lands in FETCH_HEAD only, so `origin/<branch>` never resolves and any ref the
+  # hook seeds by hand is frozen at clone time. `--filter=blob:none` keeps the
+  # clone small without narrowing the ref space, and remotes that do not support
+  # it (including local paths) ignore it with a warning rather than failing.
   after_create: |
-    git clone --depth 1 <%= @repo_url_shell %> .<%= if @base_branch do %>
-    git fetch --depth 1 origin <%= @base_fetch_refspec %>
+    git clone --filter=blob:none <%= @base_branch_clone_flag %><%= @repo_url_shell %> .<%= if @base_branch do %>
     git config symphony.baseBranch <%= @base_branch_shell %><% end %>
 agent:
   kind: <%= @agent_kind %>

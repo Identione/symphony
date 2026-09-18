@@ -140,7 +140,7 @@ defmodule SymphonyElixir.CLI.InitTest do
     assert contents =~ "PR feedback sweep (required whenever a PR is attached)"
     assert contents =~ "kind: codex"
     assert contents =~ "command: codex app-server"
-    assert contents =~ "git clone --depth 1"
+    assert contents =~ "git clone --filter=blob:none"
     assert contents =~ "git@github.com:org/repo.git"
     assert contents =~ "repo:"
     assert contents =~ "url: \"git@github.com:org/repo.git\""
@@ -177,8 +177,8 @@ defmodule SymphonyElixir.CLI.InitTest do
 
     # Front matter: a `base_branch:` line nested under `repo:`.
     assert contents =~ "base_branch: \"develop\""
-    # Clone hook fetches the base and records it for the base-aware skills.
-    assert contents =~ "git fetch --depth 1 origin 'develop:refs/remotes/origin/develop'"
+    # Clone hook lands HEAD on the base branch and records it for the base-aware skills.
+    assert contents =~ "git clone --filter=blob:none --branch 'develop' 'git@github.com:org/repo.git' ."
     assert contents =~ "git config symphony.baseBranch 'develop'"
     # Body references the configured base, never origin/main.
     assert contents =~ "origin/develop"
@@ -212,7 +212,7 @@ defmodule SymphonyElixir.CLI.InitTest do
 
     # No base_branch front-matter line, no base-aware clone-hook lines.
     refute contents =~ "base_branch:"
-    refute contents =~ "git fetch --depth 1 origin"
+    refute contents =~ "git clone --filter=blob:none --branch"
     refute contents =~ "git config symphony.baseBranch"
     # Body keeps today's origin/main and emits no issue-branch isolation section.
     assert contents =~ "origin/main"
@@ -223,10 +223,95 @@ defmodule SymphonyElixir.CLI.InitTest do
     # clone hook lives in the front matter, which the byte-identity body test
     # does not cover — this guards the nil render directly.
     lines = String.split(contents, "\n")
-    clone_idx = Enum.find_index(lines, &String.contains?(&1, "git clone --depth 1"))
+    clone_idx = Enum.find_index(lines, &String.contains?(&1, "git clone --filter=blob:none"))
     assert clone_idx
-    assert Enum.at(lines, clone_idx) == "    git clone --depth 1 'git@github.com:org/repo.git' ."
+    assert Enum.at(lines, clone_idx) == "    git clone --filter=blob:none 'git@github.com:org/repo.git' ."
     assert Enum.at(lines, clone_idx + 1) == "agent:"
+  end
+
+  # Regression: the rendered hook must leave a workspace whose ref space covers
+  # *every* branch, not just the remote default. `git clone --depth 1` implies
+  # `--single-branch`, which pins `remote.origin.fetch` to the default branch; a
+  # targeted `git fetch origin <other>` then updates FETCH_HEAD only, so
+  # `origin/<other>` never resolves. That made an agent unable to read its own
+  # `symphony/<ISSUE>` PR branch after anyone else pushed to it, and left the
+  # base-branch ref frozen at clone time. This test runs the real hook against a
+  # real repo and fails outright if the narrowing flag comes back.
+  test "the rendered clone hook leaves every branch resolvable as origin/<branch>" do
+    uniq = System.unique_integer([:positive])
+    tmp = Path.join(System.tmp_dir!(), "symphony-init-clone-#{uniq}")
+    source = Path.join(tmp, "source")
+    workspace = Path.join(tmp, "workspace")
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    File.mkdir_p!(source)
+    File.mkdir_p!(workspace)
+
+    git = fn dir, args ->
+      {out, status} = System.cmd("git", args, cd: dir, stderr_to_stdout: true)
+      {String.trim(out), status}
+    end
+
+    # A source repo whose default branch is `main` — deliberately NOT the base
+    # branch — plus a feature branch standing in for the agent's PR branch.
+    {_, 0} = git.(source, ["init", "-q", "-b", "main", "."])
+    {_, 0} = git.(source, ["config", "user.email", "test@example.com"])
+    {_, 0} = git.(source, ["config", "user.name", "Test User"])
+    File.write!(Path.join(source, "README.md"), "seed\n")
+    {_, 0} = git.(source, ["add", "-A"])
+    {_, 0} = git.(source, ["commit", "-qm", "seed"])
+    {_, 0} = git.(source, ["branch", "develop"])
+    {_, 0} = git.(source, ["branch", "symphony/IDE-1"])
+
+    rendered =
+      Init.render_workflow(%{
+        project_slug: "symphony-2e32f5d86d8c",
+        repo_url: source,
+        repo_path: nil,
+        agent: "codex",
+        base_branch: "develop",
+        workspace_root: "~/code/symphony-workspaces/repo"
+      })
+
+    hook = extract_after_create(rendered)
+    assert hook =~ "git clone"
+
+    {hook_out, hook_status} =
+      System.cmd("sh", ["-c", hook], cd: workspace, stderr_to_stdout: true)
+
+    assert hook_status == 0, "after_create hook failed: #{hook_out}"
+
+    # HEAD lands on the configured base branch, not on the remote default.
+    assert {"develop", 0} = git.(workspace, ["rev-parse", "--abbrev-ref", "HEAD"])
+
+    # The base branch is recorded for the base-aware skills.
+    assert {"develop", 0} = git.(workspace, ["config", "--get", "symphony.baseBranch"])
+
+    # The refspec covers branches beyond the remote default. This is the
+    # assertion that fails under `--depth 1`/`--single-branch`.
+    {refspecs, 0} = git.(workspace, ["config", "--get-all", "remote.origin.fetch"])
+
+    assert Enum.any?(String.split(refspecs, "\n"), &(&1 =~ "refs/heads/*")),
+           "expected a wildcard fetch refspec, got: #{inspect(refspecs)}"
+
+    # And the end-to-end consequence: a branch the agent did not clone onto is
+    # reachable by name after an ordinary fetch.
+    {_, 0} = git.(workspace, ["fetch", "origin"])
+
+    assert {_, 0} = git.(workspace, ["rev-parse", "--verify", "origin/symphony/IDE-1"])
+    assert {_, 0} = git.(workspace, ["rev-parse", "--verify", "origin/develop"])
+  end
+
+  # Pull `hooks.after_create`'s block scalar back out of the rendered front
+  # matter: the lines indented under it, dedented to runnable shell.
+  defp extract_after_create(rendered) do
+    lines = String.split(rendered, ~r/\R/)
+    start = Enum.find_index(lines, &(&1 == "  after_create: |"))
+
+    lines
+    |> Enum.drop(start + 1)
+    |> Enum.take_while(&String.starts_with?(&1, "    "))
+    |> Enum.map_join("\n", &String.replace_prefix(&1, "    ", ""))
   end
 
   test "rejects --base-branch values that are not safe git branch names" do
@@ -517,13 +602,13 @@ defmodule SymphonyElixir.CLI.InitTest do
     [hook_line] =
       rendered
       |> String.split(~r/\R/)
-      |> Enum.filter(&String.contains?(&1, "git clone --depth 1"))
+      |> Enum.filter(&String.contains?(&1, "git clone --filter=blob:none"))
 
     # POSIX-safe: a single outer quote pair, with every embedded `'` rewritten
     # as `'\''` (close, escaped quote, reopen). No backslash, dollar sign, or
     # backtick escapes the quoted region.
     expected_hook =
-      ~S{    git clone --depth 1 'git@example.com:o`r$g/repo\name} <>
+      ~S{    git clone --filter=blob:none 'git@example.com:o`r$g/repo\name} <>
         ~S{'\''} <> ~S{with".git' .}
 
     assert hook_line == expected_hook

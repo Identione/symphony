@@ -685,7 +685,11 @@ defmodule SymphonyElixir.CLI.Init do
       # hook on `@base_branch` being truthy.
       base_branch: base_branch,
       repo_base_branch_line: render_repo_base_branch_line(base_branch),
-      base_fetch_refspec: base_branch && shell_quote("#{base_branch}:refs/remotes/origin/#{base_branch}"),
+      # Clone straight onto the base branch when one is configured, so HEAD starts
+      # there instead of on the remote default and the workspace skips a reset onto
+      # it. Trailing space is deliberate: the template concatenates this directly
+      # in front of the repo URL, and it renders empty when no base branch is set.
+      base_branch_clone_flag: (base_branch && "--branch #{shell_quote(base_branch)} ") || "",
       base_branch_shell: base_branch && shell_quote(base_branch)
     ]
   end
