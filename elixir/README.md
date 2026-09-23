@@ -133,6 +133,20 @@ raw CLI surface the Makefile rules call.
   have Symphony copy a skills directory into every workspace instead, see SPEC.md §5.3.3;
   the copy is additive and repo-wins — skills the target repo tracks itself are kept).
   Re-run with `--force` to change the base later.
+- `--gate-command <CMD>` — the target repo's full local quality gate, run from
+  the repo root (e.g. `'cd elixir && make all'`). Written as `repo.gate_command`
+  and baked into the worker "Context rules" block of the prompt body ("Run the
+  gate as `<CMD>` from the repo root"). Omit and workers are told to use the
+  repo's documented gate command instead.
+- `--worker-notes <TEXT>` / `--worker-notes-file <PATH>` — repo- or
+  host-specific worker rules (e.g. "this host has no Swift, pass
+  `--skip-missing`") appended to the same "Context rules" block. Written as a
+  `repo.worker_notes` block scalar; lines are joined with spaces when rendered.
+  The two spellings are mutually exclusive.
+  Both knobs are prompt-shaping only: Symphony never runs the gate command or
+  reads the notes at runtime. Like `base_branch`, they are baked into the body
+  at generation time — after editing them in an instance's front matter, re-bake
+  the body with `make resync-bodies` (root Makefile).
 - `--output <PATH>` — workflow output path
 - `--port <PORT>` — enable the Phoenix dashboard. `0` = OS-assigned. Omit
   for no `server:` block at all.

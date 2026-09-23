@@ -44,6 +44,9 @@ make start              # `make logs`, `make stop`, `make help` from here
 Each `make init` creates an isolated `instances/<name>/`; multiple instances can run in parallel
 from the same checkout.
 
+Add `--gate-command '<cmd>'` to bake the target repo's full local quality gate into the worker
+instructions, and `--worker-notes '<text>'` (or `--worker-notes-file <path>`) for repo- or
+host-specific worker rules; both are prompt-shaping only and re-baked by `make resync-bodies`.
 Add `--base-branch <name>` to point an instance at a development branch instead of `main`: agents
 branch from, sync with, and merge into `<name>` (each issue on its own `symphony/<issue-id>` branch,
 PRs targeting `<name>`), leaving `main` untouched. Omit it and nothing changes — work targets the

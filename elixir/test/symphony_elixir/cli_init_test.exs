@@ -183,8 +183,15 @@ defmodule SymphonyElixir.CLI.InitTest do
     # Body references the configured base, never origin/main.
     assert contents =~ "origin/develop"
     refute contents =~ "origin/main"
-    # The issue-branch isolation section is present.
+    # The issue-branch isolation section is present, and an existing PR branch is
+    # fast-forwarded before it is built on (a human may have pushed to it).
     assert contents =~ "symphony/{{ issue.identifier }}"
+    assert contents =~ "git pull --ff-only origin symphony/{{ issue.identifier }}"
+    # Review brief: diff from the merge-base with the configured base, and the
+    # reviewer is told `main` is the wrong base for this branch.
+    assert contents =~ "$(git merge-base origin/develop HEAD)"
+    assert contents =~ "base branch `develop`"
+    assert contents =~ "`main` is not the base of this branch"
 
     assert_received {:puts, output_message}
     assert output_message =~ "Base branch 'develop'"
@@ -214,9 +221,18 @@ defmodule SymphonyElixir.CLI.InitTest do
     refute contents =~ "base_branch:"
     refute contents =~ "git clone --filter=blob:none --branch"
     refute contents =~ "git config symphony.baseBranch"
-    # Body keeps today's origin/main and emits no issue-branch isolation section.
+    # Body keeps today's origin/main and emits no issue-branch isolation section;
+    # the review brief diffs against origin/main and drops the base-branch-only
+    # warning about `main` being the wrong base.
     assert contents =~ "origin/main"
     refute contents =~ "symphony/{{ issue.identifier }}"
+    assert contents =~ "$(git merge-base origin/main HEAD)"
+    refute contents =~ "`main` is not the base of this branch"
+    assert contents =~ "those ranges do not cover the whole branch"
+    # No gate/notes knobs: generic gate wording, no `repo.*` lines for them.
+    refute contents =~ "gate_command:"
+    refute contents =~ "worker_notes:"
+    assert contents =~ "Run the gate with the repository's documented full local quality gate command"
 
     # after_create stays exactly the single clone line, with `agent:` on the very
     # next line (no stray blank line from the nil-case EEx conditional). The
@@ -342,16 +358,101 @@ defmodule SymphonyElixir.CLI.InitTest do
     end
   end
 
+  describe "--gate-command / --worker-notes" do
+    defp init_args(extra) do
+      ["--linear-project", "symphony-2e32f5d86d8c", "--repo-url", "git@github.com:org/repo.git"] ++
+        extra
+    end
+
+    test "--gate-command bakes repo.gate_command and the gate sentence into the body" do
+      deps = capture_deps()
+      output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+
+      assert :ok =
+               Init.run(init_args(["--gate-command", " cd elixir && make all ", "--output", output]), deps)
+
+      assert_received {:write, ^output, contents}
+      # Front matter: trimmed, double-quoted, nested under `repo:`.
+      assert contents =~ "  gate_command: \"cd elixir && make all\"\n"
+      assert contents =~ ~r/^repo:\n  url: .*\n(  #.*\n)*  gate_command:/m
+      # Body: the specific command replaces the generic wording, inside the
+      # verbatim worker Context rules block.
+      assert contents =~ "Run the gate as `cd elixir && make all` from the repo root."
+      refute contents =~ "repository's documented full local quality gate command"
+      refute contents =~ "worker_notes:"
+    end
+
+    test "--worker-notes bakes a repo.worker_notes block and appends it to the Context rules" do
+      deps = capture_deps()
+      output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+
+      assert :ok =
+               Init.run(
+                 init_args(["--worker-notes", "This host has no Swift.", "--output", output]),
+                 deps
+               )
+
+      assert_received {:write, ^output, contents}
+      assert contents =~ "  worker_notes: |\n    This host has no Swift.\n"
+      # Appended inside the quoted block, before the closing quote.
+      assert contents =~
+               "do not start another full gate. This host has no Swift.\" Prefer two sequential packages"
+
+      # Unset gate keeps the generic gate wording.
+      assert contents =~ "repository's documented full local quality gate command"
+    end
+
+    test "--worker-notes-file reads multi-line notes and joins lines with spaces in the body" do
+      deps = capture_deps()
+      output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+      notes = Path.join(System.tmp_dir!(), "worker-notes-#{System.unique_integer([:positive])}.md")
+      File.write!(notes, "\nFirst rule.\nSecond rule.\n\n")
+      on_exit(fn -> File.rm(notes) end)
+
+      assert :ok = Init.run(init_args(["--worker-notes-file", notes, "--output", output]), deps)
+
+      assert_received {:write, ^output, contents}
+      # Front matter keeps the lines (literal block scalar, trimmed).
+      assert contents =~ "  worker_notes: |\n    First rule.\n    Second rule.\nhooks:\n"
+      # Body renders them as one sentence run inside the bullet.
+      assert contents =~ "do not start another full gate. First rule. Second rule.\" Prefer"
+    end
+
+    test "rejects both --worker-notes and --worker-notes-file, empty values, and multi-line gate" do
+      deps = capture_deps()
+
+      assert {:error, message} =
+               Init.run(init_args(["--worker-notes", "a", "--worker-notes-file", "/nope"]), deps)
+
+      assert message =~ "mutually exclusive"
+
+      assert {:error, message} = Init.run(init_args(["--worker-notes-file", "/nope/missing.md"]), deps)
+      assert message =~ "--worker-notes-file /nope/missing.md"
+
+      assert {:error, message} = Init.run(init_args(["--gate-command", "  "]), deps)
+      assert message =~ "--gate-command must not be empty"
+
+      assert {:error, message} = Init.run(init_args(["--gate-command", "make\nall"]), deps)
+      assert message =~ "single line"
+
+      assert {:error, message} = Init.run(init_args(["--worker-notes", " "]), deps)
+      assert message =~ "--worker-notes must not be empty"
+
+      refute_received {:write, _path, _contents}
+    end
+  end
+
   test "template prompt body stays byte-identical to the canonical elixir/WORKFLOW.md body" do
     # Single-source guard: the init template inlines the canonical prompt body so
     # generated instances behave exactly like elixir/WORKFLOW.md. If either file's
     # body drifts from the other, this fails loudly and both must be updated together.
     #
-    # The template body now carries optional base-branch EEx (`@base_branch` — the
-    # only assign the body references). We render it with `base_branch: nil` (the
-    # default-instance case), which reproduces the canonical hardcoded
-    # `origin/main` body and omits the issue-branch section. The base-branch
-    # render is exercised separately by the `--base-branch` init test.
+    # The template body carries optional EEx for the prompt-shaping repo knobs
+    # (`@base_branch`, `@gate_command`, `@worker_notes` — the only assigns the
+    # body references). We render it with all three nil (the default-instance
+    # case), which reproduces the canonical hardcoded `origin/main` body with the
+    # generic gate wording and omits the issue-branch section. The set cases are
+    # exercised separately by the `--base-branch` / `--gate-command` init tests.
     {:ok, template} =
       File.read(Application.app_dir(:symphony_elixir, "priv/templates/workflow.md.eex"))
 
@@ -365,7 +466,9 @@ defmodule SymphonyElixir.CLI.InitTest do
     end
 
     rendered_template_body =
-      EEx.eval_string(body_of.(template), assigns: [base_branch: nil])
+      EEx.eval_string(body_of.(template),
+        assigns: [base_branch: nil, gate_command: nil, worker_notes: nil]
+      )
 
     assert rendered_template_body == body_of.(canonical)
   end
@@ -736,7 +839,9 @@ defmodule SymphonyElixir.CLI.InitTest do
 
     assert_received {:write, ^output, contents}
     refute contents =~ "server:"
-    refute contents =~ "port:"
+    # Anchored: the prompt body legitimately contains "Do NOT report: ..." in
+    # the review brief, so a bare "port:" substring check would false-positive.
+    refute contents =~ ~r/^\s*port:/m
     refute contents =~ "3453"
   end
 

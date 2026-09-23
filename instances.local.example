@@ -10,4 +10,9 @@
 #
 # `make init-all` skips instances that already exist; FORCE=1 regenerates all.
 
-symphony --linear-project https://linear.app/identione/project/symphony-implementation-2e32f5d86d8c --repo-url https://github.com/Identione/symphony.git --agent claude --port 3454
+# `--gate-command` bakes the repo's full local gate into the worker rules;
+# `--worker-notes-file` (or inline `--worker-notes '...'`) adds repo/host-specific
+# worker rules. Keep note files next to this manifest (instances.local.d/ is
+# gitignored too).
+symphony --linear-project https://linear.app/identione/project/symphony-implementation-2e32f5d86d8c --repo-url https://github.com/Identione/symphony.git --agent claude --port 3454 --gate-command 'cd elixir && make all'
+#entry --linear-project <slug> --repo-url https://github.com/Identione/entry-product-spec.git --agent claude --port 3455 --gate-command './scripts/verify-changed.sh --skip-missing' --worker-notes-file instances.local.d/entry-worker-notes.md

@@ -14,6 +14,9 @@ defmodule SymphonyElixir.CLI.Init do
     workspace_root: :string,
     agent: :string,
     base_branch: :string,
+    gate_command: :string,
+    worker_notes: :string,
+    worker_notes_file: :string,
     output: :string,
     force: :boolean,
     port: :integer,
@@ -130,6 +133,8 @@ defmodule SymphonyElixir.CLI.Init do
       [--repo-path <LOCAL_PATH>] \\
       [--agent codex|claude] \\
       [--base-branch <NAME>] \\
+      [--gate-command <CMD>] \\
+      [--worker-notes <TEXT> | --worker-notes-file <PATH>] \\
       [--output <PATH>] \\
       [--port <PORT>] \\
       [--host <ADDR>] \\
@@ -156,6 +161,16 @@ defmodule SymphonyElixir.CLI.Init do
                          refuse pushing protected branches (leaving the default
                          branch untouched). Validated as a safe git branch name.
                          Omit to keep today's behavior (PRs target the repo default).
+      --gate-command     The target repo's full local quality gate, run from the
+                         repo root (e.g. 'make all'). Baked into the worker
+                         "Context rules" of the prompt body as repo.gate_command.
+                         Omit to tell workers to use the repo's documented gate.
+      --worker-notes     Extra repo/host-specific worker rules appended to the
+                         same "Context rules" block (single line). Baked as
+                         repo.worker_notes.
+      --worker-notes-file Same, read from a file (multi-line; lines are joined
+                         with spaces when rendered). Mutually exclusive with
+                         --worker-notes.
       --output           Output path for the generated workflow. Defaults to
                          ./WORKFLOW.md.
       --port             Enable the Phoenix dashboard on the given port.
@@ -199,6 +214,8 @@ defmodule SymphonyElixir.CLI.Init do
          {:ok, repo_url} <- require_repo_url(opts),
          {:ok, agent} <- validate_agent(Keyword.get(opts, :agent, "codex")),
          {:ok, base_branch} <- validate_base_branch(Keyword.get(opts, :base_branch)),
+         {:ok, gate_command} <- validate_gate_command(Keyword.get(opts, :gate_command)),
+         {:ok, worker_notes} <- resolve_worker_notes(opts),
          {:ok, port} <- validate_port(Keyword.get(opts, :port)),
          {:ok, host} <- validate_host(Keyword.get(opts, :host), port),
          {:ok, required_labels} <- validate_labels(opts, :require_label),
@@ -220,6 +237,8 @@ defmodule SymphonyElixir.CLI.Init do
              agent: agent,
              workspace_root: workspace_root,
              base_branch: base_branch,
+             gate_command: gate_command,
+             worker_notes: worker_notes,
              port: port,
              host: host,
              required_labels: required_labels,
@@ -287,6 +306,45 @@ defmodule SymphonyElixir.CLI.Init do
 
       true ->
         {:ok, value}
+    end
+  end
+
+  # Single-line only: the value is rendered inside one sentence of the worker
+  # "Context rules" block, so a newline would break the bullet.
+  defp validate_gate_command(nil), do: {:ok, nil}
+
+  defp validate_gate_command(value) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    cond do
+      trimmed == "" -> {:error, "--gate-command must not be empty"}
+      String.contains?(trimmed, "\n") -> {:error, "--gate-command must be a single line"}
+      true -> {:ok, trimmed}
+    end
+  end
+
+  # `--worker-notes` (inline) and `--worker-notes-file` (multi-line, read here)
+  # are two spellings of one value; passing both is ambiguous, so refuse.
+  defp resolve_worker_notes(opts) do
+    case {Keyword.get(opts, :worker_notes), Keyword.get(opts, :worker_notes_file)} do
+      {nil, nil} -> {:ok, nil}
+      {nil, file} -> read_worker_notes_file(file)
+      {inline, nil} -> validate_worker_notes(inline, "--worker-notes")
+      {_, _} -> {:error, "--worker-notes and --worker-notes-file are mutually exclusive"}
+    end
+  end
+
+  defp read_worker_notes_file(path) do
+    case File.read(Path.expand(path)) do
+      {:ok, contents} -> validate_worker_notes(contents, "--worker-notes-file #{path}")
+      {:error, reason} -> {:error, "--worker-notes-file #{path}: #{:file.format_error(reason)}"}
+    end
+  end
+
+  defp validate_worker_notes(value, label) do
+    case String.trim(value) do
+      "" -> {:error, "#{label} must not be empty"}
+      trimmed -> {:ok, trimmed}
     end
   end
 
@@ -668,6 +726,10 @@ defmodule SymphonyElixir.CLI.Init do
     # empty-list default keeps those callers working unchanged.
     required_labels = Map.get(params, :required_labels, [])
     excluded_labels = Map.get(params, :excluded_labels, [])
+    # Prompt-shaping knobs baked into the worker "Context rules" block; Map.get
+    # for the same reason as base_branch (nil → generic wording, no front-matter line).
+    gate_command = Map.get(params, :gate_command)
+    worker_notes = Map.get(params, :worker_notes)
 
     [
       project_slug: yaml_string(project_slug),
@@ -690,8 +752,46 @@ defmodule SymphonyElixir.CLI.Init do
       # it. Trailing space is deliberate: the template concatenates this directly
       # in front of the repo URL, and it renders empty when no base branch is set.
       base_branch_clone_flag: (base_branch && "--branch #{shell_quote(base_branch)} ") || "",
-      base_branch_shell: base_branch && shell_quote(base_branch)
+      base_branch_shell: base_branch && shell_quote(base_branch),
+      # `gate_command` / `worker_notes`: same contract as base_branch — nil renders
+      # today's generic Context rules and no front-matter line; set → a `repo.*`
+      # line/block (so `make resync-bodies` can re-derive the body) plus the baked
+      # sentence(s) in the body.
+      gate_command: gate_command,
+      worker_notes: worker_notes,
+      repo_gate_command_line: render_repo_gate_command_line(gate_command),
+      repo_worker_notes_block: render_repo_worker_notes_block(worker_notes)
     ]
+  end
+
+  defp render_repo_gate_command_line(nil), do: ""
+
+  defp render_repo_gate_command_line(cmd) do
+    "  # Full local quality gate, run from the repo root; baked into the worker\n" <>
+      "  # \"Context rules\" of the body. Prompt-shaping only — Symphony never runs it.\n" <>
+      "  # Re-bake the body after editing (`make resync-bodies`).\n" <>
+      "  gate_command: #{yaml_string(cmd)}\n"
+  end
+
+  # YAML literal block scalar (`|`) so multi-line notes survive round-trips
+  # through the front matter; the template joins lines with spaces when it
+  # renders them into the single-line Context rules bullet.
+  defp render_repo_worker_notes_block(nil), do: ""
+
+  defp render_repo_worker_notes_block(notes) do
+    body =
+      notes
+      |> String.trim()
+      |> String.split("\n")
+      |> Enum.map_join("\n", fn
+        "" -> ""
+        line -> "    " <> line
+      end)
+
+    "  # Repo/host-specific worker rules appended to the body's \"Context rules\"\n" <>
+      "  # block (lines are joined with spaces). Prompt-shaping only — re-bake the\n" <>
+      "  # body after editing (`make resync-bodies`).\n" <>
+      "  worker_notes: |\n" <> body <> "\n"
   end
 
   # Always render both `agent.claude:` and `agent.codex:` blocks side by side.
@@ -835,6 +935,12 @@ defmodule SymphonyElixir.CLI.Init do
         # effort_by_state:
         #   Merging: low
         #   Rework: medium
+        # Per-turn wall clock in ms (default 3600000 = 1 h). Raise it when the
+        # target repo's cold compile + full gate does not fit in an hour.
+        # turn_timeout_ms: 5400000
+        # Keep the Agent tool calls (incl. per-invocation model choice) and
+        # child-message metadata in the instance log. Noisy; default false.
+        # verbose_logging: false
         # permission_mode: bypassPermissions (active) = allow-all under the jai +
         # workspace-cwd boundary; dontAsk = deny anything not in allowed_tools (an
         # empty/absent allowed_tools is then rejected at boot). SPEC.md §5.3.5.2.
@@ -858,6 +964,7 @@ defmodule SymphonyElixir.CLI.Init do
         #  - KillBash
         #  - TodoWrite
         #  - NotebookEdit
+        #  - Agent                               # subagent spawning; documentation only (see note above)
         #  - mcp__symphony__linear_graphql        # in-process Linear tool (auth stays in Symphony)
         #  - mcp__symphony_workpad__sync_workpad  # in-process workpad sync (its own sdk MCP server)
         #  #- mcp__lsp                        # project .mcp.json servers need mcp__<server> here
