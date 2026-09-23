@@ -789,6 +789,19 @@ Fields:
     `git config symphony.baseBranch <base_branch>`) so repo-local skills resolve the same base.
   - Symphony performs no git operations itself; `base_branch` only shapes the generated prompt
     and the operator-provisioned skills.
+- `gate_command` (string, OPTIONAL)
+  - The target repository's full local quality gate command, run from the repository root
+    (e.g. `cd elixir && make all`). Set via `symphony init --gate-command`.
+  - Prompt-shaping only: the generated body's worker "Context rules" block MUST tell workers to
+    run exactly this command as the gate; when absent it MUST tell them to use the repository's
+    documented gate command instead. Symphony MUST NOT execute it.
+- `worker_notes` (string, OPTIONAL, multi-line allowed)
+  - Repository- or host-specific worker rules (e.g. a missing toolchain and the flag that skips
+    it). Set via `symphony init --worker-notes` / `--worker-notes-file`.
+  - Prompt-shaping only: appended to the same "Context rules" block, lines joined with spaces.
+    Symphony MUST NOT interpret it at runtime.
+  - Like `base_branch`, both are baked into the body at generation time; operators re-bake
+    after editing them (the reference implementation's `make resync-bodies`).
 
 ### 5.4 Prompt Template Contract
 

@@ -19,8 +19,14 @@ description:
 3. Confirm remotes and branches:
    - Ensure the `origin` remote exists.
    - Ensure the current branch is the one to receive the merge.
-4. Fetch latest refs:
-   - `git fetch origin`
+4. Fetch latest refs. Name the destination explicitly:
+   - `base=$(git config --get symphony.baseBranch 2>/dev/null || echo main)`
+   - `git fetch origin "$base:refs/remotes/origin/$base"`
+   - A bare `git fetch origin` refreshes only what the clone's configured refspec
+     covers. A workspace cloned with `--depth 1` (which implies `--single-branch`)
+     carries a refspec for the remote default branch alone, so `origin/$base` is
+     never refreshed and step 6 would merge a ref frozen at clone time while
+     reporting success. The explicit destination creates/updates the ref either way.
 5. Sync the remote feature branch first:
    - `git pull --ff-only origin $(git branch --show-current)`
    - This pulls branch updates made remotely (for example, a GitHub auto-commit)

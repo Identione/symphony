@@ -178,12 +178,20 @@ defmodule SymphonyElixir.Config.Schema do
       # Symphony performs no git operations with this value at runtime; it only
       # shapes the generated WORKFLOW.md prompt at init time.
       field(:base_branch, :string)
+      # `gate_command` and `worker_notes` are prompt-shaping only, like
+      # `base_branch`: `symphony init --gate-command/--worker-notes` writes them
+      # and the template bakes them into the worker "Context rules" block
+      # (`make resync-bodies` re-reads them from the front matter). Symphony
+      # never executes `gate_command` or reads `worker_notes` at runtime; they
+      # are accepted here so a workflow that carries them validates at boot.
+      field(:gate_command, :string)
+      field(:worker_notes, :string)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:url, :path, :base_branch], empty_values: [])
+      |> cast(attrs, [:url, :path, :base_branch, :gate_command, :worker_notes], empty_values: [])
     end
   end
 

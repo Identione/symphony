@@ -115,6 +115,24 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert message =~ "codex.quota.dispatch_pause_percent"
   end
 
+  test "schema accepts the prompt-shaping repo.gate_command / repo.worker_notes and defaults them to nil" do
+    assert {:ok, settings} =
+             Schema.parse(%{
+               repo: %{
+                 url: "git@github.com:org/repo.git",
+                 gate_command: "cd elixir && make all",
+                 worker_notes: "no Swift here\nsecond line"
+               }
+             })
+
+    assert settings.repo.gate_command == "cd elixir && make all"
+    assert settings.repo.worker_notes == "no Swift here\nsecond line"
+
+    assert {:ok, defaulted} = Schema.parse(%{repo: %{url: "git@github.com:org/repo.git"}})
+    assert defaulted.repo.gate_command == nil
+    assert defaulted.repo.worker_notes == nil
+  end
+
   test "schema parses repo.base_branch and defaults it to nil" do
     assert {:ok, settings} =
              Schema.parse(%{repo: %{url: "git@github.com:org/repo.git", base_branch: "develop"}})

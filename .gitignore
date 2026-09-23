@@ -11,6 +11,7 @@ instances/
 # list of Linear projects / repos / ports). The committed template is
 # instances.local.example.
 /instances.local
+/instances.local.d/
 
 # Legacy root daemon state (PID / stdout capture) from before daemon control
 # moved into per-instance Makefiles. New checkouts do not create `/run/`;

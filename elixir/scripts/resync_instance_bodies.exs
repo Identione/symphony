@@ -1,6 +1,6 @@
 # Re-bake every instance WORKFLOW.md *body* from the current template, deriving
-# @base_branch from that instance's OWN front matter so the baked branch prose
-# can never disagree with repo.base_branch. Front matter is preserved
+# @base_branch, @gate_command and @worker_notes from that instance's OWN front
+# matter (`repo.*`) so the baked prose can never disagree with it. Front matter is preserved
 # byte-for-byte (this is the "body-only init" that `make init --force` is not —
 # --force regenerates the whole file and clobbers hand-tuned front matter).
 #
@@ -24,6 +24,43 @@ check_only? = "--check" in argv
 explicit_paths = argv |> Enum.reject(&String.starts_with?(&1, "--")) |> Enum.map(&Path.expand/1)
 
 marker = "You are working on a Linear ticket"
+
+# Minimal front-matter readers (stdlib only — no YAML dep): a scalar `key:` line
+# (optionally double-quoted) and a `key: |` literal block scalar whose body is
+# every following line indented deeper than the key (blank lines kept, common
+# 4-space indent stripped, trailing blank lines dropped).
+scalar = fn header, key ->
+  case Regex.run(~r/^\s*#{key}:\s*"?([^"\n]+?)"?\s*$/m, header) do
+    [_, v] -> String.trim(v)
+    _ -> nil
+  end
+end
+
+block = fn header, key ->
+  lines = String.split(header, "\n")
+
+  case Enum.find_index(lines, &Regex.match?(~r/^\s*#{key}:\s*\|\s*$/, &1)) do
+    nil ->
+      nil
+
+    idx ->
+      key_indent = lines |> Enum.at(idx) |> then(&(String.length(&1) - String.length(String.trim_leading(&1))))
+
+      body =
+        lines
+        |> Enum.drop(idx + 1)
+        |> Enum.take_while(fn line ->
+          String.trim(line) == "" or
+            String.length(line) - String.length(String.trim_leading(line)) > key_indent
+        end)
+        |> Enum.map(&String.replace_prefix(&1, String.duplicate(" ", key_indent + 2), ""))
+        |> Enum.join("\n")
+        |> String.trim_trailing()
+
+      if body == "", do: nil, else: body
+  end
+end
+
 template = File.read!(template_path)
 [_front_matter, template_rest] = String.split(template, marker, parts: 2)
 template_body = marker <> template_rest
@@ -50,14 +87,17 @@ drift =
       [header, body_rest] ->
         oldbody = marker <> body_rest
 
-        base =
-          case Regex.run(~r/^\s*base_branch:\s*"?([^"\n]+?)"?\s*$/m, header) do
-            [_, b] -> String.trim(b)
-            _ -> nil
-          end
+        base = scalar.(header, "base_branch")
+        gate = scalar.(header, "gate_command")
+        notes = block.(header, "worker_notes")
 
-        rendered = EEx.eval_string(template_body, assigns: [base_branch: base])
-        label = "#{String.pad_trailing(name, 26)} base=#{inspect(base)}"
+        rendered =
+          EEx.eval_string(template_body,
+            assigns: [base_branch: base, gate_command: gate, worker_notes: notes]
+          )
+
+        label =
+          "#{String.pad_trailing(name, 26)} base=#{inspect(base)} gate=#{inspect(gate)} notes=#{(notes && "yes") || "no"}"
 
         cond do
           oldbody == rendered ->

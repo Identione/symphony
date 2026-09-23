@@ -140,7 +140,7 @@ defmodule SymphonyElixir.CLI.InitTest do
     assert contents =~ "PR feedback sweep (required whenever a PR is attached)"
     assert contents =~ "kind: codex"
     assert contents =~ "command: codex app-server"
-    assert contents =~ "git clone --depth 1"
+    assert contents =~ "git clone --filter=blob:none"
     assert contents =~ "git@github.com:org/repo.git"
     assert contents =~ "repo:"
     assert contents =~ "url: \"git@github.com:org/repo.git\""
@@ -177,14 +177,21 @@ defmodule SymphonyElixir.CLI.InitTest do
 
     # Front matter: a `base_branch:` line nested under `repo:`.
     assert contents =~ "base_branch: \"develop\""
-    # Clone hook fetches the base and records it for the base-aware skills.
-    assert contents =~ "git fetch --depth 1 origin 'develop:refs/remotes/origin/develop'"
+    # Clone hook lands HEAD on the base branch and records it for the base-aware skills.
+    assert contents =~ "git clone --filter=blob:none --branch 'develop' 'git@github.com:org/repo.git' ."
     assert contents =~ "git config symphony.baseBranch 'develop'"
     # Body references the configured base, never origin/main.
     assert contents =~ "origin/develop"
     refute contents =~ "origin/main"
-    # The issue-branch isolation section is present.
+    # The issue-branch isolation section is present, and an existing PR branch is
+    # fast-forwarded before it is built on (a human may have pushed to it).
     assert contents =~ "symphony/{{ issue.identifier }}"
+    assert contents =~ "git pull --ff-only origin symphony/{{ issue.identifier }}"
+    # Review brief: diff from the merge-base with the configured base, and the
+    # reviewer is told `main` is the wrong base for this branch.
+    assert contents =~ "$(git merge-base origin/develop HEAD)"
+    assert contents =~ "base branch `develop`"
+    assert contents =~ "`main` is not the base of this branch"
 
     assert_received {:puts, output_message}
     assert output_message =~ "Base branch 'develop'"
@@ -212,21 +219,115 @@ defmodule SymphonyElixir.CLI.InitTest do
 
     # No base_branch front-matter line, no base-aware clone-hook lines.
     refute contents =~ "base_branch:"
-    refute contents =~ "git fetch --depth 1 origin"
+    refute contents =~ "git clone --filter=blob:none --branch"
     refute contents =~ "git config symphony.baseBranch"
-    # Body keeps today's origin/main and emits no issue-branch isolation section.
+    # Body keeps today's origin/main and emits no issue-branch isolation section;
+    # the review brief diffs against origin/main and drops the base-branch-only
+    # warning about `main` being the wrong base.
     assert contents =~ "origin/main"
     refute contents =~ "symphony/{{ issue.identifier }}"
+    assert contents =~ "$(git merge-base origin/main HEAD)"
+    refute contents =~ "`main` is not the base of this branch"
+    assert contents =~ "those ranges do not cover the whole branch"
+    # No gate/notes knobs: generic gate wording, no `repo.*` lines for them.
+    refute contents =~ "gate_command:"
+    refute contents =~ "worker_notes:"
+    assert contents =~ "Run the gate with the repository's documented full local quality gate command"
 
     # after_create stays exactly the single clone line, with `agent:` on the very
     # next line (no stray blank line from the nil-case EEx conditional). The
     # clone hook lives in the front matter, which the byte-identity body test
     # does not cover — this guards the nil render directly.
     lines = String.split(contents, "\n")
-    clone_idx = Enum.find_index(lines, &String.contains?(&1, "git clone --depth 1"))
+    clone_idx = Enum.find_index(lines, &String.contains?(&1, "git clone --filter=blob:none"))
     assert clone_idx
-    assert Enum.at(lines, clone_idx) == "    git clone --depth 1 'git@github.com:org/repo.git' ."
+    assert Enum.at(lines, clone_idx) == "    git clone --filter=blob:none 'git@github.com:org/repo.git' ."
     assert Enum.at(lines, clone_idx + 1) == "agent:"
+  end
+
+  # Regression: the rendered hook must leave a workspace whose ref space covers
+  # *every* branch, not just the remote default. `git clone --depth 1` implies
+  # `--single-branch`, which pins `remote.origin.fetch` to the default branch; a
+  # targeted `git fetch origin <other>` then updates FETCH_HEAD only, so
+  # `origin/<other>` never resolves. That made an agent unable to read its own
+  # `symphony/<ISSUE>` PR branch after anyone else pushed to it, and left the
+  # base-branch ref frozen at clone time. This test runs the real hook against a
+  # real repo and fails outright if the narrowing flag comes back.
+  test "the rendered clone hook leaves every branch resolvable as origin/<branch>" do
+    uniq = System.unique_integer([:positive])
+    tmp = Path.join(System.tmp_dir!(), "symphony-init-clone-#{uniq}")
+    source = Path.join(tmp, "source")
+    workspace = Path.join(tmp, "workspace")
+    on_exit(fn -> File.rm_rf(tmp) end)
+
+    File.mkdir_p!(source)
+    File.mkdir_p!(workspace)
+
+    git = fn dir, args ->
+      {out, status} = System.cmd("git", args, cd: dir, stderr_to_stdout: true)
+      {String.trim(out), status}
+    end
+
+    # A source repo whose default branch is `main` — deliberately NOT the base
+    # branch — plus a feature branch standing in for the agent's PR branch.
+    {_, 0} = git.(source, ["init", "-q", "-b", "main", "."])
+    {_, 0} = git.(source, ["config", "user.email", "test@example.com"])
+    {_, 0} = git.(source, ["config", "user.name", "Test User"])
+    File.write!(Path.join(source, "README.md"), "seed\n")
+    {_, 0} = git.(source, ["add", "-A"])
+    {_, 0} = git.(source, ["commit", "-qm", "seed"])
+    {_, 0} = git.(source, ["branch", "develop"])
+    {_, 0} = git.(source, ["branch", "symphony/IDE-1"])
+
+    rendered =
+      Init.render_workflow(%{
+        project_slug: "symphony-2e32f5d86d8c",
+        repo_url: source,
+        repo_path: nil,
+        agent: "codex",
+        base_branch: "develop",
+        workspace_root: "~/code/symphony-workspaces/repo"
+      })
+
+    hook = extract_after_create(rendered)
+    assert hook =~ "git clone"
+
+    {hook_out, hook_status} =
+      System.cmd("sh", ["-c", hook], cd: workspace, stderr_to_stdout: true)
+
+    assert hook_status == 0, "after_create hook failed: #{hook_out}"
+
+    # HEAD lands on the configured base branch, not on the remote default.
+    assert {"develop", 0} = git.(workspace, ["rev-parse", "--abbrev-ref", "HEAD"])
+
+    # The base branch is recorded for the base-aware skills.
+    assert {"develop", 0} = git.(workspace, ["config", "--get", "symphony.baseBranch"])
+
+    # The refspec covers branches beyond the remote default. This is the
+    # assertion that fails under `--depth 1`/`--single-branch`.
+    {refspecs, 0} = git.(workspace, ["config", "--get-all", "remote.origin.fetch"])
+
+    assert Enum.any?(String.split(refspecs, "\n"), &(&1 =~ "refs/heads/*")),
+           "expected a wildcard fetch refspec, got: #{inspect(refspecs)}"
+
+    # And the end-to-end consequence: a branch the agent did not clone onto is
+    # reachable by name after an ordinary fetch.
+    {_, 0} = git.(workspace, ["fetch", "origin"])
+
+    assert {_, 0} = git.(workspace, ["rev-parse", "--verify", "origin/symphony/IDE-1"])
+    assert {_, 0} = git.(workspace, ["rev-parse", "--verify", "origin/develop"])
+  end
+
+  # Pull `hooks.after_create`'s block scalar back out of the rendered front
+  # matter: the lines indented under it, dedented to runnable shell.
+  defp extract_after_create(rendered) do
+    lines = String.split(rendered, ~r/\R/)
+    start = Enum.find_index(lines, &(&1 == "  after_create: |"))
+
+    lines
+    |> Enum.drop(start + 1)
+    |> Enum.take_while(&String.starts_with?(&1, "    "))
+    |> Enum.map_join("\n", &String.replace_prefix(&1, "    ", ""))
   end
 
   test "rejects --base-branch values that are not safe git branch names" do
@@ -257,16 +358,101 @@ defmodule SymphonyElixir.CLI.InitTest do
     end
   end
 
+  describe "--gate-command / --worker-notes" do
+    defp init_args(extra) do
+      ["--linear-project", "symphony-2e32f5d86d8c", "--repo-url", "git@github.com:org/repo.git"] ++
+        extra
+    end
+
+    test "--gate-command bakes repo.gate_command and the gate sentence into the body" do
+      deps = capture_deps()
+      output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+
+      assert :ok =
+               Init.run(init_args(["--gate-command", " cd elixir && make all ", "--output", output]), deps)
+
+      assert_received {:write, ^output, contents}
+      # Front matter: trimmed, double-quoted, nested under `repo:`.
+      assert contents =~ "  gate_command: \"cd elixir && make all\"\n"
+      assert contents =~ ~r/^repo:\n  url: .*\n(  #.*\n)*  gate_command:/m
+      # Body: the specific command replaces the generic wording, inside the
+      # verbatim worker Context rules block.
+      assert contents =~ "Run the gate as `cd elixir && make all` from the repo root."
+      refute contents =~ "repository's documented full local quality gate command"
+      refute contents =~ "worker_notes:"
+    end
+
+    test "--worker-notes bakes a repo.worker_notes block and appends it to the Context rules" do
+      deps = capture_deps()
+      output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+
+      assert :ok =
+               Init.run(
+                 init_args(["--worker-notes", "This host has no Swift.", "--output", output]),
+                 deps
+               )
+
+      assert_received {:write, ^output, contents}
+      assert contents =~ "  worker_notes: |\n    This host has no Swift.\n"
+      # Appended inside the quoted block, before the closing quote.
+      assert contents =~
+               "do not start another full gate. This host has no Swift.\" Prefer two sequential packages"
+
+      # Unset gate keeps the generic gate wording.
+      assert contents =~ "repository's documented full local quality gate command"
+    end
+
+    test "--worker-notes-file reads multi-line notes and joins lines with spaces in the body" do
+      deps = capture_deps()
+      output = Path.join(System.tmp_dir!(), "WORKFLOW-init-#{System.unique_integer([:positive])}.md")
+      notes = Path.join(System.tmp_dir!(), "worker-notes-#{System.unique_integer([:positive])}.md")
+      File.write!(notes, "\nFirst rule.\nSecond rule.\n\n")
+      on_exit(fn -> File.rm(notes) end)
+
+      assert :ok = Init.run(init_args(["--worker-notes-file", notes, "--output", output]), deps)
+
+      assert_received {:write, ^output, contents}
+      # Front matter keeps the lines (literal block scalar, trimmed).
+      assert contents =~ "  worker_notes: |\n    First rule.\n    Second rule.\nhooks:\n"
+      # Body renders them as one sentence run inside the bullet.
+      assert contents =~ "do not start another full gate. First rule. Second rule.\" Prefer"
+    end
+
+    test "rejects both --worker-notes and --worker-notes-file, empty values, and multi-line gate" do
+      deps = capture_deps()
+
+      assert {:error, message} =
+               Init.run(init_args(["--worker-notes", "a", "--worker-notes-file", "/nope"]), deps)
+
+      assert message =~ "mutually exclusive"
+
+      assert {:error, message} = Init.run(init_args(["--worker-notes-file", "/nope/missing.md"]), deps)
+      assert message =~ "--worker-notes-file /nope/missing.md"
+
+      assert {:error, message} = Init.run(init_args(["--gate-command", "  "]), deps)
+      assert message =~ "--gate-command must not be empty"
+
+      assert {:error, message} = Init.run(init_args(["--gate-command", "make\nall"]), deps)
+      assert message =~ "single line"
+
+      assert {:error, message} = Init.run(init_args(["--worker-notes", " "]), deps)
+      assert message =~ "--worker-notes must not be empty"
+
+      refute_received {:write, _path, _contents}
+    end
+  end
+
   test "template prompt body stays byte-identical to the canonical elixir/WORKFLOW.md body" do
     # Single-source guard: the init template inlines the canonical prompt body so
     # generated instances behave exactly like elixir/WORKFLOW.md. If either file's
     # body drifts from the other, this fails loudly and both must be updated together.
     #
-    # The template body now carries optional base-branch EEx (`@base_branch` — the
-    # only assign the body references). We render it with `base_branch: nil` (the
-    # default-instance case), which reproduces the canonical hardcoded
-    # `origin/main` body and omits the issue-branch section. The base-branch
-    # render is exercised separately by the `--base-branch` init test.
+    # The template body carries optional EEx for the prompt-shaping repo knobs
+    # (`@base_branch`, `@gate_command`, `@worker_notes` — the only assigns the
+    # body references). We render it with all three nil (the default-instance
+    # case), which reproduces the canonical hardcoded `origin/main` body with the
+    # generic gate wording and omits the issue-branch section. The set cases are
+    # exercised separately by the `--base-branch` / `--gate-command` init tests.
     {:ok, template} =
       File.read(Application.app_dir(:symphony_elixir, "priv/templates/workflow.md.eex"))
 
@@ -280,7 +466,9 @@ defmodule SymphonyElixir.CLI.InitTest do
     end
 
     rendered_template_body =
-      EEx.eval_string(body_of.(template), assigns: [base_branch: nil])
+      EEx.eval_string(body_of.(template),
+        assigns: [base_branch: nil, gate_command: nil, worker_notes: nil]
+      )
 
     assert rendered_template_body == body_of.(canonical)
   end
@@ -517,13 +705,13 @@ defmodule SymphonyElixir.CLI.InitTest do
     [hook_line] =
       rendered
       |> String.split(~r/\R/)
-      |> Enum.filter(&String.contains?(&1, "git clone --depth 1"))
+      |> Enum.filter(&String.contains?(&1, "git clone --filter=blob:none"))
 
     # POSIX-safe: a single outer quote pair, with every embedded `'` rewritten
     # as `'\''` (close, escaped quote, reopen). No backslash, dollar sign, or
     # backtick escapes the quoted region.
     expected_hook =
-      ~S{    git clone --depth 1 'git@example.com:o`r$g/repo\name} <>
+      ~S{    git clone --filter=blob:none 'git@example.com:o`r$g/repo\name} <>
         ~S{'\''} <> ~S{with".git' .}
 
     assert hook_line == expected_hook
@@ -651,7 +839,9 @@ defmodule SymphonyElixir.CLI.InitTest do
 
     assert_received {:write, ^output, contents}
     refute contents =~ "server:"
-    refute contents =~ "port:"
+    # Anchored: the prompt body legitimately contains "Do NOT report: ..." in
+    # the review brief, so a bare "port:" substring check would false-positive.
+    refute contents =~ ~r/^\s*port:/m
     refute contents =~ "3453"
   end
 
