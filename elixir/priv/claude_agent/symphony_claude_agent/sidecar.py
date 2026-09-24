@@ -566,7 +566,14 @@ def _truncate_tool_response(value: Any, limit: int) -> tuple[Any, bool]:
     if isinstance(value, dict):
         changed = False
         out: dict[Any, Any] = {}
+        is_base64_source = value.get("type") == "base64"
         for key, item in value.items():
+            # Binary payloads (a `Read` of an image/PDF: `file.base64`, or an API
+            # `source: {type: base64, data}` block) must pass through intact —
+            # eliding them corrupts the file and the API rejects the whole turn.
+            if key == "base64" or (is_base64_source and key == "data"):
+                out[key] = item
+                continue
             new_item, item_changed = _truncate_tool_response(item, limit)
             out[key] = new_item
             changed = changed or item_changed

@@ -100,3 +100,53 @@ def test_build_hooks_registers_post_tool_use_matcher_when_enabled() -> None:
     for tool in ("Bash", "Read", "Grep", "Glob"):
         assert tool in matcher.matcher
     assert len(matcher.hooks) == 1
+
+
+# Regression (IDE-846 / IDE-851): a `Read` of a PNG screenshot returns the image
+# as one long base64 leaf. Eliding its middle spliced the "[Symphony elided …]"
+# marker into the base64, the API rejected the corrupted image ("an image in the
+# conversation could not be processed") with a non-retryable invalid_request,
+# and the issue halted. Binary payloads must pass through byte-for-byte.
+_BIG_B64 = "iVBORw0KGgoAAAANSUhEUgAA" + "QUJD" * 25_000 + "AAAAAElFTkSuQmCC"
+
+
+def test_read_image_response_base64_is_never_elided() -> None:
+    response = {
+        "type": "image",
+        "file": {
+            "base64": _BIG_B64,
+            "type": "image/png",
+            "originalSize": 75_630,
+            "dimensions": {"originalWidth": 1265, "originalHeight": 784},
+        },
+    }
+    value, changed = _truncate_tool_response(response, 8192)
+    assert changed is False
+    assert value["file"]["base64"] == _BIG_B64
+
+
+def test_base64_source_block_data_is_never_elided() -> None:
+    response = [
+        {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": _BIG_B64}},
+        {"type": "text", "text": "T" * 20_000},
+    ]
+    value, changed = _truncate_tool_response(response, 8192)
+    # The text sibling is still bounded; only the binary payload is exempt.
+    assert changed is True
+    assert value[0]["source"]["data"] == _BIG_B64
+    assert len(value[1]["text"]) < 20_000
+
+
+@pytest.mark.asyncio
+async def test_hook_is_noop_for_large_image_read() -> None:
+    truncate = _make_post_tool_use_truncator(8192)
+    result = await truncate(
+        {
+            "hook_event_name": "PostToolUse",
+            "tool_name": "Read",
+            "tool_response": {"type": "image", "file": {"base64": _BIG_B64, "type": "image/png"}},
+        },
+        "tool-img",
+        {"signal": None},
+    )
+    assert result == {}
