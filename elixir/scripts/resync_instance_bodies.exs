@@ -1,5 +1,5 @@
 # Re-bake every instance WORKFLOW.md *body* from the current template, deriving
-# @base_branch, @gate_command and @worker_notes from that instance's OWN front
+# @base_branch, @gate_command, @worker_notes and @delegation_mode from that instance's OWN front
 # matter (`repo.*`) so the baked prose can never disagree with it. Front matter is preserved
 # byte-for-byte (this is the "body-only init" that `make init --force` is not —
 # --force regenerates the whole file and clobbers hand-tuned front matter).
@@ -90,14 +90,15 @@ drift =
         base = scalar.(header, "base_branch")
         gate = scalar.(header, "gate_command")
         notes = block.(header, "worker_notes")
+        mode = scalar.(header, "delegation_mode")
 
         rendered =
           EEx.eval_string(template_body,
-            assigns: [base_branch: base, gate_command: gate, worker_notes: notes]
+            assigns: [base_branch: base, gate_command: gate, worker_notes: notes, delegation_mode: mode]
           )
 
         label =
-          "#{String.pad_trailing(name, 26)} base=#{inspect(base)} gate=#{inspect(gate)} notes=#{(notes && "yes") || "no"}"
+          "#{String.pad_trailing(name, 26)} base=#{inspect(base)} gate=#{inspect(gate)} notes=#{(notes && "yes") || "no"} mode=#{inspect(mode)}"
 
         cond do
           oldbody == rendered ->
