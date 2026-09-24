@@ -1895,6 +1895,18 @@ Turn processing:
   a `ResultMessage`, at which point it emits `turn_end` carrying `stop_reason`, `num_turns`, and
   `usage`. The `usage` payload uses snake_case keys: `input_tokens`, `output_tokens`,
   `cache_creation_input_tokens`, `cache_read_input_tokens`.
+- Background tasks (the `Workflow` tool always backgrounds; `CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`
+  does not cover it) MUST complete inside the turn that launched them. The sidecar tracks the
+  CLI's `background_tasks_changed` / `task_started` / `task_updated` / `task_notification`
+  system messages; a `ResultMessage` that arrives while a task is in flight is held, and the
+  sidecar keeps reading through the CLI's auto-started follow-up response. It then emits one
+  `turn_end` whose `num_turns` and `usage` are the sums over the held and final results. Each
+  task is bracketed by `tool_started` / `tool_finished` (keyed by the launching `tool_use_id`,
+  `name` = task type) so the longer tool-stall window applies, and `task_progress` is forwarded
+  as a throttled `assistant_delta` keepalive. If no follow-up starts within a grace period after
+  the last task finishes, the held `turn_end` is flushed. A terminal-error `ResultMessage` ends the
+  turn immediately. Without this, the turn ends with the work undone and the follow-up's stale
+  `ResultMessage` ends the next turn early, shifting every later turn by one.
 - For each `AssistantMessage` whose underlying message carries a non-`None` `usage` field
   (claude-agent-sdk ≥0.1.49 — *"Preserve per-turn `usage` on `AssistantMessage`"*), the sidecar
   SHOULD also emit a separate `token_usage` envelope carrying that API call's billing
