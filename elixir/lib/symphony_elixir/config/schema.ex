@@ -186,12 +186,20 @@ defmodule SymphonyElixir.Config.Schema do
       # are accepted here so a workflow that carries them validates at boot.
       field(:gate_command, :string)
       field(:worker_notes, :string)
+      # `delegation_mode` is prompt-shaping only, like `gate_command`: nil or
+      # "package" keeps the single implementation package; "workflow" bakes the
+      # Claude "Workflow mode" rule (one `Workflow` call per implementation,
+      # opt-out per issue with the `no-workflow` label) into the body. The
+      # instance must also allow `Workflow` in `agent.claude.allowed_tools`
+      # under `permission_mode: dontAsk`. Re-bake with `make resync-bodies`.
+      field(:delegation_mode, :string)
     end
 
     @spec changeset(%__MODULE__{}, map()) :: Ecto.Changeset.t()
     def changeset(schema, attrs) do
       schema
-      |> cast(attrs, [:url, :path, :base_branch, :gate_command, :worker_notes], empty_values: [])
+      |> cast(attrs, [:url, :path, :base_branch, :gate_command, :worker_notes, :delegation_mode], empty_values: [])
+      |> validate_inclusion(:delegation_mode, ["package", "workflow"])
     end
   end
 

@@ -802,6 +802,16 @@ Fields:
     Symphony MUST NOT interpret it at runtime.
   - Like `base_branch`, both are baked into the body at generation time; operators re-bake
     after editing them (the reference implementation's `make resync-bodies`).
+- `delegation_mode` (string, OPTIONAL: `package` | `workflow`)
+  - Unset or `package`: the Claude body delegates implementation to one worker package (today's
+    behavior). `workflow`: the Claude body makes one `Workflow` call the default implementation
+    path (bounded agent count, verify agent with an enforcing-environment proof rule), with a
+    small-change escape and a per-issue opt-out via the `no-workflow` label (a prompt-time Liquid
+    check on `issue.labels`). Other values MUST be rejected.
+  - Prompt-shaping only, baked and re-baked like `gate_command`; it is front-matter-only (no init
+    flag). Under `permission_mode: dontAsk` the operator MUST also allow `Workflow` in
+    `agent.claude.allowed_tools`. Relies on the sidecar holding a turn open across background
+    tasks (§10.8).
 
 ### 5.4 Prompt Template Contract
 

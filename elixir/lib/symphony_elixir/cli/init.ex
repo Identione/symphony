@@ -760,7 +760,11 @@ defmodule SymphonyElixir.CLI.Init do
       gate_command: gate_command,
       worker_notes: worker_notes,
       repo_gate_command_line: render_repo_gate_command_line(gate_command),
-      repo_worker_notes_block: render_repo_worker_notes_block(worker_notes)
+      repo_worker_notes_block: render_repo_worker_notes_block(worker_notes),
+      # Front-matter-only knob (no init flag): `init` always renders the default
+      # single-package body; set `repo.delegation_mode` by hand and re-bake with
+      # `make resync-bodies`.
+      delegation_mode: nil
     ]
   end
 

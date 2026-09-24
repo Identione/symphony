@@ -147,6 +147,12 @@ raw CLI surface the Makefile rules call.
   reads the notes at runtime. Like `base_branch`, they are baked into the body
   at generation time — after editing them in an instance's front matter, re-bake
   the body with `make resync-bodies` (root Makefile).
+- `repo.delegation_mode: workflow` (front matter only, no init flag) — switches
+  the Claude body's implementation step from one worker package to one
+  multi-agent `Workflow` call (≤ 3 implementation agents + 1 verify agent). A
+  small change may still use one package, and an issue labelled `no-workflow`
+  opts out. Add `Workflow` to `agent.claude.allowed_tools` when the instance runs
+  `permission_mode: dontAsk`, then re-bake with `make resync-bodies`.
 - `--output <PATH>` — workflow output path
 - `--port <PORT>` — enable the Phoenix dashboard. `0` = OS-assigned. Omit
   for no `server:` block at all.

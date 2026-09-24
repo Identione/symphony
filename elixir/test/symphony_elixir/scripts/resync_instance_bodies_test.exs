@@ -44,7 +44,8 @@ defmodule SymphonyElixir.Scripts.ResyncInstanceBodiesTest do
       assigns: [
         base_branch: "develop",
         gate_command: "./scripts/gate.sh --fast",
-        worker_notes: "First rule ({{ issue.identifier }}).\n\nSecond rule."
+        worker_notes: "First rule ({{ issue.identifier }}).\n\nSecond rule.",
+        delegation_mode: nil
       ]
     )
   end
@@ -93,10 +94,26 @@ defmodule SymphonyElixir.Scripts.ResyncInstanceBodiesTest do
 
     File.write!(path, header <> @marker <> " stale\n")
     assert {out, 0} = run([path])
-    assert out =~ ~s(base=nil gate=nil notes=no)
+    assert out =~ ~s(base=nil gate=nil notes=no mode=nil)
     resynced = File.read!(path)
     assert resynced =~ "repository's documented full local quality gate command"
     assert resynced =~ "origin/main"
     refute resynced =~ "symphony/{{ issue.identifier }}"
+  end
+
+  test "repo.delegation_mode: workflow bakes the Workflow mode rule into the body", %{path: path} do
+    header = """
+    ---
+    repo:
+      url: "git@github.com:org/repo.git"
+      delegation_mode: "workflow"
+    ---
+    """
+
+    File.write!(path, header <> @marker <> " stale\n")
+    assert {out, 0} = run([path])
+    assert out =~ ~s(mode="workflow")
+    assert File.read!(path) =~ "Workflow mode"
+    assert {_, 0} = run(["--check", path])
   end
 end
