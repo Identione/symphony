@@ -482,11 +482,24 @@ class SessionState:
 
 
 def emit(event: dict[str, Any], stream=sys.stdout) -> None:
-    """Write a single JSON envelope followed by a newline and flush."""
+    """Write a single JSON envelope followed by a newline and flush.
 
-    stream.write(json.dumps(event, separators=(",", ":")))
-    stream.write("\n")
-    stream.flush()
+    A broken pipe means Symphony already closed the port (the run ended), so
+    nothing can be delivered any more: drop the envelope instead of raising
+    from a still-draining turn task. stdout is pointed at /dev/null so later
+    emits and the interpreter's final flush stay quiet; the stdin EOF that
+    accompanies the closed port ends `_serve`.
+    """
+
+    try:
+        stream.write(json.dumps(event, separators=(",", ":")))
+        stream.write("\n")
+        stream.flush()
+    except BrokenPipeError:
+        if stream is sys.stdout:
+            devnull = os.open(os.devnull, os.O_WRONLY)
+            os.dup2(devnull, sys.stdout.fileno())
+            os.close(devnull)
 
 
 def fold_text(value: Any, *, limit: int = _RENDER_TEXT_LIMIT) -> str:
@@ -566,7 +579,14 @@ def _truncate_tool_response(value: Any, limit: int) -> tuple[Any, bool]:
     if isinstance(value, dict):
         changed = False
         out: dict[Any, Any] = {}
+        is_base64_source = value.get("type") == "base64"
         for key, item in value.items():
+            # Binary payloads (a `Read` of an image/PDF: `file.base64`, or an API
+            # `source: {type: base64, data}` block) must pass through intact —
+            # eliding them corrupts the file and the API rejects the whole turn.
+            if key == "base64" or (is_base64_source and key == "data"):
+                out[key] = item
+                continue
             new_item, item_changed = _truncate_tool_response(item, limit)
             out[key] = new_item
             changed = changed or item_changed
