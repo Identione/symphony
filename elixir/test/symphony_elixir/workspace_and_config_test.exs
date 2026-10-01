@@ -133,6 +133,23 @@ defmodule SymphonyElixir.WorkspaceAndConfigTest do
     assert defaulted.repo.worker_notes == nil
   end
 
+  test "schema accepts repo.delegation_mode package|workflow, defaults it to nil and rejects other values" do
+    for mode <- ["package", "workflow"] do
+      assert {:ok, settings} =
+               Schema.parse(%{repo: %{url: "git@github.com:org/repo.git", delegation_mode: mode}})
+
+      assert settings.repo.delegation_mode == mode
+    end
+
+    assert {:ok, defaulted} = Schema.parse(%{repo: %{url: "git@github.com:org/repo.git"}})
+    assert defaulted.repo.delegation_mode == nil
+
+    assert {:error, {:invalid_workflow_config, message}} =
+             Schema.parse(%{repo: %{url: "git@github.com:org/repo.git", delegation_mode: "swarm"}})
+
+    assert message =~ "repo.delegation_mode"
+  end
+
   test "schema parses repo.base_branch and defaults it to nil" do
     assert {:ok, settings} =
              Schema.parse(%{repo: %{url: "git@github.com:org/repo.git", base_branch: "develop"}})

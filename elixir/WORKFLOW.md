@@ -131,8 +131,8 @@ agent:
     config_dir: ~/.claude
     # model unpinned → CLI/Max default. effort: low|medium|high|xhigh|max
     # (xhigh is Opus > 4.7 -only). Both default via the SDK when unset.
-    # model: claude-opus-4-8
-    # effort: xhigh
+    # model: claude-opus-5-5
+    # effort: medium
     # Per-issue-state overrides, keyed by Linear state name (case-insensitive; an
     # entry wins over the top-level model/effort). Mechanical Merging/land runs
     # don't need the flagship at effort high — most of their output tokens are

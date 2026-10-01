@@ -467,7 +467,7 @@ defmodule SymphonyElixir.CLI.InitTest do
 
     rendered_template_body =
       EEx.eval_string(body_of.(template),
-        assigns: [base_branch: nil, gate_command: nil, worker_notes: nil]
+        assigns: [base_branch: nil, gate_command: nil, worker_notes: nil, delegation_mode: nil]
       )
 
     assert rendered_template_body == body_of.(canonical)

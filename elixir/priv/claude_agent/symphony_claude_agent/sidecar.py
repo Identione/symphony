@@ -112,6 +112,15 @@ _SIDECAR_CLI_ENV: dict[str, str] = {
     "CLAUDE_CODE_THISTLE_GREBE": "default",
 }
 
+# How long to wait for the CLI's auto-started follow-up response once every
+# background task has finished while a ResultMessage is held. The CLI normally
+# wakes within a second of ``task_notification``; this only bounds the case
+# where it never does, so the held turn_end is flushed instead of hanging.
+_BACKGROUND_WAKE_GRACE_S = 120.0
+
+_BACKGROUND_TASK_LOG_SOURCE = "claude_background_tasks"
+_BACKGROUND_TASK_TERMINAL_STATUSES = frozenset({"completed", "failed", "killed", "stopped", "cancelled"})
+
 _TOOL_VISIBILITY_LOG_SOURCE = "claude_tool_visibility"
 _TOOL_VISIBILITY_LOG_LIMIT = 1200
 
@@ -459,6 +468,12 @@ class SessionState:
     # would otherwise lose the upstream reset window. Pinned here so a 429
     # ResultMessage envelope inherits the value the SystemMessage saw first.
     last_api_retry_after_seconds: int | None = None
+    # Background tasks (``Workflow``, backgrounded ``Agent``) in flight, keyed by
+    # task_id → {"tool_use_id", "name", "announced"}. While non-empty, a
+    # ResultMessage is *held* in ``held_turn_ends`` instead of ending the
+    # Symphony turn; see ``_handle_turn``.
+    background_tasks: dict[str, dict[str, Any]] = field(default_factory=dict)
+    held_turn_ends: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -1019,9 +1034,7 @@ async def _handle_turn(state: SessionState, env: dict[str, Any]) -> None:
 
     try:
         await client.query(prompt)
-
-        async for message in client.receive_response():
-            await _forward_message(state, message)
+        await _drain_turn(state, client)
     except Exception as exc:  # pragma: no cover - SDK runtime path
         emit(
             {
@@ -1032,6 +1045,143 @@ async def _handle_turn(state: SessionState, env: dict[str, Any]) -> None:
                 "trace": traceback.format_exc(),
             }
         )
+
+
+async def _drain_turn(state: SessionState, client: Any) -> None:
+    """Forward messages until the Symphony turn is really over.
+
+    A plain turn ends at its ResultMessage, exactly like ``receive_response()``.
+    A turn that launched a background task (the ``Workflow`` tool always
+    backgrounds; ``CLAUDE_CODE_DISABLE_BACKGROUND_TASKS`` does not cover it)
+    gets a ResultMessage while the task still runs — the model has only said
+    "I'll wait". When the task completes the CLI injects ``task_notification``
+    and auto-starts a follow-up response with its own ResultMessage. Stopping
+    at the first ResultMessage would end the turn with the work undone and
+    leave the follow-up unread, so the *next* turn's drain would stop on that
+    stale ResultMessage and every later turn would be off by one. Instead
+    ``_forward_message`` holds the turn_end while tasks are in flight and this
+    loop keeps reading until a ResultMessage arrives with nothing in flight.
+    """
+
+    stream = client.receive_messages().__aiter__()
+    awaiting_wake = False
+    while True:
+        timeout = _BACKGROUND_WAKE_GRACE_S if awaiting_wake else None
+        try:
+            message = await asyncio.wait_for(stream.__anext__(), timeout=timeout)
+        except asyncio.TimeoutError:
+            emit_background_task_log(
+                f"no follow-up response {_BACKGROUND_WAKE_GRACE_S:g}s after background tasks finished; flushing held turn_end"
+            )
+            _flush_held_turn_end(state)
+            return
+        except StopAsyncIteration:
+            _flush_held_turn_end(state)
+            return
+
+        await _forward_message(state, message)
+
+        if _SDK_AVAILABLE and isinstance(message, ResultMessage):
+            if not state.held_turn_ends:
+                return
+            awaiting_wake = not state.background_tasks
+        elif state.held_turn_ends and not state.background_tasks:
+            # Tasks done, turn_end held: bound the wait for the follow-up
+            # until it starts (init/assistant output), then let it run freely —
+            # a long generation is silent without partial streaming.
+            is_task_message = (
+                _SDK_AVAILABLE
+                and isinstance(message, SystemMessage)
+                and getattr(message, "subtype", None) in _BACKGROUND_TASK_SUBTYPES
+            )
+            awaiting_wake = is_task_message
+        else:
+            awaiting_wake = False
+
+
+def emit_background_task_log(message: str) -> None:
+    emit({"type": "log", "level": "info", "source": _BACKGROUND_TASK_LOG_SOURCE, "message": message})
+
+
+def _merge_turn_ends(envelopes: list[dict[str, Any]]) -> dict[str, Any]:
+    merged = dict(envelopes[-1])
+    merged["num_turns"] = sum(int(e.get("num_turns") or 0) for e in envelopes)
+    usage: dict[str, int] = {}
+    for e in envelopes:
+        for key, value in (e.get("usage") or {}).items():
+            usage[key] = usage.get(key, 0) + int(value or 0)
+    merged["usage"] = usage
+    return merged
+
+
+def _flush_held_turn_end(state: SessionState) -> None:
+    if not state.held_turn_ends:
+        return
+    envelope = _merge_turn_ends(state.held_turn_ends)
+    state.held_turn_ends = []
+    envelope["session_id"] = state.session_id
+    emit(envelope)
+
+
+_BACKGROUND_TASK_SUBTYPES = frozenset(
+    {"background_tasks_changed", "task_started", "task_progress", "task_updated", "task_notification"}
+)
+
+
+def _track_background_task(state: SessionState, subtype: str, data: dict[str, Any]) -> None:
+    """Mirror the CLI's background-task set into ``state.background_tasks``.
+
+    Each task is bracketed by ``tool_started``/``tool_finished`` (keyed by the
+    launching ``tool_use_id``) so the orchestrator applies its longer
+    tool-stall window while the task runs silently; ``task_progress`` doubles as
+    a throttled activity keepalive.
+    """
+
+    tasks = state.background_tasks
+
+    def finish(task_id: str) -> None:
+        task = tasks.pop(task_id, None)
+        if task and task["announced"]:
+            emit({"type": "tool_finished", "tool_use_id": task["tool_use_id"], "name": task["name"]})
+
+    if subtype == "background_tasks_changed":
+        listed = [t for t in (data.get("tasks") or []) if isinstance(t, dict) and t.get("task_id")]
+        listed_ids = {t["task_id"] for t in listed}
+        for t in listed:
+            tasks.setdefault(
+                t["task_id"],
+                {"tool_use_id": t["task_id"], "name": t.get("task_type") or "background_task", "announced": False},
+            )
+        for task_id in [tid for tid in tasks if tid not in listed_ids]:
+            finish(task_id)
+        return
+
+    task_id = data.get("task_id")
+    if not task_id:
+        return
+
+    if subtype == "task_started":
+        task = tasks.setdefault(task_id, {"announced": False})
+        task["tool_use_id"] = data.get("tool_use_id") or task_id
+        task["name"] = data.get("task_type") or task.get("name") or "background_task"
+        if not task["announced"]:
+            task["announced"] = True
+            emit({"type": "tool_started", "tool_use_id": task["tool_use_id"], "name": task["name"]})
+        return
+
+    if subtype == "task_progress":
+        now = time.monotonic()
+        if now - state.stream_activity_monotonic >= _STREAM_ACTIVITY_MIN_INTERVAL_S:
+            state.stream_activity_monotonic = now
+            emit({"type": "assistant_delta", "session_id": state.session_id})
+        return
+
+    status = data.get("status")
+    if subtype == "task_updated":
+        patch_status = (data.get("patch") or {}).get("status") if isinstance(data.get("patch"), dict) else None
+        status = status or patch_status
+    if subtype == "task_notification" or status in _BACKGROUND_TASK_TERMINAL_STATUSES:
+        finish(task_id)
 
 
 def _stream_event_text(message: Any) -> str | None:
@@ -1160,6 +1310,9 @@ async def _forward_message(state: SessionState, message: Any) -> None:
             if status is not None:
                 emit_tool_visibility_log(f"mcp_servers init status: {status}")
             return
+        if subtype in _BACKGROUND_TASK_SUBTYPES:
+            _track_background_task(state, subtype, data if isinstance(data, dict) else {})
+            return
         # The Claude CLI subprocess forwards upstream HTTP errors from
         # api.anthropic.com as ``{"type":"system","subtype":"api_error",
         # "error":{"status":401,"headers":{"retry-after":"42"},...}}``.
@@ -1238,6 +1391,9 @@ async def _forward_message(state: SessionState, message: Any) -> None:
                     f"{message_text} retry-after "
                     f"{state.last_api_retry_after_seconds}"
                 )
+            # A terminal error ends the Symphony turn now, even with a
+            # background task in flight; drop any held turn_end with it.
+            state.held_turn_ends = []
             emit(
                 {
                     "type": "error",
@@ -1248,15 +1404,27 @@ async def _forward_message(state: SessionState, message: Any) -> None:
             )
             return
 
-        emit(
-            {
-                "type": "turn_end",
-                "stop_reason": getattr(message, "stop_reason", "end_turn"),
-                "num_turns": getattr(message, "num_turns", 1),
-                "usage": usage_to_envelope(getattr(message, "usage", None)),
-                "session_id": state.session_id,
-            }
-        )
+        turn_end = {
+            "type": "turn_end",
+            "stop_reason": getattr(message, "stop_reason", "end_turn"),
+            "num_turns": getattr(message, "num_turns", 1),
+            "usage": usage_to_envelope(getattr(message, "usage", None)),
+            "session_id": state.session_id,
+        }
+        if state.background_tasks:
+            # The model ended its response while a background task runs; the
+            # CLI will auto-start a follow-up when it completes. Hold this
+            # turn_end so the Symphony turn spans both (see ``_drain_turn``).
+            state.held_turn_ends.append(turn_end)
+            emit_background_task_log(
+                f"holding turn_end: background_tasks={','.join(sorted(state.background_tasks))}"
+            )
+            return
+        if state.held_turn_ends:
+            state.held_turn_ends.append(turn_end)
+            _flush_held_turn_end(state)
+            return
+        emit(turn_end)
         return
 
     if _SDK_AVAILABLE and isinstance(message, AssistantMessage):
