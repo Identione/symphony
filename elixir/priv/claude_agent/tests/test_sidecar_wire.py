@@ -39,6 +39,44 @@ def test_emit_writes_one_json_line() -> None:
     assert json.loads(line) == {"type": "ready"}
 
 
+class _ClosedPipe(io.StringIO):
+    def flush(self) -> None:
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+def test_emit_swallows_broken_pipe() -> None:
+    # Symphony closes the port when a run ends; a turn task that is still
+    # draining (e.g. a held turn_end) must not crash on its last emit.
+    emit({"type": "turn_end"}, stream=_ClosedPipe())
+
+
+def test_sidecar_exits_quietly_when_stdout_reader_is_gone() -> None:
+    # Regression: after the orchestrator closed the port, every later emit raised
+    # BrokenPipeError, `_drive_safe`'s fallback emit raised again, and
+    # symphony.out filled with "Task exception was never retrieved" tracebacks.
+    import subprocess
+
+    read_fd, write_fd = os.pipe()
+    os.close(read_fd)  # nobody will ever read the sidecar's stdout
+    try:
+        proc = subprocess.run(
+            [sys.executable, "-m", "symphony_claude_agent.sidecar"],
+            cwd=os.path.dirname(os.path.dirname(__file__)),
+            env={**os.environ, "SYMPHONY_CLAUDE_AGENT_DRY_RUN": "1"},
+            stdin=subprocess.DEVNULL,
+            stdout=write_fd,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=60,
+        )
+    finally:
+        os.close(write_fd)
+
+    assert proc.returncode == 0
+    assert "BrokenPipeError" not in proc.stderr
+    assert "Exception ignored" not in proc.stderr
+
+
 def test_parse_line_round_trips() -> None:
     assert parse_line('{"type":"turn","prompt":"hello"}') == {
         "type": "turn",
