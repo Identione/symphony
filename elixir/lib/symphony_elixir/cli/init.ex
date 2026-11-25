@@ -942,6 +942,10 @@ defmodule SymphonyElixir.CLI.Init do
         # Per-turn wall clock in ms (default 3600000 = 1 h). Raise it when the
         # target repo's cold compile + full gate does not fit in an hour.
         # turn_timeout_ms: 5400000
+        # Time the turn waits only on background tasks (a Workflow, a backgrounded
+        # Agent) after the model ends its response does not count against
+        # turn_timeout_ms; this caps that wait per turn instead. Default 2 h.
+        # background_timeout_ms: 7200000
         # Keep the Agent tool calls (incl. per-invocation model choice) and
         # child-message metadata in the instance log. Noisy; default false.
         # verbose_logging: false

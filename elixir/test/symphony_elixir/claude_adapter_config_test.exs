@@ -612,4 +612,42 @@ defmodule SymphonyElixir.ClaudeAdapterConfigTest do
       assert Config.active_tool_stall_timeout_ms(settings) == 22_222
     end
   end
+
+  describe "agent.claude.background_timeout_ms" do
+    test "defaults to 2 hours" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      agent: {kind: claude}
+      """
+
+      assert {:ok, settings} = parse(yaml)
+      assert settings.agent.claude.background_timeout_ms == 7_200_000
+    end
+
+    test "reads an explicit value" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      agent:
+        kind: claude
+        claude:
+          background_timeout_ms: 10800000
+      """
+
+      assert {:ok, settings} = parse(yaml)
+      assert settings.agent.claude.background_timeout_ms == 10_800_000
+    end
+
+    test "rejects a non-positive value" do
+      yaml = """
+      tracker: {kind: linear, project_slug: p, api_key: t}
+      agent:
+        kind: claude
+        claude:
+          background_timeout_ms: 0
+      """
+
+      assert {:error, {:invalid_workflow_config, message}} = parse(yaml)
+      assert message =~ "background_timeout_ms"
+    end
+  end
 end

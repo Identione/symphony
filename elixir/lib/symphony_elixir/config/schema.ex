@@ -461,6 +461,12 @@ defmodule SymphonyElixir.Config.Schema do
       field(:effort_by_state, :map, default: %{})
       field(:extra_env, :map, default: %{})
       field(:turn_timeout_ms, :integer, default: 3_600_000)
+      # Once the model ends its response and the turn waits only on background
+      # tasks (a `Workflow`, a backgrounded `Agent`), the sidecar sends
+      # `turn_held`/`turn_resumed` and that wait stops counting against
+      # `turn_timeout_ms`. This caps the wait instead: total held time per
+      # turn, shared by every hold in it. Default 2 h.
+      field(:background_timeout_ms, :integer, default: 7_200_000)
       # Cold sidecar startup (uv → Python interpreter → claude_agent_sdk
       # import → SDK __aenter__) takes ~6 s on a warm cache, more under load.
       # 30 s gives comfortable headroom over that without masking real hangs.
@@ -471,7 +477,8 @@ defmodule SymphonyElixir.Config.Schema do
       # misread it as a hang. `tool_stall_timeout_ms` grants the in-flight
       # window a longer leash (default 30 min); raise it for builds that run
       # longer. Bounded in practice by `turn_timeout_ms` (a tool can't outlive
-      # its turn). Codex needs no analogue — it streams exec output natively.
+      # its turn), or by `background_timeout_ms` for a background task the turn
+      # is held for. Codex needs no analogue — it streams exec output natively.
       field(:tool_stall_timeout_ms, :integer, default: 1_800_000)
       # When set, Symphony scopes Claude auth to this CLAUDE_CONFIG_DIR — both
       # for preflight (looks for `<config_dir>/.credentials.json`) and at run
@@ -522,6 +529,7 @@ defmodule SymphonyElixir.Config.Schema do
           :effort_by_state,
           :extra_env,
           :turn_timeout_ms,
+          :background_timeout_ms,
           :read_timeout_ms,
           :stall_timeout_ms,
           :tool_stall_timeout_ms,
@@ -540,6 +548,7 @@ defmodule SymphonyElixir.Config.Schema do
       |> Schema.validate_state_strings(:model_by_state)
       |> validate_state_efforts(:effort_by_state)
       |> validate_number(:turn_timeout_ms, greater_than: 0)
+      |> validate_number(:background_timeout_ms, greater_than: 0)
       |> validate_number(:read_timeout_ms, greater_than: 0)
       |> validate_number(:stall_timeout_ms, greater_than_or_equal_to: 0)
       |> validate_number(:tool_stall_timeout_ms, greater_than_or_equal_to: 0)
