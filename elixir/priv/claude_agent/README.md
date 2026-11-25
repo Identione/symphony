@@ -28,7 +28,11 @@ Symphony → sidecar:
     `Workflow` (or backgrounded `Agent`) task runs is held, and the CLI's
     auto-started follow-up response is drained into the same turn. The
     emitted `turn_end` sums `num_turns`/`usage` over both. Each task is
-    bracketed by `tool_started`/`tool_finished`.
+    bracketed by `tool_started`/`tool_finished`. The wait itself is
+    bracketed by `turn_held` (when the turn_end is held; carries
+    `background_tasks`) and `turn_resumed` (when the last task finishes, or
+    when the model starts a follow-up response while other tasks still run),
+    so Symphony can pause its `turn_timeout_ms` clock over it.
   - `tool_result` / `permission_response` — round-trip replies for in-process
     MCP tools and `can_use_tool` callbacks (placeholders pending tool wiring).
   - `interrupt` — `await client.interrupt()`.
@@ -37,4 +41,5 @@ Symphony → sidecar:
 Sidecar → Symphony:
 
   - `ready`, `system_init`, `assistant_message`, `tool_call`,
-    `permission_request`, `token_usage`, `turn_end`, `error`, `log`.
+    `tool_started`, `tool_finished`, `permission_request`, `token_usage`,
+    `turn_end`, `turn_held`, `turn_resumed`, `error`, `log`.

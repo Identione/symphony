@@ -378,7 +378,10 @@ defmodule SymphonyElixir.AgentRunner do
            prompt,
            issue,
            on_message: compose_message_handler(adapter, recipient, issue, handler_opts),
-           turn_timeout_ms: Config.active_turn_timeout_ms(settings)
+           turn_timeout_ms: Config.active_turn_timeout_ms(settings),
+           # Claude only (Codex ignores it): cap on the time a turn may wait
+           # on background tasks, which does not count against turn_timeout_ms.
+           background_timeout_ms: settings.agent.claude.background_timeout_ms
          ) do
       {:ok, turn_session} ->
         Logger.info(

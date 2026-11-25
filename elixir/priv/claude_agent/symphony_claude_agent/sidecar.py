@@ -474,6 +474,10 @@ class SessionState:
     # Symphony turn; see ``_handle_turn``.
     background_tasks: dict[str, dict[str, Any]] = field(default_factory=dict)
     held_turn_ends: list[dict[str, Any]] = field(default_factory=list)
+    # True between a ``turn_held`` and its ``turn_resumed``: the model has
+    # ended its response and the turn waits only on background tasks. Symphony
+    # pauses its ``turn_timeout_ms`` clock over that window.
+    turn_paused: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -1052,6 +1056,11 @@ async def _handle_turn(state: SessionState, env: dict[str, Any]) -> None:
         emit({"type": "error", "error": "turn.prompt missing", "category": "claude_sdk_error", "error_code": "invalid_request"})
         return
 
+    # A previous turn that raised mid-hold leaves these set; a stale
+    # ``turn_paused`` would suppress this turn's ``turn_held``.
+    state.held_turn_ends = []
+    state.turn_paused = False
+
     try:
         await client.query(prompt)
         await _drain_turn(state, client)
@@ -1099,6 +1108,12 @@ async def _drain_turn(state: SessionState, client: Any) -> None:
             _flush_held_turn_end(state)
             return
 
+        if state.turn_paused and _is_parent_activity(message):
+            # The CLI started a follow-up response (e.g. one of two tasks
+            # finished): that is model work, back on the turn clock. The next
+            # held ResultMessage pauses it again.
+            _resume_turn(state)
+
         await _forward_message(state, message)
 
         if _SDK_AVAILABLE and isinstance(message, ResultMessage):
@@ -1119,6 +1134,21 @@ async def _drain_turn(state: SessionState, client: Any) -> None:
             awaiting_wake = False
 
 
+def _is_parent_activity(message: Any) -> bool:
+    """True for messages that mean the top-level model is generating: the
+    follow-up response's ``init`` or its own (not a subagent's) output.
+    Background-task bookkeeping and keepalives are not."""
+    if not _SDK_AVAILABLE:
+        return False
+    if getattr(message, "parent_tool_use_id", None):
+        return False
+    if isinstance(message, SystemMessage):
+        return getattr(message, "subtype", None) == "init"
+    if StreamEvent is not None and isinstance(message, StreamEvent):
+        return True
+    return isinstance(message, AssistantMessage)
+
+
 def emit_background_task_log(message: str) -> None:
     emit({"type": "log", "level": "info", "source": _BACKGROUND_TASK_LOG_SOURCE, "message": message})
 
@@ -1134,7 +1164,28 @@ def _merge_turn_ends(envelopes: list[dict[str, Any]]) -> dict[str, Any]:
     return merged
 
 
+def _pause_turn(state: SessionState) -> None:
+    if state.turn_paused:
+        return
+    state.turn_paused = True
+    emit(
+        {
+            "type": "turn_held",
+            "session_id": state.session_id,
+            "background_tasks": sorted(state.background_tasks),
+        }
+    )
+
+
+def _resume_turn(state: SessionState) -> None:
+    if not state.turn_paused:
+        return
+    state.turn_paused = False
+    emit({"type": "turn_resumed", "session_id": state.session_id})
+
+
 def _flush_held_turn_end(state: SessionState) -> None:
+    _resume_turn(state)
     if not state.held_turn_ends:
         return
     envelope = _merge_turn_ends(state.held_turn_ends)
@@ -1332,6 +1383,10 @@ async def _forward_message(state: SessionState, message: Any) -> None:
             return
         if subtype in _BACKGROUND_TASK_SUBTYPES:
             _track_background_task(state, subtype, data if isinstance(data, dict) else {})
+            if state.turn_paused and not state.background_tasks:
+                # Last task done: the CLI now auto-starts the follow-up
+                # response, which is active turn time again.
+                _resume_turn(state)
             return
         # The Claude CLI subprocess forwards upstream HTTP errors from
         # api.anthropic.com as ``{"type":"system","subtype":"api_error",
@@ -1414,6 +1469,7 @@ async def _forward_message(state: SessionState, message: Any) -> None:
             # A terminal error ends the Symphony turn now, even with a
             # background task in flight; drop any held turn_end with it.
             state.held_turn_ends = []
+            state.turn_paused = False
             emit(
                 {
                     "type": "error",
@@ -1439,6 +1495,9 @@ async def _forward_message(state: SessionState, message: Any) -> None:
             emit_background_task_log(
                 f"holding turn_end: background_tasks={','.join(sorted(state.background_tasks))}"
             )
+            # Tell Symphony the turn now waits only on background work, so
+            # that wait does not eat its turn_timeout_ms budget.
+            _pause_turn(state)
             return
         if state.held_turn_ends:
             state.held_turn_ends.append(turn_end)

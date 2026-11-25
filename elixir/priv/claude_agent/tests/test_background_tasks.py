@@ -207,3 +207,147 @@ async def test_error_result_while_task_in_flight_ends_turn_immediately() -> None
 
     assert captured[-1]["type"] == "error"
     assert not [e for e in captured if e["type"] == "turn_end"]
+
+
+@pytest.mark.asyncio
+async def test_held_turn_is_bracketed_by_turn_held_and_turn_resumed() -> None:
+    """Symphony pauses its turn_timeout clock while the turn is held for a
+    background task, so the sidecar must say when the hold starts and when the
+    last task finishes (IDE-1480: an 82-minute Workflow ate a 90-minute turn
+    budget and the coordinator timed out mid-review)."""
+    captured = await _run_turn(FakeClient(WORKFLOW_SEQUENCE))
+
+    order = [e["type"] for e in captured]
+    assert order.count("turn_held") == 1, captured
+    assert order.count("turn_resumed") == 1, captured
+    held = next(e for e in captured if e["type"] == "turn_held")
+    assert held["background_tasks"] == ["wf1"]
+    assert held["session_id"] == "sess-bg"
+    # Held only once the model has ended its response; resumed when the last
+    # task finishes, before the follow-up response and the merged turn_end.
+    assert order.index("tool_started") < order.index("turn_held")
+    assert order.index("turn_held") < order.index("turn_resumed") < order.index("turn_end")
+    follow_up = next(i for i, e in enumerate(captured) if e.get("text") == "FINAL: alpha beta")
+    assert order.index("turn_resumed") < follow_up
+
+
+@pytest.mark.asyncio
+async def test_missing_follow_up_still_resumes_before_flushed_turn_end() -> None:
+    seq = WORKFLOW_SEQUENCE[: WORKFLOW_SEQUENCE.index(_sys("init", session_id="sess-bg"))]
+    client = FakeClient(seq, hang_after=True)
+    with patch.object(sidecar, "_BACKGROUND_WAKE_GRACE_S", 0.05):
+        captured = await _run_turn(client)
+
+    order = [e["type"] for e in captured]
+    assert order.count("turn_held") == 1
+    assert order.index("turn_held") < order.index("turn_resumed") < order.index("turn_end")
+
+
+@pytest.mark.asyncio
+async def test_task_finishing_before_the_response_ends_never_holds() -> None:
+    seq = [
+        _sys("background_tasks_changed", tasks=[TASK]),
+        _sys("task_started", tool_use_id="toolu_wf", **TASK),
+        _sys("background_tasks_changed", tasks=[]),
+        _text("done already"),
+        _result(2),
+    ]
+    captured = await _run_turn(FakeClient(seq))
+
+    order = [e["type"] for e in captured]
+    assert "turn_held" not in order
+    assert "turn_resumed" not in order
+    assert order[-1] == "turn_end"
+
+
+@pytest.mark.asyncio
+async def test_second_hold_in_one_turn_emits_a_second_pair() -> None:
+    task2 = {"task_id": "wf2", "task_type": "local_workflow", "description": "fix"}
+    seq = WORKFLOW_SEQUENCE[:-1] + [
+        _sys("background_tasks_changed", tasks=[task2]),
+        _sys("task_started", tool_use_id="toolu_wf2", **task2),
+        _result(1),
+        _sys("background_tasks_changed", tasks=[]),
+        _sys("init", session_id="sess-bg"),
+        _text("FINAL 2"),
+        _result(1),
+    ]
+    captured = await _run_turn(FakeClient(seq))
+
+    order = [e["type"] for e in captured]
+    pauses = [t for t in order if t in ("turn_held", "turn_resumed")]
+    assert pauses == ["turn_held", "turn_resumed", "turn_held", "turn_resumed"]
+    assert order.count("turn_end") == 1 and order[-1] == "turn_end"
+
+
+@pytest.mark.asyncio
+async def test_follow_up_while_another_task_runs_is_active_time() -> None:
+    """With two tasks in flight, the CLI auto-starts a follow-up when the first
+    one completes. That response is model work, so it must resume the clock,
+    and the next held ResultMessage must pause it again (code-review finding)."""
+    task_b = {"task_id": "agB", "task_type": "local_agent", "description": "side"}
+    seq = [
+        _sys("background_tasks_changed", tasks=[TASK, task_b]),
+        _sys("task_started", tool_use_id="toolu_wf", **TASK),
+        _sys("task_started", tool_use_id="toolu_b", **task_b),
+        _text("both launched; waiting"),
+        _result(1),
+        _sys("background_tasks_changed", tasks=[task_b]),
+        _sys("task_notification", task_id="wf1", tool_use_id="toolu_wf", status="completed"),
+        _sys("init", session_id="sess-bg"),
+        _text("reviewing A while B runs"),
+        _result(1),
+        _sys("background_tasks_changed", tasks=[]),
+        _sys("task_notification", task_id="agB", tool_use_id="toolu_b", status="completed"),
+        _sys("init", session_id="sess-bg"),
+        _text("FINAL"),
+        _result(1),
+    ]
+    captured = await _run_turn(FakeClient(seq))
+
+    marks = [
+        e["type"] if e["type"] in ("turn_held", "turn_resumed", "turn_end") else e.get("text")
+        for e in captured
+        if e["type"] in ("turn_held", "turn_resumed", "turn_end") or e.get("text") in ("reviewing A while B runs", "FINAL")
+    ]
+    assert marks == [
+        "turn_held",
+        "turn_resumed",
+        "reviewing A while B runs",
+        "turn_held",
+        "turn_resumed",
+        "FINAL",
+        "turn_end",
+    ], captured
+
+
+@pytest.mark.asyncio
+async def test_task_progress_during_hold_does_not_resume() -> None:
+    seq = [
+        _sys("background_tasks_changed", tasks=[TASK]),
+        _sys("task_started", tool_use_id="toolu_wf", **TASK),
+        _result(1),
+        _sys("task_progress", task_id="wf1", tool_use_id="toolu_wf", description="A"),
+        _sys("task_updated", task_id="wf1", patch={"status": "running"}),
+    ]
+    captured = await _run_turn(FakeClient(seq))
+
+    order = [e["type"] for e in captured]
+    # Progress keepalives are not model work: the only resume is the flush at
+    # stream end, right before the turn_end.
+    assert order.count("turn_held") == 1
+    assert order.count("turn_resumed") == 1
+    assert order[-2:] == ["turn_resumed", "turn_end"]
+
+
+@pytest.mark.asyncio
+async def test_stale_pause_from_a_failed_turn_does_not_leak_into_the_next() -> None:
+    """A turn that raised mid-hold leaves turn_paused/held_turn_ends set; the
+    next turn must still announce its own hold (code-review finding)."""
+    state = SessionState(session_id="sess-bg", turn_paused=True, held_turn_ends=[{"type": "turn_end"}])
+    captured = await _run_turn(FakeClient(WORKFLOW_SEQUENCE), state)
+
+    order = [e["type"] for e in captured]
+    assert order.count("turn_held") == 1
+    assert order.index("turn_held") < order.index("turn_resumed") < order.index("turn_end")
+    assert captured[-1]["num_turns"] == 6

@@ -147,6 +147,10 @@ agent:
     # Per-turn wall clock in ms (default 3600000 = 1 h). Raise it when the target
     # repo's cold compile + full gate does not fit in an hour.
     # turn_timeout_ms: 5400000
+    # Time the turn waits only on background tasks (a Workflow, a backgrounded
+    # Agent) after the model ends its response does not count against
+    # turn_timeout_ms; this caps that wait per turn instead. Default 7200000 = 2 h.
+    # background_timeout_ms: 7200000
     # Per-call cap (bytes) on native-tool output, shrunk by a PostToolUse hook so
     # it isn't re-paid as cache_read; 0 disables. Default 16384.
     # tool_output_limit: 16384

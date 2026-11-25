@@ -679,6 +679,12 @@ protocol to Symphony shaped like the Codex app-server client.
   - Additional environment variables forwarded to the sidecar process.
 - `turn_timeout_ms` (integer)
   - Default: `3600000` (1 hour).
+  - Counts active turn time only: a background-task hold (`turn_held` .. `turn_resumed`, §10.8)
+    pauses it.
+- `background_timeout_ms` (integer)
+  - Default: `7200000` (2 hours). MUST be `> 0`.
+  - Caps the total time per turn spent in background-task holds (§10.8). On breach the turn
+    fails as `turn_timeout`.
 - `read_timeout_ms` (integer)
   - Default: `5000`.
 - `stall_timeout_ms` (integer)
@@ -1044,7 +1050,10 @@ not require recognizing or validating extension fields unless that extension is 
   default `null` (SDK default, `high`). Reasoning-effort level forwarded to the Claude Agent
   SDK; `xhigh` requires Opus 4.7 and falls back to `high` on other models.
 - `agent.claude.extra_env`: map, default `{}`
-- `agent.claude.turn_timeout_ms`: integer, default `3600000`
+- `agent.claude.turn_timeout_ms`: integer, default `3600000`. Active turn time only; paused while
+  the sidecar holds the turn for background tasks (§10.8).
+- `agent.claude.background_timeout_ms`: integer, default `7200000`. Cap on the total held time per
+  turn; on breach the turn fails as `turn_timeout`.
 - `agent.claude.read_timeout_ms`: integer, default `5000`
 - `agent.claude.stall_timeout_ms`: integer, default `300000`
 - `agent.claude.tool_stall_timeout_ms`: integer, default `1800000`. While a
@@ -1856,7 +1865,8 @@ Sidecar wire protocol (Symphony ↔ sidecar over stdio, line-delimited JSON):
 - Symphony → sidecar: `init`, `turn`, `tool_result`, `permission_response`, `interrupt`,
   `shutdown`.
 - Sidecar → Symphony: `ready`, `system_init`, `assistant_message` (and/or deltas), `tool_call`,
-  `tool_started`, `tool_finished`, `permission_request`, `token_usage`, `turn_end`, `error`, `log`.
+  `tool_started`, `tool_finished`, `permission_request`, `token_usage`, `turn_end`, `turn_held`,
+  `turn_resumed`, `error`, `log`.
 - `tool_started`/`tool_finished` are native-tool lifecycle notifications (from the SDK's
   PreToolUse/PostToolUse hooks) that let the orchestrator apply the longer
   `agent.claude.tool_stall_timeout_ms` window while a tool runs (see §5.3.5 stall detection).
@@ -1917,6 +1927,16 @@ Turn processing:
   the last task finishes, the held `turn_end` is flushed. A terminal-error `ResultMessage` ends the
   turn immediately. Without this, the turn ends with the work undone and the follow-up's stale
   `ResultMessage` ends the next turn early, shifting every later turn by one.
+- When the sidecar holds a `ResultMessage` for in-flight tasks it MUST emit `turn_held` (carrying
+  `background_tasks`, the in-flight task ids). It MUST emit `turn_resumed` when the last task
+  finishes, when the top-level model starts a follow-up response while other tasks still run
+  (its `init` or its own assistant output; task progress keepalives do not count), or when the
+  held `turn_end` is flushed. A turn may hold more than once. For normal agent turns Symphony
+  pauses the `agent.claude.turn_timeout_ms` clock between the two and moves the deadline out by
+  the held time; the held time instead draws on `agent.claude.background_timeout_ms`, shared by
+  every hold in the turn. Turns with their own hard cap (the overseer wind-down turn, the
+  overseer classification turn) do not pause. Otherwise a long `Workflow` consumes the
+  active-turn budget and the coordinator times out while reviewing its result.
 - For each `AssistantMessage` whose underlying message carries a non-`None` `usage` field
   (claude-agent-sdk ≥0.1.49 — *"Preserve per-turn `usage` on `AssistantMessage`"*), the sidecar
   SHOULD also emit a separate `token_usage` envelope carrying that API call's billing
@@ -1982,7 +2002,9 @@ Tool advertisement:
 Timeouts:
 
 - `agent.claude.read_timeout_ms`, `agent.claude.turn_timeout_ms`, and
-  `agent.claude.stall_timeout_ms` mirror the Codex semantics described in §10.5.
+  `agent.claude.stall_timeout_ms` mirror the Codex semantics described in §10.5, except that a
+  background-task hold pauses `turn_timeout_ms` and is bounded by
+  `agent.claude.background_timeout_ms` instead (see Turn processing above).
 
 Logging verbosity:
 

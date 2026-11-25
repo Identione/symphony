@@ -48,6 +48,7 @@ defmodule SymphonyElixir.ClaudeAppServerTest do
     body =
       Enum.map_join(ops, " ; ", fn
         {:print, line} -> ~s(printf '%s\\n' #{escape(line)})
+        {:sleep, seconds} -> "sleep #{seconds}"
         :read -> "IFS= read -r _line"
       end)
 
@@ -569,6 +570,159 @@ defmodule SymphonyElixir.ClaudeAppServerTest do
              AppServer.run_turn(session, "Go", issue(), turn_timeout_ms: 200)
 
     AppServer.stop_session(session)
+  end
+
+  describe "background-task hold (turn_held / turn_resumed)" do
+    # IDE-1480: a Workflow ran 82 of a 90-minute turn budget in the background;
+    # the coordinator woke up with ~40 s left and hit :turn_timeout mid-review.
+    # Time the sidecar spends holding the turn for background tasks must not
+    # count against turn_timeout_ms.
+    test "time between turn_held and turn_resumed does not count against turn_timeout_ms",
+         %{workspace: workspace} do
+      cmd =
+        scripted_ops([
+          {:print, envelope(%{type: "ready"})},
+          :read,
+          :read,
+          {:print, envelope(%{type: "system_init", session_id: "s-hold-1"})},
+          {:print, envelope(%{type: "turn_held", session_id: "s-hold-1", background_tasks: ["wf1"]})},
+          {:sleep, "0.6"},
+          {:print, envelope(%{type: "turn_resumed", session_id: "s-hold-1"})},
+          {:print, envelope(%{type: "turn_end", session_id: "s-hold-1", stop_reason: "end_turn", num_turns: 2, usage: %{}})}
+        ])
+
+      {:ok, session} =
+        AppServer.start_session(workspace, config: %{default_claude_config() | command: cmd})
+
+      assert {:ok, %{session_id: "s-hold-1"}} =
+               AppServer.run_turn(session, "Go", issue(), turn_timeout_ms: 300, background_timeout_ms: 5_000)
+
+      AppServer.stop_session(session)
+    end
+
+    test "active time before and after the hold still counts against turn_timeout_ms",
+         %{workspace: workspace} do
+      cmd =
+        scripted_ops([
+          {:print, envelope(%{type: "ready"})},
+          :read,
+          :read,
+          {:print, envelope(%{type: "system_init", session_id: "s-hold-2"})},
+          {:sleep, "0.2"},
+          {:print, envelope(%{type: "turn_held", session_id: "s-hold-2", background_tasks: ["wf1"]})},
+          {:sleep, "0.3"},
+          {:print, envelope(%{type: "turn_resumed", session_id: "s-hold-2"})},
+          {:sleep, "2"},
+          {:print, envelope(%{type: "turn_end", session_id: "s-hold-2", stop_reason: "end_turn", num_turns: 2, usage: %{}})}
+        ])
+
+      {:ok, session} =
+        AppServer.start_session(workspace, config: %{default_claude_config() | command: cmd})
+
+      {elapsed_us, result} =
+        :timer.tc(fn ->
+          AppServer.run_turn(session, "Go", issue(), turn_timeout_ms: 500, background_timeout_ms: 5_000)
+        end)
+
+      assert {:error, :turn_timeout} = result
+      # 500 ms of active budget + ~300 ms held: the hold extended the deadline
+      # by the held time, not by the full background budget.
+      assert elapsed_us >= 750_000
+      assert elapsed_us < 1_800_000
+
+      AppServer.stop_session(session)
+    end
+
+    # Code-review finding: the wind-down turn (overseer.winddown_timeout_ms)
+    # and the overseer's classification turn pass only turn_timeout_ms; a hold
+    # must not stretch those hard caps to a 2 h background budget.
+    test "without background_timeout_ms a hold still counts against turn_timeout_ms",
+         %{workspace: workspace} do
+      cmd =
+        scripted_ops([
+          {:print, envelope(%{type: "ready"})},
+          :read,
+          :read,
+          {:print, envelope(%{type: "system_init", session_id: "s-hold-5"})},
+          {:print, envelope(%{type: "turn_held", session_id: "s-hold-5", background_tasks: ["wf1"]})},
+          {:sleep, "2"},
+          {:print, envelope(%{type: "turn_resumed", session_id: "s-hold-5"})},
+          {:print, envelope(%{type: "turn_end", session_id: "s-hold-5", stop_reason: "end_turn", num_turns: 1, usage: %{}})}
+        ])
+
+      {:ok, session} =
+        AppServer.start_session(workspace, config: %{default_claude_config() | command: cmd})
+
+      {elapsed_us, result} =
+        :timer.tc(fn -> AppServer.run_turn(session, "Go", issue(), turn_timeout_ms: 300) end)
+
+      assert {:error, :turn_timeout} = result
+      assert elapsed_us < 1_500_000
+
+      AppServer.stop_session(session)
+    end
+
+    test "a hold longer than background_timeout_ms times the turn out", %{workspace: workspace} do
+      cmd =
+        scripted_ops([
+          {:print, envelope(%{type: "ready"})},
+          :read,
+          :read,
+          {:print, envelope(%{type: "system_init", session_id: "s-hold-3"})},
+          {:print, envelope(%{type: "turn_held", session_id: "s-hold-3", background_tasks: ["wf1"]})}
+        ])
+
+      {:ok, session} =
+        AppServer.start_session(workspace, config: %{default_claude_config() | command: cmd})
+
+      log =
+        capture_log(fn ->
+          {elapsed_us, result} =
+            :timer.tc(fn ->
+              AppServer.run_turn(session, "Go", issue(), turn_timeout_ms: 5_000, background_timeout_ms: 300)
+            end)
+
+          assert {:error, :turn_timeout} = result
+          assert elapsed_us < 2_000_000
+        end)
+
+      assert log =~ "Claude background wait exceeded"
+      assert log =~ "issue_identifier=MT-1"
+      assert log =~ "session_id=s-hold-3"
+      assert log =~ "background_tasks=wf1"
+
+      AppServer.stop_session(session)
+    end
+
+    test "the background budget is shared by every hold in one turn", %{workspace: workspace} do
+      cmd =
+        scripted_ops([
+          {:print, envelope(%{type: "ready"})},
+          :read,
+          :read,
+          {:print, envelope(%{type: "system_init", session_id: "s-hold-4"})},
+          {:print, envelope(%{type: "turn_held", session_id: "s-hold-4", background_tasks: ["wf1"]})},
+          {:sleep, "0.3"},
+          {:print, envelope(%{type: "turn_resumed", session_id: "s-hold-4"})},
+          {:print, envelope(%{type: "turn_held", session_id: "s-hold-4", background_tasks: ["wf2"]})},
+          {:sleep, "2"},
+          {:print, envelope(%{type: "turn_resumed", session_id: "s-hold-4"})},
+          {:print, envelope(%{type: "turn_end", session_id: "s-hold-4", stop_reason: "end_turn", num_turns: 2, usage: %{}})}
+        ])
+
+      {:ok, session} =
+        AppServer.start_session(workspace, config: %{default_claude_config() | command: cmd})
+
+      {elapsed_us, result} =
+        :timer.tc(fn ->
+          AppServer.run_turn(session, "Go", issue(), turn_timeout_ms: 5_000, background_timeout_ms: 500)
+        end)
+
+      assert {:error, :turn_timeout} = result
+      assert elapsed_us < 1_500_000
+
+      AppServer.stop_session(session)
+    end
   end
 
   test "run_turn round-trips a tool_call to the configured tool_executor", %{workspace: workspace} do

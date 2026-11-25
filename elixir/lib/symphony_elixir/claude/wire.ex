@@ -22,6 +22,8 @@ defmodule SymphonyElixir.Claude.Wire do
     permission_request
     token_usage
     turn_end
+    turn_held
+    turn_resumed
     error
     log
   )
@@ -97,6 +99,8 @@ defmodule SymphonyElixir.Claude.Wire do
   defp envelope_type_atom("permission_request"), do: :permission_request
   defp envelope_type_atom("token_usage"), do: :token_usage
   defp envelope_type_atom("turn_end"), do: :turn_end
+  defp envelope_type_atom("turn_held"), do: :turn_held
+  defp envelope_type_atom("turn_resumed"), do: :turn_resumed
   defp envelope_type_atom("error"), do: :error
   defp envelope_type_atom("log"), do: :log
 
@@ -118,6 +122,7 @@ defmodule SymphonyElixir.Claude.Wire do
     level
     message
     source
+    background_tasks
   )
 
   defp atomize_known_key(key) when is_binary(key) do

@@ -78,6 +78,11 @@ defmodule SymphonyElixir.Claude.AppServer do
   def run_turn(session, prompt, issue, opts \\ []) do
     on_message = Keyword.get(opts, :on_message, fn _msg -> :ok end)
     turn_timeout_ms = Keyword.get(opts, :turn_timeout_ms, 3_600_000)
+    # nil (the default) keeps holds on the turn clock: callers with a hard cap
+    # (the overseer wind-down turn, the overseer's own classification turn)
+    # must not be stretched by a background budget. AgentRunner's normal
+    # turns pass `agent.claude.background_timeout_ms`.
+    background_timeout_ms = Keyword.get(opts, :background_timeout_ms)
 
     tool_executor =
       Keyword.get(opts, :tool_executor, fn name, input ->
@@ -104,7 +109,13 @@ defmodule SymphonyElixir.Claude.AppServer do
       Logger.info("Claude session started for #{issue_log}#{session_log_suffix(session.session_id)}")
 
       session
-      |> collect_until_terminal(on_message, turn_timeout_ms, issue_log, tool_executor, permission_handler)
+      |> collect_until_terminal(
+        on_message,
+        {turn_timeout_ms, background_timeout_ms},
+        issue_log,
+        tool_executor,
+        permission_handler
+      )
       |> log_run_turn_outcome(issue_log)
     else
       {:error, reason} ->
@@ -428,12 +439,21 @@ defmodule SymphonyElixir.Claude.AppServer do
     end
   end
 
-  defp collect_until_terminal(session, on_message, turn_timeout_ms, issue_log, tool_executor, permission_handler) do
-    deadline = monotonic_ms() + turn_timeout_ms
-
+  # Two clocks bound a turn. `deadline` is the active-time budget
+  # (`turn_timeout_ms`). While the sidecar holds the turn open only for
+  # background tasks (`turn_held` .. `turn_resumed`: the model has ended its
+  # response and waits for a `Workflow`/background `Agent`) that clock is
+  # paused and the wait draws on `background_budget_ms`
+  # (`background_timeout_ms`, shared by every hold in the turn) instead; on
+  # resume `deadline` moves out by the held time. Without a background budget
+  # (nil) holds are not paused at all.
+  defp collect_until_terminal(session, on_message, {turn_timeout_ms, background_timeout_ms}, issue_log, tool_executor, permission_handler) do
     context = %{
       on_message: on_message,
-      deadline: deadline,
+      deadline: monotonic_ms() + turn_timeout_ms,
+      held_since: nil,
+      held_tasks: [],
+      background_budget_ms: background_timeout_ms,
       issue_log: issue_log,
       tool_executor: tool_executor,
       permission_handler: permission_handler
@@ -442,12 +462,15 @@ defmodule SymphonyElixir.Claude.AppServer do
     do_collect(session, context, session.buffer)
   end
 
+  defp active_deadline(%{held_since: nil, deadline: deadline}), do: deadline
+  defp active_deadline(%{held_since: since, background_budget_ms: budget}), do: since + budget
+
   defp do_collect(session, context, buffer) do
-    remaining = max(context.deadline - monotonic_ms(), 0)
+    remaining = max(active_deadline(context) - monotonic_ms(), 0)
     read_timeout_ms = min(session.read_timeout_ms, remaining)
 
     if remaining == 0 do
-      {:error, :turn_timeout, session.session_id}
+      turn_timeout(session, context)
     else
       session.port
       |> receive_one_envelope(buffer, read_timeout_ms)
@@ -458,6 +481,48 @@ defmodule SymphonyElixir.Claude.AppServer do
   defp handle_envelope({:ok, %{type: :turn_end} = env, _leftover}, session, context, _buffer) do
     emit_event(context.on_message, :turn_completed, env, session)
     {:ok, build_turn_result(session, env)}
+  end
+
+  defp handle_envelope(
+         {:ok, %{type: :turn_held} = env, leftover},
+         session,
+         %{held_since: nil, background_budget_ms: budget} = context,
+         _buffer
+       )
+       when is_integer(budget) do
+    now = monotonic_ms()
+    tasks = env |> Map.get(:background_tasks, []) |> List.wrap()
+
+    Logger.info(
+      "Claude turn held for background tasks for #{context.issue_log} session_id=#{session.session_id || "unknown"} " <>
+        "background_tasks=#{Enum.join(tasks, ",")} turn_remaining_ms=#{max(context.deadline - now, 0)} " <>
+        "background_remaining_ms=#{context.background_budget_ms}"
+    )
+
+    emit_event(context.on_message, :turn_held, env, session)
+    do_collect(session, %{context | held_since: now, held_tasks: tasks}, leftover)
+  end
+
+  defp handle_envelope({:ok, %{type: :turn_resumed} = env, leftover}, session, %{held_since: since} = context, _buffer)
+       when is_integer(since) do
+    held_ms = monotonic_ms() - since
+
+    Logger.info(
+      "Claude turn resumed after background tasks for #{context.issue_log} session_id=#{session.session_id || "unknown"} " <>
+        "held_ms=#{held_ms}"
+    )
+
+    emit_event(context.on_message, :turn_resumed, env, session)
+
+    context = %{
+      context
+      | held_since: nil,
+        held_tasks: [],
+        deadline: context.deadline + held_ms,
+        background_budget_ms: max(context.background_budget_ms - held_ms, 0)
+    }
+
+    do_collect(session, context, leftover)
   end
 
   defp handle_envelope({:ok, %{type: :error, error: msg} = env, _leftover}, session, _context, _buffer) do
@@ -527,6 +592,17 @@ defmodule SymphonyElixir.Claude.AppServer do
   defp handle_envelope({:error, reason}, session, _context, _buffer) do
     {:error, reason, session.session_id}
   end
+
+  defp turn_timeout(session, %{held_since: since} = context) when is_integer(since) do
+    Logger.warning(
+      "Claude background wait exceeded for #{context.issue_log} session_id=#{session.session_id || "unknown"} " <>
+        "background_tasks=#{Enum.join(context.held_tasks, ",")}; ending turn as turn_timeout"
+    )
+
+    {:error, :turn_timeout, session.session_id}
+  end
+
+  defp turn_timeout(session, _context), do: {:error, :turn_timeout, session.session_id}
 
   defp to_error_code("context_window_exhausted"), do: :context_window_exhausted
   defp to_error_code("rate_limited"), do: :rate_limited
