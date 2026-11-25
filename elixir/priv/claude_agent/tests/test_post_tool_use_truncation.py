@@ -246,6 +246,17 @@ def test_bash_long_text_stdout_is_still_elided(is_image) -> None:
     assert "Symphony elided" in value["stdout"]
 
 
+# Only the boolean `true` marks an image. A truthy non-boolean (a stringified
+# flag from another serializer, a number) must not lift the cap on `stdout`.
+@pytest.mark.parametrize("is_image", ["false", "true", 1])
+def test_bash_truthy_non_boolean_is_image_does_not_exempt_stdout(is_image) -> None:
+    response = {"stdout": "line\n" * 10_000, "stderr": "", "interrupted": False, "isImage": is_image}
+    value, changed = _truncate_tool_response(response, 16384)
+    assert changed is True
+    assert len(value["stdout"]) < 50_000
+    assert "Symphony elided" in value["stdout"]
+
+
 # Only the CLI's own signals (a binary key, or `isImage: true`) mark a payload
 # as an image. Text that merely *starts* with a data URI is sent to the model as
 # text (the CLI's `^data:([^;]+);base64,(.+)$` parse fails on multi-line text),

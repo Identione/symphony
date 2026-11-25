@@ -584,7 +584,7 @@ def _truncate_tool_response(value: Any, limit: int) -> tuple[Any, bool]:
         changed = False
         out: dict[Any, Any] = {}
         is_base64_source = value.get("type") == "base64"
-        is_image_stdout = bool(value.get("isImage"))
+        is_image_stdout = value.get("isImage") is True
         for key, item in value.items():
             # Binary/image payloads must pass through intact; only the CLI's
             # own markers identify them (never a guess from a string's prefix):
