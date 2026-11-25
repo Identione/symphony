@@ -584,11 +584,24 @@ def _truncate_tool_response(value: Any, limit: int) -> tuple[Any, bool]:
         changed = False
         out: dict[Any, Any] = {}
         is_base64_source = value.get("type") == "base64"
+        is_image_stdout = value.get("isImage") is True
         for key, item in value.items():
-            # Binary payloads (a `Read` of an image/PDF: `file.base64`, or an API
-            # `source: {type: base64, data}` block) must pass through intact —
-            # eliding them corrupts the file and the API rejects the whole turn.
-            if key == "base64" or (is_base64_source and key == "data"):
+            # Binary/image payloads must pass through intact; only the CLI's
+            # own markers identify them (never a guess from a string's prefix):
+            # - a `Read` of an image/PDF (`file.base64`) or an API
+            #   `source: {type: base64, data}` block — eliding these sends a
+            #   corrupt image and the API rejects the whole conversation;
+            # - a notebook `Read`'s output images (`image.image_data`; the CLI
+            #   already stubs a cell's outputs past 10_000 chars, so this only
+            #   bites when `tool_output_limit` is set below that);
+            # - a `Bash` result flagged `isImage: true` (its `stdout` is the
+            #   image data URI) — eliding it breaks the CLI's data-URI parse
+            #   and the image degrades to a wall of base64 text.
+            if (
+                key in ("base64", "image_data")
+                or (is_base64_source and key == "data")
+                or (is_image_stdout and key == "stdout")
+            ):
                 out[key] = item
                 continue
             new_item, item_changed = _truncate_tool_response(item, limit)

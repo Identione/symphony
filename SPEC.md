@@ -673,7 +673,11 @@ protocol to Symphony shaped like the Codex app-server client.
   - Per-call byte cap on native-tool output (e.g. `Read`/`Bash`/`Grep`/`Glob`). The sidecar
     SHOULD register a `PostToolUse` hook that shrinks oversized string leaves of the tool
     response head+tail — preserving the tool's output schema — so a large result is not re-sent
-    as `cache_read` on every subsequent turn. `0` disables the hook.
+    as `cache_read` on every subsequent turn. `0` disables the hook. Binary/image payloads
+    the tool itself marks as such (`Read` image/PDF base64, notebook `image_data`, `Bash`
+    `stdout` when `isImage` is true) MUST pass through unchanged: eliding them corrupts the
+    image (the API rejects the conversation) or loses it to a text fallback. Text leaves are
+    capped whatever their content, including text that merely starts with a data URI.
 - `extra_env` (map)
   - Default: `{}`.
   - Additional environment variables forwarded to the sidecar process.
